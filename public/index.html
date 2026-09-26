@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>实验平台 · 研究团队调试入口</title>
+  <title>实验对话系统 · 入口说明</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%23111213'/%3E%3Ccircle cx='16' cy='16' r='5' fill='%23ffffff'/%3E%3C/svg%3E">
   <style>
     :root {
@@ -111,7 +111,7 @@
 
     .group-grid {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: 1fr;
       gap: 12px;
     }
 
@@ -168,6 +168,54 @@
       color: var(--fg);
     }
 
+    .entry-form {
+      display: flex;
+      gap: 10px;
+      max-width: 540px;
+    }
+
+    .entry-form input {
+      flex: 1;
+      min-width: 0;
+      font: inherit;
+      font-size: 13.5px;
+      color: var(--fg);
+      background: #fafafa;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 11px 14px;
+      outline: none;
+      transition: border-color 0.18s ease;
+    }
+
+    .entry-form input:focus {
+      border-color: #c9c9ce;
+    }
+
+    .entry-form button {
+      font: inherit;
+      font-size: 13px;
+      color: #fff;
+      background: var(--accent);
+      border: 1px solid var(--accent);
+      border-radius: 999px;
+      padding: 10px 20px;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 0.18s ease;
+    }
+
+    .entry-form button:hover {
+      background: var(--accent-hover);
+    }
+
+    .entry-hint {
+      margin: 10px 0 0;
+      font-size: 12.5px;
+      line-height: 1.8;
+      color: var(--muted);
+    }
+
     @keyframes page-in {
       from { opacity: 0; }
       to { opacity: 1; }
@@ -191,26 +239,20 @@
       <span class="brand-name">实验对话系统</span>
     </div>
 
-    <h1>研究团队调试入口</h1>
+    <h1>入口说明</h1>
     <p class="sub">
-      论文复刻固定流程：每个任务依次经历研究2（决策 → 相似度文本 → 评分）与研究3（组别文本 → 再次决策）。
-      点击下方卡片，以随机编号进入对应情景与分组的被试端预览；被试页面不显示组别，所有文本由服务端固定返回。
+      管理者在管理端为每项研究创建一份问卷：命名、确认流程文案、插入研究实验（研究2 / 研究3，可单个或多个混排），
+      生成后自动得到一条专属链接。把链接发给被试，被试按问卷流程依次完成全部实验；
+      数据按提交顺序编号汇总在问卷详情页，支持按实验 / 问题筛选，导出时可选择全部或当前筛选内容。
     </p>
 
     <section class="scenario">
-      <div class="scenario-head"><h2>医疗情景</h2><code>medical</code></div>
+      <div class="scenario-head"><h2>管理端</h2><code>/admin</code></div>
       <div class="group-grid">
-        <a class="link-card" href="#" data-group="medical-control">
+        <a class="link-card" href="/admin">
           <span>
-            <span class="link-title">医疗 · 控制组</span><br>
-            <span class="link-desc">研究3 对照文本（客观描述版本）</span>
-          </span>
-          <span class="arrow">→</span>
-        </a>
-        <a class="link-card" href="#" data-group="medical-treat">
-          <span>
-            <span class="link-title">医疗 · 干预组</span><br>
-            <span class="link-desc">研究3 干预文本（说服方向随单次/多次变化）</span>
+            <span class="link-title">问卷管理</span><br>
+            <span class="link-desc">新建 / 修改问卷 · 复制被试链接 · 查看数据与导出 Excel</span>
           </span>
           <span class="arrow">→</span>
         </a>
@@ -218,80 +260,27 @@
     </section>
 
     <section class="scenario">
-      <div class="scenario-head"><h2>金融情景</h2><code>finance</code></div>
-      <div class="group-grid">
-        <a class="link-card" href="#" data-group="finance-control">
-          <span>
-            <span class="link-title">金融 · 控制组</span><br>
-            <span class="link-desc">研究3 对照文本（客观描述版本）</span>
-          </span>
-          <span class="arrow">→</span>
-        </a>
-        <a class="link-card" href="#" data-group="finance-treat">
-          <span>
-            <span class="link-title">金融 · 干预组</span><br>
-            <span class="link-desc">研究3 干预文本（说服方向随单次/多次变化）</span>
-          </span>
-          <span class="arrow">→</span>
-        </a>
-      </div>
-    </section>
-
-    <section class="scenario">
-      <div class="scenario-head"><h2>内容创作情景</h2><code>creative</code></div>
-      <div class="group-grid">
-        <a class="link-card" href="#" data-group="creative-control">
-          <span>
-            <span class="link-title">内容创作 · 控制组</span><br>
-            <span class="link-desc">研究3 对照文本（客观描述版本）</span>
-          </span>
-          <span class="arrow">→</span>
-        </a>
-        <a class="link-card" href="#" data-group="creative-treat">
-          <span>
-            <span class="link-title">内容创作 · 干预组</span><br>
-            <span class="link-desc">研究3 干预文本（说服方向随单次/多次变化）</span>
-          </span>
-          <span class="arrow">→</span>
-        </a>
-      </div>
-    </section>
-
-    <section class="scenario">
-      <div class="scenario-head"><h2>电商营销情景</h2><code>marketing</code></div>
-      <div class="group-grid">
-        <a class="link-card" href="#" data-group="marketing-control">
-          <span>
-            <span class="link-title">电商营销 · 控制组</span><br>
-            <span class="link-desc">研究3 对照文本（客观描述版本）</span>
-          </span>
-          <span class="arrow">→</span>
-        </a>
-        <a class="link-card" href="#" data-group="marketing-treat">
-          <span>
-            <span class="link-title">电商营销 · 干预组</span><br>
-            <span class="link-desc">研究3 干预文本（说服方向随单次/多次变化）</span>
-          </span>
-          <span class="arrow">→</span>
-        </a>
-      </div>
+      <div class="scenario-head"><h2>被试端</h2><code>/chat?q=问卷短码</code></div>
+      <form class="entry-form" id="entry-form">
+        <input id="entry-code" type="text" placeholder="输入问卷短码（在问卷管理页复制链接）" autocomplete="off">
+        <button type="submit">进入被试端</button>
+      </form>
+      <p class="entry-hint">每位被试使用同一条问卷链接；编号按进入顺序自动分配，无需人工干预。</p>
     </section>
 
     <p class="note">
-      每次点击都会以随机编号创建新的调试会话，可反复走查完整流程。<br>
-      正式被试链接请在管理端「被试链接」页生成后分发；管理端入口：<a href="/admin">/admin</a>
+      被试端出现的每一段文字都逐字来自问卷快照，运行时不做任何生成。<br>
+      正式实验请使用问卷管理页中的链接分发；本页仅用于团队调试与说明。
     </p>
   </div>
 
   <script>
-    // 调试入口：每次点击生成随机 uid，方便反复体验全新会话
-    document.querySelectorAll('.link-card').forEach(function (card) {
-      card.addEventListener('click', function (e) {
-        e.preventDefault();
-        var group = card.getAttribute('data-group');
-        var uid = 'demo-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-        location.href = '/chat?group=' + encodeURIComponent(group) + '&uid=' + encodeURIComponent(uid);
-      });
+    // 调试用：粘贴问卷短码，直接以被试身份进入
+    document.getElementById('entry-form').addEventListener('submit', function (e) {
+      e.preventDefault();
+      var code = document.getElementById('entry-code').value.trim();
+      if (!code) return;
+      location.href = '/chat?q=' + encodeURIComponent(code);
     });
   </script>
 </body>

@@ -14,6 +14,7 @@
         <div class="brand">
           <span class="brand-dot" aria-hidden="true"></span>
           <span class="brand-name">智能决策助手</span>
+          <span id="brand-sub" class="brand-sub hidden"></span>
         </div>
       </div>
     </header>
@@ -35,22 +36,25 @@
     </footer>
   </div>
 
-  <!-- 完成页 -->
-  <div id="done-screen" class="done-screen hidden">
-    <div class="done-card">
-      <div class="done-icon" aria-hidden="true">
-        <svg viewBox="0 0 24 24" fill="none" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M4 12.5l5.5 5.5L20 6.5"></path>
-        </svg>
-      </div>
-      <h2>感谢您的参与</h2>
-      <p>本次实验任务已全部完成。请妥善保存以下完成码：</p>
-      <div class="done-code" id="done-code">------</div>
-      <div class="done-actions">
-        <button id="btn-restart" class="primary-btn" type="button">重新开始</button>
-        <button id="btn-home" class="ghost-btn" type="button">返回首页</button>
-      </div>
-      <p class="done-tip">您可以关闭本页面。</p>
+  <!-- 知情同意页（进入实验前的伦理门槛，勾选后方可开始） -->
+  <div id="consent-screen" class="done-screen gate hidden">
+    <div class="done-card gate-card">
+      <h2>知情同意说明</h2>
+      <div id="consent-text" class="gate-text"></div>
+      <label class="consent-check">
+        <input id="consent-checkbox" type="checkbox">
+        <span>我已阅读上述信息，自愿同意参加本次实验</span>
+      </label>
+      <p id="consent-error" class="gate-error hidden"></p>
+      <button id="btn-consent" class="primary-btn" type="button" disabled>开始实验</button>
+    </div>
+  </div>
+
+  <!-- 结束说明页（实验完成后展示，即最终界面；不再跳转其他页面） -->
+  <div id="debrief-screen" class="done-screen gate hidden">
+    <div class="done-card gate-card">
+      <h2 id="debrief-title">实验说明</h2>
+      <div id="debrief-text" class="gate-text"></div>
     </div>
   </div>
 

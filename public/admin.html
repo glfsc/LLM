@@ -16,7 +16,7 @@
         <span class="brand-name">实验对话系统</span>
       </div>
       <h1>管理端登录</h1>
-      <p class="login-sub">输入管理密码，进入情景空间文本管理与被试链接生成。</p>
+      <p class="login-sub">输入管理密码，进入问卷管理与实验文本维护。</p>
       <form id="login-form" autocomplete="off">
         <input id="login-password" type="password" placeholder="管理密码" autocomplete="current-password">
         <button id="login-btn" class="primary-btn" type="submit">进入管理端</button>
@@ -26,83 +26,178 @@
     </div>
   </div>
 
-  <!-- 管理视图 -->
-  <div id="admin-view" class="admin-view hidden">
-    <header class="topbar">
-      <div class="topbar-inner">
-        <div class="brand">
-          <span class="brand-dot" aria-hidden="true"></span>
-          <span class="brand-name">实验对话系统 · 管理端</span>
-        </div>
+  <!-- 管理视图：左侧边栏 + 右侧内容区 -->
+  <div id="admin-view" class="admin-layout hidden">
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <span class="brand-dot" aria-hidden="true"></span>
+        <span class="brand-name">实验对话系统<br>管理端</span>
+        <button id="btn-sidebar-toggle" class="sidebar-toggle" type="button" title="折叠 / 展开侧边栏" aria-label="折叠或展开侧边栏">‹</button>
+      </div>
+      <nav class="sidebar-nav">
+        <a class="sidebar-item" data-nav="q" href="#/q">
+          <span class="sidebar-item-title">问卷管理</span>
+          <span class="sidebar-item-sub">创建链接 · 数据与导出</span>
+          <span class="sidebar-item-mini">问卷</span>
+        </a>
+        <a class="sidebar-item" data-nav="flow" href="#/flow">
+          <span class="sidebar-item-title">流程页面</span>
+          <span class="sidebar-item-sub">新建问卷的默认文案</span>
+          <span class="sidebar-item-mini">流程</span>
+        </a>
+        <a class="sidebar-item" data-nav="r2" href="#/r2">
+          <span class="sidebar-item-title">研究2 · 策略认可度</span>
+          <span class="sidebar-item-sub">决策 → 匹配文本 → 评分</span>
+          <span class="sidebar-item-mini">研2</span>
+        </a>
+        <a class="sidebar-item" data-nav="r3" href="#/r3">
+          <span class="sidebar-item-title">研究3 · 说服干预</span>
+          <span class="sidebar-item-sub">控制 / 干预组文本</span>
+          <span class="sidebar-item-mini">研3</span>
+        </a>
+      </nav>
+      <div class="sidebar-bottom">
+        <p class="sidebar-tip">一份问卷是一条独立链接与数据空间；被试端出现的每一段文字都逐字来自问卷快照，运行时不做任何生成。</p>
         <button id="btn-logout" class="ghost-btn" type="button">退出登录</button>
       </div>
-    </header>
+    </aside>
 
-    <nav class="tabs">
-      <div class="tabs-inner">
-        <button class="tab active" data-tab="texts" type="button">文本管理</button>
-        <button class="tab" data-tab="links" type="button">被试链接</button>
-      </div>
-    </nav>
-
-    <main class="page">
-      <!-- 情景空间与文本 -->
-      <section id="tab-texts" class="tab-panel">
+    <main class="admin-main">
+      <!-- 问卷管理 · 列表 -->
+      <section id="view-q-list" class="view hidden">
         <div class="panel-head">
           <div>
-            <h2>情景空间与文本</h2>
+            <h2>问卷管理</h2>
             <p class="panel-sub">
-              每个情景是一个独立的空间：情境材料、研究2 相似度文本与评分题、任务清单、
-              以及控制 / 干预两组的研究3 文本。按卡片「保存」后整棵情景即时生效，
-              被试端出现的每一段文字都逐字来自这里，运行时不做任何生成。
+              每份问卷 = 一条通用链接（自动生成）+ 固定组别 + 实验编排，数据按问卷隔离；被试编号按进入顺序自动分配。
+              双击问卷行查看数据；「修改」进入独立编辑页。
             </p>
           </div>
+          <button id="btn-new-questionnaire" class="primary-btn" type="button">+ 新建问卷</button>
         </div>
-        <div id="scenario-list" class="group-list"></div>
+        <div id="q-list" class="q-list"></div>
       </section>
 
-      <!-- 被试链接 -->
-      <section id="tab-links" class="tab-panel hidden">
+      <!-- 问卷管理 · 独立创建 / 编辑页 -->
+      <section id="view-q-editor" class="view hidden">
+        <div class="editor-head">
+          <button id="q-editor-back" class="ghost-btn" type="button">← 返回问卷列表</button>
+          <h2 id="q-editor-title">新建问卷</h2>
+        </div>
+        <div id="q-editor" class="editor-body"></div>
+        <div class="editor-foot">
+          <span id="q-editor-hint" class="editor-foot-hint"></span>
+          <button id="q-editor-save" class="primary-btn" type="button">生成问卷</button>
+        </div>
+      </section>
+
+      <!-- 问卷管理 · 详情（数据页） -->
+      <section id="view-q-detail" class="view hidden">
+        <div class="editor-head">
+          <button id="q-detail-back" class="ghost-btn" type="button">← 返回问卷列表</button>
+          <h2 id="q-detail-title">问卷数据</h2>
+        </div>
+        <div id="q-detail-head" class="q-detail-head"></div>
+        <div id="q-detail-toolbar" class="data-toolbar"></div>
+        <p id="q-detail-summary" class="data-summary"></p>
+        <div id="q-detail-list" class="data-table-wrap"></div>
+      </section>
+
+      <!-- 问卷管理 · 个案详情 -->
+      <section id="view-q-session" class="view hidden">
+        <div class="editor-head">
+          <button id="q-session-back" class="ghost-btn" type="button">← 返回问卷数据</button>
+          <h2 id="q-session-title">被试详情</h2>
+        </div>
+        <div id="q-session" class="editor-body"></div>
+      </section>
+
+      <!-- 研究2 · 情景列表 -->
+      <section id="view-r2-list" class="view hidden">
         <div class="panel-head">
           <div>
-            <h2>被试链接</h2>
+            <h2>研究2 · 策略认可度</h2>
             <p class="panel-sub">
-              每个情景空间含控制 / 干预两条独立链接，被试通过链接进入后由系统自动呈现对应文本（页面不显示组别）。
-              链接中的 uid 建议与被试问卷编号保持一致，便于后续将作答数据与问卷数据一一对应。
+              每个情景是一个独立空间：情境材料、单次/多次提问、研究2 匹配文本与评分题。
+              保存后整棵情景即时生效，被试端出现的每一段文字都逐字来自这里。
+            </p>
+          </div>
+          <button id="btn-new-scenario" class="primary-btn" type="button">+ 新增情景</button>
+        </div>
+        <div id="r2-list" class="scenario-rows"></div>
+      </section>
+
+      <!-- 研究2 · 独立编辑页 -->
+      <section id="view-r2-editor" class="view hidden">
+        <div class="editor-head">
+          <button id="r2-editor-back" class="ghost-btn" type="button">← 返回情景列表</button>
+          <h2 id="r2-editor-title">研究2 情景编辑</h2>
+        </div>
+        <div id="r2-editor" class="editor-body"></div>
+        <div class="editor-foot">
+          <span id="r2-editor-hint" class="editor-foot-hint"></span>
+          <button id="r2-editor-save" class="primary-btn" type="button">保存该情景</button>
+        </div>
+      </section>
+
+      <!-- 研究3 · 情景列表 -->
+      <section id="view-r3-list" class="view hidden">
+        <div class="panel-head">
+          <div>
+            <h2>研究3 · 说服干预</h2>
+            <p class="panel-sub">
+              每个情景含控制 / 干预两组文本：控制组为客观描述，干预组为说服文本。
+              组别文本可从对应研究2 匹配文本一键复用后微调。
             </p>
           </div>
         </div>
+        <div id="r3-list" class="scenario-rows"></div>
+      </section>
 
-        <div id="link-cards" class="link-cards"></div>
+      <!-- 研究3 · 独立编辑页 -->
+      <section id="view-r3-editor" class="view hidden">
+        <div class="editor-head">
+          <button id="r3-editor-back" class="ghost-btn" type="button">← 返回情景列表</button>
+          <h2 id="r3-editor-title">研究3 情景编辑</h2>
+        </div>
+        <div id="r3-editor" class="editor-body"></div>
+        <div class="editor-foot">
+          <span id="r3-editor-hint" class="editor-foot-hint"></span>
+          <button id="r3-editor-save" class="primary-btn" type="button">保存该情景</button>
+        </div>
+      </section>
 
-        <div class="batch-card">
-          <h3>批量生成编号链接</h3>
-          <p class="batch-sub">按编号区间批量生成，便于分发到多份问卷或招募渠道。</p>
-          <div class="batch-form">
-            <label class="field batch-field">
-              <span>分组</span>
-              <select id="batch-group"></select>
-            </label>
-            <label class="field batch-field">
-              <span>起始编号</span>
-              <input id="batch-start" value="1001" inputmode="numeric" autocomplete="off">
-            </label>
-            <label class="field batch-field">
-              <span>数量</span>
-              <input id="batch-count" value="10" inputmode="numeric" autocomplete="off">
-            </label>
-            <button id="btn-batch" class="primary-btn" type="button">生成链接</button>
+      <!-- 流程页面：全局文案与伦理说明（新建问卷的默认内容） -->
+      <section id="view-flow" class="view hidden">
+        <div class="panel-head">
+          <div>
+            <h2>流程页面</h2>
+            <p class="panel-sub">
+              这里的内容是<b>新建问卷时的默认文案</b>：欢迎语、任务衔接语、结束语，以及知情同意与结束说明两个伦理页面。
+              每份问卷创建后拥有自己的快照，可在问卷编辑页自定义或删除，互不影响。
+            </p>
           </div>
-          <div id="batch-result" class="batch-result hidden">
-            <textarea id="batch-output" rows="8" readonly spellcheck="false"></textarea>
-            <div class="batch-actions">
-              <span id="batch-count-label" class="batch-count-label"></span>
-              <button id="btn-copy-batch" class="ghost-btn" type="button">复制全部链接</button>
-            </div>
-          </div>
+        </div>
+        <div id="flow-form" class="editor-body"></div>
+        <div class="editor-foot">
+          <span id="flow-hint" class="editor-foot-hint"></span>
+          <button id="flow-save" class="primary-btn" type="button">保存默认文案</button>
         </div>
       </section>
     </main>
+  </div>
+
+  <!-- 新建 / 复制情景弹窗 -->
+  <div id="modal" class="modal-mask hidden">
+    <div class="modal-card">
+      <h3 id="modal-title">新增情景</h3>
+      <div id="modal-body" class="modal-body"></div>
+      <p id="modal-error" class="modal-error hidden"></p>
+      <div class="modal-actions">
+        <button id="modal-cancel" class="ghost-btn" type="button">取消</button>
+        <button id="modal-confirm" class="primary-btn" type="button">创建</button>
+      </div>
+    </div>
   </div>
 
   <div id="toast" class="toast hidden" role="status"></div>

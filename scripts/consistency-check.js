@@ -1,30 +1,24 @@
-// 一致性自检（论文复刻流程：研究2 + 研究3）
+// 一致性自检（问卷化流程：为问卷插入研究2 / 研究3 实验编排）
 // 验证目标：
-//   1) 同一情景同一组的两个会话，按相同作答序列走完全流程后，AI 消息序列逐字一致
-//   2) 控制组与干预组在同一作答序列下：除"研究3 组别文本"外其余消息逐字一致，组别文本必须不同
-//   3) 研究2 匹配文本随决策方向变化：同组内选 A 与选 B 会话在该步文本不同
-//   4) 落库正确：responses 的 value/phase/task_index/play_count/时间戳（shown_at = answered_at − elapsed_ms）、
-//      messages 全量入库且顺序与接口返回一致；uid 幂等重进返回已完成会话
+//   1) 同一问卷内，相同作答序列的两个会话，AI 消息序列逐字一致
+//   2) 控制组 / 干预组两份问卷（相同实验编排、相同作答序列）：除研究3 组别文本外其余消息逐字一致
+//   3) 研究2 匹配文本随决策方向变化：仅决策①换向时，仅对应匹配文本不同
+//   4) 落库正确：responses 的 value/phase/task_index/play_count/experiment_sort/时间戳
+//      （shown_at = answered_at − elapsed_ms）、messages 全量入库且与接口返回一致
+//   5) 问卷数据页接口（编号按进入顺序）与 xlsx 导出可用
 // 用法：先启动服务（npm start），再执行：node scripts/consistency-check.js
+// 说明：脚本会创建两份「自检问卷·控制组 / 干预组」跑完全流程校验，结束后自动删除，不留数据。
 'use strict';
 
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 
 const BASE = process.env.BASE || 'http://localhost:3000';
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
 const DB_FILE = path.join(__dirname, '..', 'data.db');
-const SCENARIOS = ['medical', 'finance', 'creative', 'marketing'];
 
-// 每任务 3 个作答步骤（r2_choice → r2_rating → r3_choice），默认任务清单 [单次, 多次] 共 6 步
-const ANSWER_SEQUENCE = [1, 5, 4, 2, 6, 3];
-const EXPECTED_PHASES = [
-  'r2_choice', 'r2_rating', 'r3_choice',
-  'r2_choice', 'r2_rating', 'r3_choice'
-];
-const EXPECTED_TASK_INDEX = [0, 0, 0, 1, 1, 1];
-const EXPECTED_PLAY_COUNT = [1, 1, 1, 100, 100, 100];
-// 组别文本（r3）在 AI 消息序列中的位置：welcome、context 之后，每任务第 2 条生成消息
-const r3MessageIndices = [3, 6];
+const Q_NAME_CONTROL = '自检问卷·控制组';
+const Q_NAME_TREAT = '自检问卷·干预组';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -39,16 +33,63 @@ async function request(route, options = {}) {
   return data;
 }
 
-function uniqueUid(groupId, tag) {
-  return `selfcheck-${groupId}-${tag}-${Date.now().toString(36)}-${Math.random()
-    .toString(36)
-    .slice(2, 6)}`;
+let adminToken = '';
+
+async function admin(route, options = {}) {
+  const headers = { Authorization: `Bearer ${adminToken}` };
+  if (options.body) headers['Content-Type'] = 'application/json';
+  const res = await fetch(BASE + route, {
+    method: options.body ? 'POST' : 'GET',
+    headers,
+    body: options.body ? JSON.stringify(options.body) : undefined
+  });
+  const contentType = res.headers.get('content-type') || '';
+  if (options.raw) {
+    if (!res.ok) throw new Error(`${route} -> ${res.status}`);
+    return { res, buffer: Buffer.from(await res.arrayBuffer()) };
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`${route} -> ${res.status} ${JSON.stringify(data)}`);
+  return data;
+}
+
+/* ---------------------------------------------------------------- 会话驱动 */
+
+// 实验编排展开为作答序列：研究2 段每任务 2 步（决策① → 评分），研究3 段每任务 2 步（基线决策 → 再决策）
+function buildAnswers(expDefs) {
+  const answers = [];
+  expDefs.forEach((exp) => {
+    exp.tasks.forEach((playCount, taskIndex) => {
+      if (exp.kind === 'r2') {
+        answers.push(taskIndex % 2 === 0 ? 1 : 2, taskIndex % 2 === 0 ? 5 : 6);
+      } else {
+        answers.push(taskIndex % 2 === 0 ? 2 : 1, taskIndex % 2 === 0 ? 4 : 3);
+      }
+    });
+  });
+  return answers;
+}
+
+function expectedShape(expDefs) {
+  const phases = [];
+  const taskIndex = [];
+  const playCount = [];
+  const experimentSort = [];
+  expDefs.forEach((exp, expIndex) => {
+    exp.tasks.forEach((pc, tIndex) => {
+      const pair = exp.kind === 'r2' ? ['r2_choice', 'r2_rating'] : ['r3_base', 'r3_choice'];
+      phases.push(...pair);
+      taskIndex.push(tIndex, tIndex);
+      playCount.push(pc, pc);
+      experimentSort.push(expIndex + 1, expIndex + 1);
+    });
+  });
+  return { phases, taskIndex, playCount, experimentSort };
 }
 
 // 按固定作答序列走完整个流程，收集消息序列与逐步状态
-async function runSession(groupId, tag, answers) {
-  const uid = uniqueUid(groupId, tag);
-  const created = await request('/api/session', { body: { group: groupId, uid } });
+async function runSession(code, answers) {
+  const created = await request('/api/session', { body: { q: code } });
 
   const aiSequence = created.messages.map((m) => m.content);
   const messageSequence = created.messages.map((m) => ({ role: m.role, content: m.content }));
@@ -56,7 +97,7 @@ async function runSession(groupId, tag, answers) {
 
   let action = created.action;
   for (let i = 0; i < answers.length; i += 1) {
-    if (!action) throw new Error(`${groupId}: 第 ${i + 1} 步缺少待作答操作`);
+    if (!action) throw new Error(`第 ${i + 1} 步缺少待作答操作`);
     const elapsedMs = 1600 + i * 250;
     const res = await request('/api/step', {
       body: { sessionId: created.session.id, value: answers[i], elapsedMs }
@@ -70,62 +111,38 @@ async function runSession(groupId, tag, answers) {
     action = res.action;
   }
 
-  return { uid, sessionId: created.session.id, firstAction: created.action, aiSequence, messageSequence, steps, finalSession: steps[steps.length - 1].session };
+  return {
+    sessionId: created.session.id,
+    seq: created.session.seq,
+    aiSequence,
+    messageSequence,
+    steps,
+    finalSession: steps[steps.length - 1].session
+  };
 }
 
-// 逐步状态机结构校验：决策/评分类型轮换、结束后 action 为空、会话完成
-function checkFlow(groupId, run) {
+// 逐步状态机结构校验：操作类型按步骤展开轮换、结束后 action 为空、会话完成
+function checkFlow(run, phases) {
   const errors = [];
-  if (run.firstAction?.type !== 'choice') errors.push('首个操作应为决策');
-  const expectedNext = ['rating', 'choice', 'choice', 'rating', 'choice', null];
+  if (run.steps[0].action?.phase !== phases[0]) {
+    errors.push(`首个待作答阶段应为 ${phases[0]}，实际 ${run.steps[0].action?.phase}`);
+  }
+  const expectedNext = phases.slice(1).map((p) => (p === 'r2_rating' ? 'rating' : 'choice')).concat([null]);
   run.steps.forEach((s, i) => {
     const type = s.next ? s.next.type : null;
     if (type !== expectedNext[i]) errors.push(`第 ${i + 1} 步后的操作类型应为 ${expectedNext[i]}，实际 ${type}`);
   });
   if (run.finalSession.status !== 'completed') errors.push('流程结束会话状态应为 completed');
-  if (!run.finalSession.code) errors.push('流程结束应生成完成码');
-  if (errors.length) throw new Error(`${groupId}: ${errors.join('；')}`);
+  if (errors.length) throw new Error(errors.join('；'));
 }
 
-async function checkScenario(scenario) {
-  const controlA = await runSession(`${scenario}-control`, 'a', ANSWER_SEQUENCE);
-  const controlB = await runSession(`${scenario}-control`, 'b', ANSWER_SEQUENCE);
-  const treatA = await runSession(`${scenario}-treat`, 'a', ANSWER_SEQUENCE);
-  const treatB = await runSession(`${scenario}-treat`, 'b', ANSWER_SEQUENCE);
-  // 方向对照：仅第一步决策换向（选 B），其余相同
-  const flipped = [4, 5, 4, 2, 6, 3];
-  const controlFlip = await runSession(`${scenario}-control`, 'f', flipped);
+const sameSeq = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
 
-  checkFlow(`${scenario}-control`, controlA);
-  checkFlow(`${scenario}-treat`, treatA);
-
-  const sameSeq = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
-  const sameGroupAB = sameSeq(controlA.aiSequence, controlB.aiSequence) && sameSeq(treatA.aiSequence, treatB.aiSequence);
-
-  const findDiffIndices = (a, b) => {
-    const out = [];
-    const len = Math.min(a.length, b.length);
-    for (let i = 0; i < len; i += 1) if (a[i] !== b[i]) out.push(i);
-    return out;
-  };
-  const groupDiff = findDiffIndices(controlA.aiSequence, treatA.aiSequence);
-  const groupsAsExpected =
-    controlA.aiSequence.length === treatA.aiSequence.length &&
-    groupDiff.length === r3MessageIndices.length &&
-    groupDiff.every((idx, k) => idx === r3MessageIndices[k]);
-
-  const dirDiff = findDiffIndices(controlA.aiSequence, controlFlip.aiSequence);
-  const directionAsExpected = dirDiff.length === 1 && dirDiff[0] === 2;
-
-  return {
-    scenario,
-    sessions: { controlA, controlB, treatA, treatB, controlFlip },
-    sameGroupAB,
-    groupsAsExpected,
-    groupDiff,
-    directionAsExpected,
-    dirDiff
-  };
+function findDiffIndices(a, b) {
+  const out = [];
+  const len = Math.min(a.length, b.length);
+  for (let i = 0; i < len; i += 1) if (a[i] !== b[i]) out.push(i);
+  return out;
 }
 
 /* ---------------------------------------------------------------- 落库校验 */
@@ -153,22 +170,26 @@ function makeQuery(db) {
   };
 }
 
-async function checkDb(account) {
+async function checkDb(account, expected, code) {
   const db = openDbReadOnly();
   const all = makeQuery(db);
   const problems = [];
 
-  // —— responses：值与时间戳
+  // —— responses：值 / 阶段 / 任务 / 实验段 / 时间戳
   const rows = await all('SELECT * FROM responses WHERE session_id = ? ORDER BY id ASC', [account.sessionId]);
-  if (rows.length !== ANSWER_SEQUENCE.length) {
-    problems.push(`responses 数量应为 ${ANSWER_SEQUENCE.length}，实际 ${rows.length}`);
+  if (rows.length !== expected.answers.length) {
+    problems.push(`responses 数量应为 ${expected.answers.length}，实际 ${rows.length}`);
   } else {
     rows.forEach((row, i) => {
       const no = `第 ${i + 1} 条 response`;
-      if (Number(row.value) !== ANSWER_SEQUENCE[i]) problems.push(`${no} value 应为 ${ANSWER_SEQUENCE[i]}，实际 ${row.value}`);
-      if (row.phase !== EXPECTED_PHASES[i]) problems.push(`${no} phase 应为 ${EXPECTED_PHASES[i]}，实际 ${row.phase}`);
-      if (Number(row.task_index) !== EXPECTED_TASK_INDEX[i]) problems.push(`${no} task_index 应为 ${EXPECTED_TASK_INDEX[i]}，实际 ${row.task_index}`);
-      if (Number(row.play_count) !== EXPECTED_PLAY_COUNT[i]) problems.push(`${no} play_count 应为 ${EXPECTED_PLAY_COUNT[i]}，实际 ${row.play_count}`);
+      if (Number(row.value) !== expected.answers[i]) problems.push(`${no} value 应为 ${expected.answers[i]}，实际 ${row.value}`);
+      if (row.phase !== expected.phases[i]) problems.push(`${no} phase 应为 ${expected.phases[i]}，实际 ${row.phase}`);
+      if (Number(row.task_index) !== expected.taskIndex[i]) problems.push(`${no} task_index 应为 ${expected.taskIndex[i]}，实际 ${row.task_index}`);
+      if (Number(row.play_count) !== expected.playCount[i]) problems.push(`${no} play_count 应为 ${expected.playCount[i]}，实际 ${row.play_count}`);
+      if (Number(row.experiment_sort) !== expected.experimentSort[i]) {
+        problems.push(`${no} experiment_sort 应为 ${expected.experimentSort[i]}，实际 ${row.experiment_sort}`);
+      }
+      if (row.questionnaire_id !== code) problems.push(`${no} questionnaire_id 应为 ${code}，实际 ${row.questionnaire_id}`);
       if (!row.option_label) problems.push(`${no} option_label 为空`);
       if (row.shown_at && row.answered_at) {
         const diff = new Date(row.answered_at).getTime() - new Date(row.shown_at).getTime();
@@ -208,54 +229,170 @@ async function main() {
     console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}${extra ? `  -> ${extra}` : ''}`);
   };
 
-  for (const scenario of SCENARIOS) {
-    console.log(`\n[${scenario}]`);
-    let result;
-    try {
-      result = await checkScenario(scenario);
-    } catch (err) {
-      allPass = false;
-      console.log(`  FAIL  流程执行异常 -> ${err.message}`);
-      continue;
-    }
+  // 0) 登录管理端，读取一个情景（优先 medical）作为实验材料
+  const login = await request('/api/admin/login', { body: { password: ADMIN_PASSWORD } });
+  adminToken = login.token;
 
-    check('组内两会话 AI 消息逐字一致', result.sameGroupAB);
-    check(
-      '控制/干预组仅研究3文本不同',
-      result.groupsAsExpected,
-      `差异位置 [${result.groupDiff.join(', ')}]（期望 [${r3MessageIndices.join(', ')}]）`
+  const scenarioList = await admin('/api/admin/scenarios');
+  const scenario = scenarioList.scenarios.find((s) => s.id === 'medical') || scenarioList.scenarios[0];
+  if (!scenario) throw new Error('没有可用情景，请先在管理端创建情景');
+  const groups = scenario.groups || [];
+  const controlGroup = groups.find((g) => g.role === 'control') || groups[0];
+  const treatGroup = groups.find((g) => g.role === 'treat') || groups[1];
+  const groupText = (group, playCount) => (Number(playCount) === 1 ? group.r3Once : group.r3Multi);
+  console.log(`使用情景：${scenario.name}（${scenario.id}），任务清单 [${scenario.tasks.join(', ')}]`);
+
+  // 1) 清理旧的同名自检问卷（避免重复运行堆积）
+  const existing = await admin('/api/admin/questionnaires');
+  for (const q of existing.questionnaires) {
+    if (q.name === Q_NAME_CONTROL || q.name === Q_NAME_TREAT) {
+      await admin('/api/admin/questionnaire/delete', { body: { id: q.id, force: true } });
+      console.log(`已清理旧问卷：${q.name}`);
+    }
+  }
+
+  // 2) 创建控制组 / 干预组两份问卷（相同实验编排；流程文案留空，消息只由材料与文本构成）
+  const experiments = [
+    { kind: 'r2', scenarioId: scenario.id },
+    { kind: 'r3', scenarioId: scenario.id }
+  ];
+  const controlQ = (
+    await admin('/api/admin/questionnaire/create', {
+      body: { name: Q_NAME_CONTROL, groupRole: 'control', flow: {}, experiments }
+    })
+  ).questionnaire;
+  const treatQ = (
+    await admin('/api/admin/questionnaire/create', {
+      body: { name: Q_NAME_TREAT, groupRole: 'treat', flow: {}, experiments }
+    })
+  ).questionnaire;
+
+  const expDefs = [
+    { kind: 'r2', tasks: scenario.tasks },
+    { kind: 'r3', tasks: scenario.tasks }
+  ];
+  const answers = buildAnswers(expDefs);
+  const shape = expectedShape(expDefs);
+  const expected = { answers, ...shape };
+
+  // 3) 运行业务会话
+  console.log('\n[流程与时序]');
+  const controlA = await runSession(controlQ.id, answers);
+  const controlB = await runSession(controlQ.id, answers);
+  const treatA = await runSession(treatQ.id, answers);
+  checkFlow(controlA, shape.phases);
+  checkFlow(treatA, shape.phases);
+  check('流程状态机（8 步：决策→评分×2 + 基线→再决策×2）', true);
+
+  check('同问卷两会话 AI 消息逐字一致', sameSeq(controlA.aiSequence, controlB.aiSequence));
+
+  // 组别对照：仅研究3 组别文本不同
+  const groupDiff = findDiffIndices(controlA.aiSequence, treatA.aiSequence);
+  const controlTexts = scenario.tasks.map((pc) => groupText(controlGroup, pc));
+  const treatTexts = scenario.tasks.map((pc) => groupText(treatGroup, pc));
+  const groupsAsExpected =
+    controlA.aiSequence.length === treatA.aiSequence.length &&
+    groupDiff.length === scenario.tasks.length &&
+    groupDiff.every(
+      (idx, k) => controlA.aiSequence[idx] === controlTexts[k] && treatA.aiSequence[idx] === treatTexts[k]
     );
-    check('研究2匹配文本随决策方向变化', result.directionAsExpected, `差异位置 [${result.dirDiff.join(', ')}]（期望 [2]）`);
+  check(
+    '控制/干预组仅研究3文本不同',
+    groupsAsExpected,
+    `差异位置 [${groupDiff.join(', ')}]（期望 ${scenario.tasks.length} 处）`
+  );
+  if (groupsAsExpected) {
+    console.log(`  · 控制组研究3文本：${clip(controlTexts[0])}`);
+    console.log(`  · 干预组研究3文本：${clip(treatTexts[0])}`);
+  }
 
-    if (result.groupsAsExpected) {
-      const c = result.sessions.controlA.aiSequence;
-      const t = result.sessions.treatA.aiSequence;
-      console.log(`  · 控制组研究3文本：${clip(c[r3MessageIndices[0]])}`);
-      console.log(`  · 干预组研究3文本：${clip(t[r3MessageIndices[0]])}`);
-    }
+  // 方向对照：仅决策①换向（1 → 4）
+  const flipped = [...answers];
+  flipped[0] = answers[0] === 1 ? 4 : 1;
+  const controlFlip = await runSession(controlQ.id, flipped);
+  const dirDiff = findDiffIndices(controlA.aiSequence, controlFlip.aiSequence);
+  const expectedMatch = flipped[0] <= 2 ? scenario.r2OnceA : scenario.r2OnceB;
+  const directionAsExpected =
+    dirDiff.length === 1 &&
+    controlA.aiSequence[dirDiff[0]] === scenario.r2OnceA &&
+    controlFlip.aiSequence[dirDiff[0]] === expectedMatch;
+  check('研究2匹配文本随决策方向变化', directionAsExpected, `差异位置 [${dirDiff.join(', ')}]（期望 1 处）`);
 
-    try {
-      const dbInfo = await checkDb(result.sessions.controlA);
-      check('responses 值/阶段/时间戳落库正确', true, `${dbInfo.responseCount} 条`);
-      check('messages 全量入库且顺序一致', true, `${dbInfo.messageCount} 条`);
-    } catch (err) {
-      check('responses/messages 落库校验', false, err.message);
-    }
+  // 4) 落库校验
+  try {
+    const dbInfo = await checkDb(controlA, expected, controlQ.id);
+    check('responses 值/阶段/实验段/时间戳落库正确', true, `${dbInfo.responseCount} 条`);
+    check('messages 全量入库且顺序一致', true, `${dbInfo.messageCount} 条`);
+  } catch (err) {
+    check('responses/messages 落库校验', false, err.message);
+  }
 
-    // uid 幂等：同一 uid 重新进入应返回已完成会话
-    try {
-      const reopen = await request('/api/session', {
-        body: { group: `${scenario}-control`, uid: result.sessions.controlA.uid }
-      });
-      check(
-        'uid 幂等重进返回已完成会话',
-        reopen.session.id === result.sessions.controlA.sessionId &&
-          reopen.session.status === 'completed' &&
-          reopen.action === null
-      );
-    } catch (err) {
-      check('uid 幂等重进', false, err.message);
-    }
+  // 5) 问卷数据页接口：行级作答视图 + 实验 / 问题筛选
+  try {
+    const list = await admin(`/api/admin/questionnaire/sessions?id=${controlQ.id}`);
+    const seqs = [...new Set(list.rows.map((r) => r.seq))].sort((a, b) => a - b);
+    const idsIncluded = [controlA, controlB, controlFlip].every((r) =>
+      list.rows.some((row) => row.sessionId === r.sessionId)
+    );
+    check(
+      '数据页接口：行级作答 + 编号按进入顺序 1 起连续',
+      idsIncluded &&
+        list.rowCount === 24 &&
+        list.sessionCount === 3 &&
+        seqs.length === 3 &&
+        seqs.every((n, i) => n === i + 1),
+      `${list.rowCount} 条作答 / ${list.sessionCount} 位被试，编号 [${seqs.join(', ')}]`
+    );
+    check(
+      '数据页接口：行字段完整（实验 / 问题 / 作答值 / 时间）',
+      list.rows.every(
+        (r) => r.experimentSort && r.phaseLabel && r.phase && r.answeredAt != null && r.value != null && r.optionLabel
+      ),
+      clip(`${list.rows[0]?.experimentSort}. ${list.rows[0]?.phaseLabel} = ${list.rows[0]?.value}`)
+    );
+
+    const filtered = await admin(`/api/admin/questionnaire/sessions?id=${controlQ.id}&experiment=2&phase=r3_base`);
+    // 研究3 段共 2 个任务（任务清单 [1, 100]），每个任务一条基线决策：3 会话 × 2 = 6 条
+    check(
+      '数据页接口：实验 / 问题筛选生效',
+      filtered.rowCount === 6 && filtered.rows.every((r) => r.experimentSort === 2 && r.phase === 'r3_base'),
+      `experiment=2&phase=r3_base -> ${filtered.rowCount} 条`
+    );
+  } catch (err) {
+    check('数据页接口', false, err.message);
+  }
+
+  // 6) xlsx 导出：按实验分表；文件名跟随筛选（问卷名-实验-问题）
+  try {
+    const { res, buffer } = await admin(`/api/admin/questionnaire/export.xlsx?id=${controlQ.id}`, { raw: true });
+    const isZip = buffer.length > 4 && buffer[0] === 0x50 && buffer[1] === 0x4b;
+    check(
+      'xlsx 导出（全部）可用',
+      isZip && /spreadsheetml/.test(res.headers.get('content-type') || ''),
+      `${buffer.length} 字节`
+    );
+
+    const filtered = await admin(`/api/admin/questionnaire/export.xlsx?id=${controlQ.id}&experiment=2&phase=r3_base`, {
+      raw: true
+    });
+    const disposition = decodeURIComponent(filtered.res.headers.get('content-disposition') || '');
+    check(
+      'xlsx 导出（筛选）：文件名＝问卷名-实验-问题',
+      /attachment/.test(disposition) &&
+        disposition.includes(`${Q_NAME_CONTROL}-研究3·${scenario.name}-基线决策.xlsx`),
+      disposition.replace('attachment; ', '')
+    );
+  } catch (err) {
+    check('xlsx 导出', false, err.message);
+  }
+
+  // 7) 清理：删除自检问卷（连同数据），不留痕
+  try {
+    await admin('/api/admin/questionnaire/delete', { body: { id: controlQ.id, force: true } });
+    await admin('/api/admin/questionnaire/delete', { body: { id: treatQ.id, force: true } });
+    console.log('\n已清理自检问卷与数据');
+  } catch (err) {
+    console.log(`\n清理自检问卷失败（可手动删除）：${err.message}`);
   }
 
   console.log(`\n---- result: ${allPass ? 'ALL PASS' : 'HAS FAILURES'} ----`);

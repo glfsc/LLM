@@ -47,17 +47,40 @@ db.exec(`
     PRIMARY KEY (scenario_id, sort)
   );
 
+  -- 问卷（独立空间）：一条通用链接、固定组别、独立流程文案与实验编排
+  CREATE TABLE IF NOT EXISTS questionnaires (
+    id          TEXT PRIMARY KEY,             -- 链接短码（/chat?q=<id>）
+    name        TEXT NOT NULL,
+    group_role  TEXT NOT NULL DEFAULT 'control',  -- control / treat（研究3 文本版本）
+    flow_json   TEXT NOT NULL DEFAULT '{}',       -- 流程文案：欢迎语/衔接语/结束语/知情同意/结束说明/问卷链接
+    created_at  TEXT,
+    updated_at  TEXT
+  );
+
+  -- 问卷的实验编排：每个实验 = 类型（研究2 / 研究3）+ 情景，按 sort 顺序执行
+  CREATE TABLE IF NOT EXISTS questionnaire_experiments (
+    questionnaire_id TEXT NOT NULL,
+    sort             INTEGER NOT NULL,
+    kind             TEXT NOT NULL,           -- r2 / r3
+    scenario_id      TEXT NOT NULL,
+    PRIMARY KEY (questionnaire_id, sort)
+  );
+
   CREATE TABLE IF NOT EXISTS sessions (
-    id           TEXT PRIMARY KEY,
-    scenario_id  TEXT NOT NULL,
-    group_id     TEXT NOT NULL,
-    uid          TEXT,
-    status       TEXT NOT NULL DEFAULT 'in_progress',
-    started_at   TEXT,
-    ended_at     TEXT,
-    duration_sec INTEGER,
-    code         TEXT,
-    user_agent   TEXT
+    id               TEXT PRIMARY KEY,
+    scenario_id      TEXT NOT NULL,
+    group_id         TEXT NOT NULL,
+    uid              TEXT,
+    status           TEXT NOT NULL DEFAULT 'in_progress',
+    started_at       TEXT,
+    ended_at         TEXT,
+    duration_sec     INTEGER,
+    code             TEXT,
+    user_agent       TEXT,
+    questionnaire_id TEXT,                    -- 所属问卷（旧数据为空）
+    seq              INTEGER,                 -- 问卷内编号（按进入顺序从 1 开始）
+    group_role       TEXT,                    -- 组别快照：control / treat
+    plan_json        TEXT                     -- 实验计划快照（会话开始时固化，后续改问卷不影响进行中的会话）
   );
 
   -- 消息流：AI 消息 + 用户动作回显（role: assistant / user）
@@ -91,6 +114,25 @@ db.exec(`
     value TEXT
   );
 `);
+
+// 老库升级：会话与作答补充问卷相关列（列已存在则跳过）
+function ensureColumns(table, columns) {
+  const existing = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name));
+  for (const [name, definition] of Object.entries(columns)) {
+    if (!existing.has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
+  }
+}
+ensureColumns('sessions', {
+  questionnaire_id: 'TEXT',
+  seq: 'INTEGER',
+  group_role: 'TEXT',
+  plan_json: 'TEXT'
+});
+ensureColumns('responses', {
+  questionnaire_id: 'TEXT',
+  experiment_sort: 'INTEGER',
+  experiment_kind: 'TEXT'
+});
 
 // ---------------------------------------------------------------- 种子数据
 // 全部文本来自论文《心理学报》补充材料 B1（情境）B3（GPT-4o 策略文本）B4（控制组对照文本）。
@@ -211,6 +253,31 @@ const SEED_SCENARIOS = [
 // 默认任务清单：单次 + 多次
 const SEED_TASKS = [1, 100];
 
+// 全局文案（settings）：被试端可见的全部流程与页面文案，管理端可编辑。
+// 默认值与原型硬编码逐字一致；知情同意取自论文 C2.1 指导语；结束说明为伦理说明默认模板。
+const GLOBAL_TEXT_DEFAULTS = {
+  welcome_text:
+    '您好！我是您的智能决策助手。接下来我会为您呈现若干决策任务，请仔细阅读每一项材料，并按照您的真实想法作答。',
+  next_task_text: '下面进入下一项决策任务，请继续仔细阅读以下材料。',
+  end_text: '本次全部决策任务已完成，感谢您的参与！',
+  choice_option_1: '非常可能选择方案A',
+  choice_option_2: '可能选择方案A',
+  choice_option_3: '可能选择方案B',
+  choice_option_4: '非常可能选择方案B',
+  rating_anchor: '1 = 非常不相似　·　7 = 非常相似',
+  consent_text:
+    '您好！我们是广东工业大学管理学院行为决策研究团队，非常感谢您参加本次实验！\n\n' +
+    '请您仔细阅读以下信息，并按要求完成选择任务。所有任务的答案均无对错之分，您按照自己的真实情况如实填写即可。\n\n' +
+    '实验结束后，您将获得报酬，统一在所有任务完成后发放。您有权在任何时间退出实验且不必承担后果，但中途退出实验将不能获得相应报酬。\n\n' +
+    '本实验所收集的信息将只供科学研究使用，我们将对您的数据进行保密，所涉及的公开发表物不会出现您的身份信息。\n\n' +
+    '如果您勾选并开始作答，即意味着：您已阅读上述信息；您自愿同意参加本次实验，并会认真对待本次实验。否则，请关闭页面退出本实验。',
+  debrief_text:
+    '感谢您完成本次实验的全部任务！\n\n' +
+    '在此，我们向您完整说明本实验的目的：本研究旨在考察人们在风险决策任务中的选择特点，以及人工智能生成的决策依据与说服信息对个体决策的可能影响。实验过程中呈现给您的“智能决策助手”回复，实际为研究者预先准备的固定文本，并非实时生成的人工智能对话；这一设计是为了保证每位参与者阅读到的材料完全一致，属于行为研究中常用的材料控制方法。\n\n' +
+    '本实验不涉及对您个人的任何评价，所有数据仅用于科学研究并以整体统计形式呈现，不会泄露您的个人身份信息。如果您对本实验有任何疑问或希望了解更多信息，欢迎联系研究团队。\n\n' +
+    '再次感谢您的参与与支持！'
+};
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -255,6 +322,42 @@ function initSeed() {
 }
 initSeed();
 
+// 全局文案：缺失键补默认值（不覆盖已有值；独立执行，老库升级同样补齐）
+function ensureSettings() {
+  for (const [key, value] of Object.entries(GLOBAL_TEXT_DEFAULTS)) {
+    if (getSetting(key) == null) setSetting(key, value);
+  }
+}
+ensureSettings();
+
+// 首次运行：创建一个示例问卷（研究2 + 研究3 · 医疗情景），便于开箱体验；
+// 仅首次自动生成（删掉后不会再重建）；调用在文件末尾（依赖后文定义）
+function ensureDefaultQuestionnaire() {
+  if (getSetting('example_questionnaire_seeded') === '1') return;
+  const row = db.prepare('SELECT COUNT(*) AS n FROM questionnaires').get();
+  if (Number(row.n) > 0) {
+    setSetting('example_questionnaire_seeded', '1');
+    return;
+  }
+  const gt = getGlobalTexts();
+  createQuestionnaire({
+    name: '示例问卷 · 医疗情景（研究2 + 研究3）',
+    groupRole: 'control',
+    flow: {
+      welcomeText: gt.welcomeText,
+      nextTaskText: gt.nextTaskText,
+      endText: gt.endText,
+      consentText: gt.consentText,
+      debriefText: gt.debriefText
+    },
+    experiments: [
+      { kind: 'r2', scenarioId: 'medical' },
+      { kind: 'r3', scenarioId: 'medical' }
+    ]
+  });
+  setSetting('example_questionnaire_seeded', '1');
+}
+
 // ---------------------------------------------------------------- 设置
 
 function getSetting(key) {
@@ -266,6 +369,32 @@ function setSetting(key, value) {
   db.prepare(
     'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
   ).run(key, String(value ?? ''));
+}
+
+// 全局文案：被试端流程与页面文案（管理端可编辑；缺失时兜底默认值）
+function getGlobalTexts() {
+  const read = (key) => {
+    const value = getSetting(key);
+    return value == null ? GLOBAL_TEXT_DEFAULTS[key] : value;
+  };
+  return {
+    welcomeText: read('welcome_text'),
+    nextTaskText: read('next_task_text'),
+    endText: read('end_text'),
+    choiceOptions: [1, 2, 3, 4].map((v) => ({ value: v, label: read(`choice_option_${v}`) })),
+    ratingAnchor: read('rating_anchor'),
+    consentText: read('consent_text'),
+    debriefText: read('debrief_text')
+  };
+}
+
+// 全局文案白名单保存（键 → 值；键取自 GLOBAL_TEXT_DEFAULTS）
+function saveGlobalTexts(partial) {
+  for (const key of Object.keys(GLOBAL_TEXT_DEFAULTS)) {
+    if (Object.prototype.hasOwnProperty.call(partial, key)) {
+      setSetting(key, partial[key]);
+    }
+  }
 }
 
 // ---------------------------------------------------------------- 情景 / 组 / 任务
@@ -308,12 +437,12 @@ function saveScenarioTree(scenarioId, payload) {
     db.prepare(
       `UPDATE scenarios SET name = ?, context_text = ?, once_question = ?, multi_question = ?,
          r2_once_a = ?, r2_once_b = ?, r2_multi_a = ?, r2_multi_b = ?, rating_question = ?,
-         enabled = ?, updated_at = ? WHERE id = ?`
+         updated_at = ? WHERE id = ?`
     ).run(
       String(payload.name), String(payload.contextText ?? ''), String(payload.onceQuestion ?? ''),
       String(payload.multiQuestion ?? ''), String(payload.r2OnceA ?? ''), String(payload.r2OnceB ?? ''),
       String(payload.r2MultiA ?? ''), String(payload.r2MultiB ?? ''), String(payload.ratingQuestion ?? ''),
-      payload.enabled ? 1 : 0, nowIso(), scenarioId
+      nowIso(), scenarioId
     );
 
     db.prepare('DELETE FROM scenario_tasks WHERE scenario_id = ?').run(scenarioId);
@@ -322,8 +451,22 @@ function saveScenarioTree(scenarioId, payload) {
 
     for (const g of payload.groups || []) {
       db.prepare(
-        'UPDATE groups SET name = ?, r3_once = ?, r3_multi = ?, enabled = ?, updated_at = ? WHERE id = ? AND scenario_id = ?'
-      ).run(String(g.name), String(g.r3Once ?? ''), String(g.r3Multi ?? ''), g.enabled ? 1 : 0, nowIso(), g.id, scenarioId);
+        'UPDATE groups SET name = ?, r3_once = ?, r3_multi = ?, updated_at = ? WHERE id = ? AND scenario_id = ?'
+      ).run(String(g.name), String(g.r3Once ?? ''), String(g.r3Multi ?? ''), nowIso(), g.id, scenarioId);
+    }
+
+    // 全局文案（决策选择卡片 ×4 与评分锚点）随情景一并提交，保证「一次保存整页生效」
+    const gt = payload.globalTexts;
+    if (gt && typeof gt === 'object') {
+      for (const [key, value] of [
+        ['choice_option_1', gt.choiceOption1],
+        ['choice_option_2', gt.choiceOption2],
+        ['choice_option_3', gt.choiceOption3],
+        ['choice_option_4', gt.choiceOption4],
+        ['rating_anchor', gt.ratingAnchor]
+      ]) {
+        if (value != null && String(value).trim() !== '') setSetting(key, String(value));
+      }
     }
     db.exec('COMMIT');
   } catch (err) {
@@ -333,26 +476,269 @@ function saveScenarioTree(scenarioId, payload) {
   return getScenario(scenarioId);
 }
 
+// 新建情景（可选从既有情景复制）：情景 + 两组 + 任务清单，事务创建
+function createScenario({ id, name, copyFrom }) {
+  const source = copyFrom ? getScenario(copyFrom) : null;
+  const sourceGroups = source ? listGroupsByScenario(source.id) : [];
+  const pickGroup = (role) => sourceGroups.find((g) => g.role === role) || null;
+
+  const row = db.prepare('SELECT COALESCE(MAX(sort), 0) + 1 AS s FROM scenarios').get();
+
+  db.exec('BEGIN');
+  try {
+    db.prepare(
+      `INSERT INTO scenarios (id, name, context_text, once_question, multi_question,
+         r2_once_a, r2_once_b, r2_multi_a, r2_multi_b, rating_question, enabled, sort, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`
+    ).run(
+      id, name,
+      source ? source.context_text : '', source ? source.once_question : '',
+      source ? source.multi_question : '', source ? source.r2_once_a : '',
+      source ? source.r2_once_b : '', source ? source.r2_multi_a : '',
+      source ? source.r2_multi_b : '', source ? source.rating_question : '',
+      Number(row.s), nowIso()
+    );
+
+    const insertGroup = db.prepare(
+      `INSERT INTO groups (id, scenario_id, name, role, r3_once, r3_multi, enabled, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 1, ?)`
+    );
+    const control = pickGroup('control');
+    const treat = pickGroup('treat');
+    insertGroup.run(`${id}-control`, id, '控制组', 'control', control ? control.r3_once : '', control ? control.r3_multi : '', nowIso());
+    insertGroup.run(`${id}-treat`, id, '干预组', 'treat', treat ? treat.r3_once : '', treat ? treat.r3_multi : '', nowIso());
+
+    const sourceTasks = source ? listTasks(source.id).map((t) => Number(t.play_count)) : null;
+    const plays = sourceTasks && sourceTasks.length ? sourceTasks : SEED_TASKS.slice();
+    const insertTask = db.prepare('INSERT INTO scenario_tasks (scenario_id, sort, play_count) VALUES (?, ?, ?)');
+    plays.forEach((play, i) => insertTask.run(id, i + 1, play));
+
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+  return getScenario(id);
+}
+
+// 删除情景（含任务清单与两组）：存在被试会话或仅剩一个情景时拒绝
+function deleteScenario(id) {
+  const scenario = getScenario(id);
+  if (!scenario) return { ok: false, reason: 'not_found' };
+
+  const sessionCount = countSessionsByScenario(id);
+  if (sessionCount > 0) return { ok: false, reason: 'has_sessions', sessionCount };
+
+  const total = db.prepare('SELECT COUNT(*) AS n FROM scenarios').get();
+  if (Number(total.n) <= 1) return { ok: false, reason: 'last_scenario' };
+
+  db.exec('BEGIN');
+  try {
+    db.prepare('DELETE FROM scenario_tasks WHERE scenario_id = ?').run(id);
+    db.prepare('DELETE FROM groups WHERE scenario_id = ?').run(id);
+    db.prepare('DELETE FROM scenarios WHERE id = ?').run(id);
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+  return { ok: true };
+}
+
+// ---------------------------------------------------------------- 问卷（独立空间）
+
+// 链接短码：8 位无易混字符（小写字母 / 数字），用于 /chat?q=<id>
+const QUESTIONNAIRE_CODE_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
+const QUESTIONNAIRE_FLOW_KEYS = ['welcomeText', 'nextTaskText', 'endText', 'consentText', 'debriefText'];
+
+function makeQuestionnaireCode() {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    let code = '';
+    for (let i = 0; i < 8; i += 1) {
+      code += QUESTIONNAIRE_CODE_ALPHABET[Math.floor(Math.random() * QUESTIONNAIRE_CODE_ALPHABET.length)];
+    }
+    if (!db.prepare('SELECT 1 FROM questionnaires WHERE id = ?').get(code)) return code;
+  }
+  throw new Error('无法生成问卷短码，请重试');
+}
+
+// 流程文案：仅保留白名单键（缺键 = 该块被删除，运行时跳过）
+function normalizeFlow(flow) {
+  const out = {};
+  if (flow && typeof flow === 'object') {
+    for (const key of QUESTIONNAIRE_FLOW_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(flow, key)) out[key] = String(flow[key] ?? '');
+    }
+  }
+  return out;
+}
+
+function normalizeExperiments(experiments) {
+  const out = [];
+  for (const exp of Array.isArray(experiments) ? experiments : []) {
+    const ifexp = exp && typeof exp === 'object' ? exp : {};
+    const scenarioId = String(ifexp.scenarioId || '').trim();
+    if (!scenarioId) continue;
+    out.push({ kind: ifexp.kind === 'r3' ? 'r3' : 'r2', scenarioId });
+  }
+  return out;
+}
+
+function questionnaireExperimentsPayload(id) {
+  return db
+    .prepare('SELECT sort, kind, scenario_id FROM questionnaire_experiments WHERE questionnaire_id = ? ORDER BY sort ASC')
+    .all(id)
+    .map((row) => {
+      const scenario = getScenario(row.scenario_id);
+      return {
+        sort: Number(row.sort),
+        kind: row.kind,
+        scenarioId: row.scenario_id,
+        scenarioName: scenario ? scenario.name : row.scenario_id
+      };
+    });
+}
+
+function getQuestionnaire(id) {
+  return db.prepare('SELECT * FROM questionnaires WHERE id = ?').get(id) || null;
+}
+
+function getQuestionnairePayload(id) {
+  const q = getQuestionnaire(id);
+  if (!q) return null;
+  let flow = {};
+  try {
+    flow = JSON.parse(q.flow_json || '{}');
+  } catch {
+    flow = {};
+  }
+  return {
+    id: q.id,
+    name: q.name,
+    groupRole: q.group_role,
+    flow,
+    experiments: questionnaireExperimentsPayload(id),
+    sessionCount: countSessionsByQuestionnaire(id),
+    createdAt: q.created_at,
+    updatedAt: q.updated_at
+  };
+}
+
+function listQuestionnaires() {
+  return db.prepare('SELECT id FROM questionnaires ORDER BY created_at DESC, rowid DESC').all().map((r) => getQuestionnairePayload(r.id));
+}
+
+function saveQuestionnaireExperiments(id, experiments) {
+  db.prepare('DELETE FROM questionnaire_experiments WHERE questionnaire_id = ?').run(id);
+  const insert = db.prepare('INSERT INTO questionnaire_experiments (questionnaire_id, sort, kind, scenario_id) VALUES (?, ?, ?, ?)');
+  experiments.forEach((exp, i) => insert.run(id, i + 1, exp.kind, exp.scenarioId));
+}
+
+function createQuestionnaire({ name, groupRole, flow, experiments }) {
+  const id = makeQuestionnaireCode();
+  const now = nowIso();
+  db.exec('BEGIN');
+  try {
+    db.prepare('INSERT INTO questionnaires (id, name, group_role, flow_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)').run(
+      id, String(name), groupRole === 'treat' ? 'treat' : 'control', JSON.stringify(normalizeFlow(flow)), now, now
+    );
+    saveQuestionnaireExperiments(id, normalizeExperiments(experiments));
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+  return getQuestionnairePayload(id);
+}
+
+// 更新问卷：名称 / 组别 / 流程文案 / 实验编排（进行中的会话不受影响，按自身快照继续）
+function updateQuestionnaire(id, { name, groupRole, flow, experiments }) {
+  if (!getQuestionnaire(id)) return null;
+  db.exec('BEGIN');
+  try {
+    db.prepare('UPDATE questionnaires SET name = ?, group_role = ?, flow_json = ?, updated_at = ? WHERE id = ?').run(
+      String(name), groupRole === 'treat' ? 'treat' : 'control', JSON.stringify(normalizeFlow(flow)), nowIso(), id
+    );
+    saveQuestionnaireExperiments(id, normalizeExperiments(experiments));
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+  return getQuestionnairePayload(id);
+}
+
+function countSessionsByQuestionnaire(id) {
+  return Number(db.prepare('SELECT COUNT(*) AS n FROM sessions WHERE questionnaire_id = ?').get(id).n);
+}
+
+// 删除问卷：连带其全部会话 / 消息 / 作答数据；存在数据时需 force = true
+function deleteQuestionnaire(id, { force = false } = {}) {
+  if (!getQuestionnaire(id)) return { ok: false, reason: 'not_found' };
+  const sessionCount = countSessionsByQuestionnaire(id);
+  if (sessionCount > 0 && !force) return { ok: false, reason: 'has_sessions', sessionCount };
+  db.exec('BEGIN');
+  try {
+    const sessionIds = db.prepare('SELECT id FROM sessions WHERE questionnaire_id = ?').all(id).map((r) => r.id);
+    const delMsg = db.prepare('DELETE FROM messages WHERE session_id = ?');
+    const delResp = db.prepare('DELETE FROM responses WHERE session_id = ?');
+    for (const sid of sessionIds) {
+      delMsg.run(sid);
+      delResp.run(sid);
+    }
+    db.prepare('DELETE FROM sessions WHERE questionnaire_id = ?').run(id);
+    db.prepare('DELETE FROM questionnaire_experiments WHERE questionnaire_id = ?').run(id);
+    db.prepare('DELETE FROM questionnaires WHERE id = ?').run(id);
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+  return { ok: true };
+}
+
+// 问卷作答明细（行级）：数据页与导出共用；可按实验段（experiment_sort）/ 问题（阶段）及场景 / 组别 / 状态筛选
+function listQuestionnaireExportRows(id, { scenarioId, groupRole, status, experimentSort, phase } = {}) {
+  const where = ['s.questionnaire_id = ?'];
+  const params = [id];
+  if (scenarioId) { where.push('r.scenario_id = ?'); params.push(scenarioId); }
+  if (groupRole) { where.push('s.group_role = ?'); params.push(groupRole); }
+  if (status) { where.push('s.status = ?'); params.push(status); }
+  if (experimentSort) { where.push('r.experiment_sort = ?'); params.push(Number(experimentSort)); }
+  if (phase) { where.push('r.phase = ?'); params.push(phase); }
+  return db
+    .prepare(
+      `SELECT s.id AS session_id, s.uid, s.seq, s.status AS session_status, s.group_role, s.started_at,
+              r.experiment_sort, r.experiment_kind, r.scenario_id, sc.name AS scenario_name,
+              r.task_index, r.play_count, r.phase, r.value, r.option_label, r.shown_at, r.answered_at, r.elapsed_ms
+         FROM responses r
+         JOIN sessions s ON s.id = r.session_id
+         LEFT JOIN scenarios sc ON sc.id = r.scenario_id
+        WHERE ${where.join(' AND ')}
+        ORDER BY s.seq ASC, r.experiment_sort ASC, r.id ASC`
+    )
+    .all(...params);
+}
+
 // ---------------------------------------------------------------- 会话与消息
 
 function getSession(id) {
   return db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) || null;
 }
 
-// 按 组别 + 被试编号 查找最近的会话（用于刷新恢复 / 跨设备恢复）
-function findSessionByUid(groupId, uid) {
-  return (
-    db
-      .prepare('SELECT * FROM sessions WHERE group_id = ? AND uid = ? ORDER BY started_at DESC LIMIT 1')
-      .get(groupId, uid) || null
-  );
+// 问卷内下一个编号（按进入顺序从 1 开始，该编号即被试标识 uid）
+function nextSessionSeq(questionnaireId) {
+  const row = db.prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS n FROM sessions WHERE questionnaire_id = ?').get(questionnaireId);
+  return Number(row.n);
 }
 
-function createSession({ scenarioId, groupId, uid, userAgent }) {
+function createSession({ questionnaireId, seq, groupRole, planJson, scenarioId, userAgent }) {
   const id = randomUUID();
   db.prepare(
-    'INSERT INTO sessions (id, scenario_id, group_id, uid, status, started_at, user_agent) VALUES (?, ?, ?, ?, ?, ?, ?)'
-  ).run(id, scenarioId, groupId, uid || '', 'in_progress', nowIso(), userAgent || '');
+    `INSERT INTO sessions (id, scenario_id, group_id, uid, status, started_at, user_agent,
+       questionnaire_id, seq, group_role, plan_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(id, scenarioId || '', '', String(seq), 'in_progress', nowIso(), userAgent || '', questionnaireId, seq, groupRole, planJson);
   return getSession(id);
 }
 
@@ -374,16 +760,6 @@ function addMessage(sessionId, role, content) {
   return { id: Number(info.lastInsertRowid), role, content, seq, created_at: createdAt };
 }
 
-// 完成码：6 位无易混字符
-function makeCode() {
-  const alphabet = 'ACDEFGHJKLMNPQRTUVWXY34679';
-  let code = '';
-  for (let i = 0; i < 6; i += 1) {
-    code += alphabet[Math.floor(Math.random() * alphabet.length)];
-  }
-  return code;
-}
-
 function finishSession(id) {
   const session = getSession(id);
   if (!session) return null;
@@ -394,10 +770,9 @@ function finishSession(id) {
     1,
     Math.round((new Date(endedAt).getTime() - new Date(session.started_at).getTime()) / 1000)
   );
-  const code = session.code || makeCode();
-  db.prepare(
-    'UPDATE sessions SET status = ?, ended_at = ?, duration_sec = ?, code = ? WHERE id = ?'
-  ).run('completed', endedAt, duration, code, id);
+  db.prepare('UPDATE sessions SET status = ?, ended_at = ?, duration_sec = ? WHERE id = ?').run(
+    'completed', endedAt, duration, id
+  );
   return getSession(id);
 }
 
@@ -414,18 +789,26 @@ function listResponses(sessionId) {
     .all(sessionId);
 }
 
-function addResponse({ sessionId, scenarioId, groupId, taskIndex, playCount, phase, value, optionLabel, shownAt, answeredAt, elapsedMs }) {
+function addResponse({ sessionId, questionnaireId, scenarioId, groupId, experimentSort, experimentKind, taskIndex, playCount, phase, value, optionLabel, shownAt, answeredAt, elapsedMs }) {
   const info = db
     .prepare(
-      `INSERT INTO responses (session_id, scenario_id, group_id, task_index, play_count, phase, value, option_label, shown_at, answered_at, elapsed_ms)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO responses (session_id, questionnaire_id, experiment_sort, experiment_kind, scenario_id, group_id, task_index, play_count, phase, value, option_label, shown_at, answered_at, elapsed_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
-      sessionId, scenarioId, groupId, taskIndex, playCount, phase, value,
+      sessionId, questionnaireId || '', experimentSort == null ? 0 : experimentSort, experimentKind || '', scenarioId, groupId,
+      taskIndex, playCount, phase, value,
       optionLabel || '', shownAt || null, answeredAt || nowIso(), elapsedMs == null ? null : elapsedMs
     );
   return Number(info.lastInsertRowid);
 }
+
+function countSessionsByScenario(scenarioId) {
+  const row = db.prepare('SELECT COUNT(*) AS n FROM sessions WHERE scenario_id = ?').get(scenarioId);
+  return Number(row.n);
+}
+
+// 数据页与导出：均基于 listQuestionnaireExportRows（行级作答明细）
 
 // 情景树 + 组（管理端序列化用）
 function adminScenarioPayload(scenario) {
@@ -440,7 +823,6 @@ function adminScenarioPayload(scenario) {
     r2MultiA: scenario.r2_multi_a,
     r2MultiB: scenario.r2_multi_b,
     ratingQuestion: scenario.rating_question,
-    enabled: Boolean(scenario.enabled),
     tasks: listTasks(scenario.id).map((t) => Number(t.play_count)),
     groups: listGroupsByScenario(scenario.id).map((g) => ({
       id: g.id,
@@ -448,8 +830,7 @@ function adminScenarioPayload(scenario) {
       name: g.name,
       role: g.role,
       r3Once: g.r3_once,
-      r3Multi: g.r3_multi,
-      enabled: Boolean(g.enabled)
+      r3Multi: g.r3_multi
     }))
   };
 }
@@ -457,6 +838,8 @@ function adminScenarioPayload(scenario) {
 module.exports = {
   getSetting,
   setSetting,
+  getGlobalTexts,
+  saveGlobalTexts,
   getScenario,
   listScenarios,
   getGroup,
@@ -464,9 +847,20 @@ module.exports = {
   listGroupsByScenario,
   listTasks,
   saveScenarioTree,
+  createScenario,
+  deleteScenario,
+  getQuestionnaire,
+  getQuestionnairePayload,
+  listQuestionnaires,
+  createQuestionnaire,
+  updateQuestionnaire,
+  deleteQuestionnaire,
+  countSessionsByQuestionnaire,
+  listQuestionnaireExportRows,
   getSession,
-  findSessionByUid,
+  nextSessionSeq,
   createSession,
+  countSessionsByScenario,
   listMessages,
   addMessage,
   finishSession,
@@ -475,3 +869,6 @@ module.exports = {
   addResponse,
   adminScenarioPayload
 };
+
+// 模块初始化：示例问卷种子（放末尾确保所有 const 已完成初始化）
+ensureDefaultQuestionnaire();

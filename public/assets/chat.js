@@ -1,12 +1,14 @@
 // 被试端实验流程：AI 消息（思考动画 + 打字机流式）+ 底部决策/评分操作区
 // 一致性说明：全部文本由服务端按阶段固定返回，前端只做展示节奏，不做任何内容加工。
+// 问卷模式：链接为 /chat?q=<问卷短码>，同一浏览器自动恢复会话（localStorage 按问卷隔离）；
+// 被试编号由服务端按进入顺序自动分配；?fresh=1 可强制开始新会话。
 'use strict';
 
 /* ---------------------------------------------------------------- 基础 */
 
 const params = new URLSearchParams(location.search);
-const groupId = (params.get('group') || '').trim();
-const uid = resolveUid();
+const questionnaireCode = (params.get('q') || '').trim();
+const forceFresh = params.get('fresh') === '1';
 
 const $stream = document.getElementById('chat-stream');
 const $scroll = document.getElementById('chat-scroll');
@@ -16,15 +18,21 @@ const $actionOptions = document.getElementById('action-options');
 const $actionAnchor = document.getElementById('action-anchor');
 const $btnSubmit = document.getElementById('btn-submit');
 const $actionHint = document.getElementById('action-hint');
-const $doneScreen = document.getElementById('done-screen');
-const $doneCode = document.getElementById('done-code');
-const $btnRestart = document.getElementById('btn-restart');
-const $btnHome = document.getElementById('btn-home');
 const $errorScreen = document.getElementById('error-screen');
 const $errorText = document.getElementById('error-text');
+const $consentScreen = document.getElementById('consent-screen');
+const $consentText = document.getElementById('consent-text');
+const $consentCheckbox = document.getElementById('consent-checkbox');
+const $consentError = document.getElementById('consent-error');
+const $btnConsent = document.getElementById('btn-consent');
+const $debriefScreen = document.getElementById('debrief-screen');
+const $debriefTitle = document.getElementById('debrief-title');
+const $debriefText = document.getElementById('debrief-text');
+const $brandSub = document.getElementById('brand-sub');
 
 const state = {
   sessionId: null,
+  seq: null,
   action: null,
   selected: null,
   busy: false,
@@ -32,16 +40,37 @@ const state = {
   actionShownAt: 0
 };
 
-// 无 uid 参数时使用本地匿名编号（同一浏览器保持同一编号，刷新可恢复会话）
-function resolveUid() {
-  const fromUrl = (params.get('uid') || '').trim();
-  if (fromUrl) return fromUrl;
-  let value = localStorage.getItem('expchat_anon_uid') || '';
-  if (!value) {
-    value = 'anon-' + Math.random().toString(36).slice(2, 10);
-    localStorage.setItem('expchat_anon_uid', value);
+// 问卷级文案（来自服务端 bootstrap / 创建会话，均为快照内容）
+let consentText = '';
+let debriefText = '';
+let consentBusy = false;
+
+// 本机会话记录：按问卷短码隔离，仅用于刷新 / 重进时恢复；服务端失效时自动重建
+const STORAGE_PREFIX = 'expchat_q_';
+
+function loadStoredSession() {
+  if (forceFresh) return '';
+  try {
+    return localStorage.getItem(STORAGE_PREFIX + questionnaireCode) || '';
+  } catch {
+    return '';
   }
-  return value;
+}
+
+function storeSession(id) {
+  try {
+    localStorage.setItem(STORAGE_PREFIX + questionnaireCode, id);
+  } catch {
+    /* 隐私模式下可能不可用：忽略，刷新后重新进入 */
+  }
+}
+
+function clearStoredSession() {
+  try {
+    localStorage.removeItem(STORAGE_PREFIX + questionnaireCode);
+  } catch {
+    /* 忽略 */
+  }
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -246,7 +275,8 @@ async function submit() {
       state.action = null;
       $actionHint.classList.add('hidden');
       await sleep(420);
-      showDone(res.session.code || '——');
+      // 实验结束：展示结束说明（未配置时用通用结束语），即为最终界面
+      showFinal();
       return;
     }
 
@@ -254,7 +284,7 @@ async function submit() {
   } catch (err) {
     if (err.code === 'session_closed') {
       state.completed = true;
-      showDone('——');
+      showFinal(true);
       return;
     }
     appendAiMessageStatic('抱歉，连接似乎出现了问题，请稍后重试。');
@@ -270,55 +300,105 @@ async function submit() {
 /* ---------------------------------------------------------------- 初始化 */
 
 async function init() {
-  if (!groupId) {
-    showError('链接缺少分组参数，请检查链接是否正确。');
+  if (!questionnaireCode) {
+    showError('链接无效：缺少问卷参数，请使用管理端复制的问卷链接进入。');
     return;
   }
   try {
+    const sid = loadStoredSession();
     const boot = await api(
-      `/api/bootstrap?group=${encodeURIComponent(groupId)}&uid=${encodeURIComponent(uid)}`
+      `/api/bootstrap?q=${encodeURIComponent(questionnaireCode)}${sid ? `&session=${encodeURIComponent(sid)}` : ''}`
     );
+
+    consentText = boot.consentText || '';
+    debriefText = boot.debriefText || '';
+    if (boot.questionnaireName && $brandSub) {
+      $brandSub.textContent = boot.questionnaireName;
+      $brandSub.classList.remove('hidden');
+    }
 
     if (boot.session) {
       state.sessionId = boot.session.id;
+      state.seq = boot.session.seq;
+      storeSession(boot.session.id);
       await renderMessages(boot.messages, false);
       scrollToBottom(false);
 
       if (boot.session.status === 'completed') {
         state.completed = true;
-        showDone(boot.session.code || '——', true);
+        showFinal(true);
         return;
       }
       renderAction(boot.action);
       return;
     }
 
-    // 首次进入：创建会话，欢迎语与情境材料依次动画输出
-    const created = await api('/api/session', {
-      method: 'POST',
-      body: { group: groupId, uid }
-    });
-    state.sessionId = created.session.id;
-    await renderMessages(created.messages, true);
-    renderAction(created.action);
+    // 无有效会话：清理本地记录，按问卷配置决定是否展示知情同意页
+    clearStoredSession();
+    if (consentText) {
+      showConsent();
+    } else {
+      // 问卷未配置知情同意文案：直接创建会话进入实验
+      await startSession();
+    }
   } catch (err) {
     showError(
-      err.code === 'group_not_found'
-        ? '该实验链接不存在或已关闭，请检查链接是否正确。'
+      err.code === 'questionnaire_not_found'
+        ? '该问卷链接不存在或已被删除，请检查链接是否正确。'
         : '无法连接到服务，请稍后刷新页面重试。'
     );
   }
 }
 
+// 知情同意通过后创建会话，欢迎语与情境材料依次动画输出
+async function startSession() {
+  const created = await api('/api/session', {
+    method: 'POST',
+    body: { q: questionnaireCode }
+  });
+  state.sessionId = created.session.id;
+  state.seq = created.session.seq;
+  storeSession(created.session.id);
+  consentText = created.consentText || consentText;
+  debriefText = created.debriefText || debriefText;
+  hideConsent();
+  await renderMessages(created.messages, true);
+  renderAction(created.action);
+}
+
+/* ---------------------------------------------------------------- 全屏页（伦理门槛） */
+
+function showConsent() {
+  $consentText.textContent = consentText;
+  $consentCheckbox.checked = false;
+  $btnConsent.disabled = true;
+  $consentError.classList.add('hidden');
+  $consentScreen.classList.remove('hidden');
+  requestAnimationFrame(() => $consentScreen.classList.add('visible'));
+}
+
+function hideConsent() {
+  $consentScreen.classList.remove('visible');
+  setTimeout(() => $consentScreen.classList.add('hidden'), 280);
+}
+
 /* ---------------------------------------------------------------- 全屏页 */
 
-function showDone(code, instant) {
-  $doneCode.textContent = code;
-  $doneScreen.classList.remove('hidden');
-  if (instant) {
-    $doneScreen.classList.add('visible');
+// 结束说明（终态）：实验完成后展示，即为最终界面，不提供任何跳转；
+// 配置了结束说明用配置文案，否则展示通用结束语。
+function showFinal(instant) {
+  if (debriefText) {
+    $debriefTitle.textContent = '实验说明';
+    $debriefText.textContent = debriefText;
   } else {
-    requestAnimationFrame(() => $doneScreen.classList.add('visible'));
+    $debriefTitle.textContent = '感谢您的参与';
+    $debriefText.textContent = '本次实验任务已全部完成，感谢您的参与！\n您可以关闭本页面。';
+  }
+  $debriefScreen.classList.remove('hidden');
+  if (instant) {
+    $debriefScreen.classList.add('visible');
+  } else {
+    requestAnimationFrame(() => $debriefScreen.classList.add('visible'));
   }
 }
 
@@ -332,16 +412,32 @@ function showError(message) {
 
 $btnSubmit.addEventListener('click', submit);
 
-// 完成页操作
-// — “重新开始”：同一分组下开启一轮全新会话（生成新的演示编号）
-// — “返回首页”：回到调试入口，可切换分组
-$btnRestart.addEventListener('click', () => {
-  const freshUid = 'demo-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-  location.href = `/chat?group=${encodeURIComponent(groupId)}&uid=${encodeURIComponent(freshUid)}`;
+// 知情同意：勾选后才可开始；创建会话失败时就地提示并允许重试
+$consentCheckbox.addEventListener('change', () => {
+  $btnConsent.disabled = !$consentCheckbox.checked;
 });
 
-$btnHome.addEventListener('click', () => {
-  location.href = '/';
+$btnConsent.addEventListener('click', async () => {
+  if (!$consentCheckbox.checked || consentBusy) return;
+  consentBusy = true;
+  $btnConsent.disabled = true;
+  $consentError.classList.add('hidden');
+  $btnConsent.textContent = '正在进入…';
+  try {
+    await startSession();
+  } catch (err) {
+    $consentError.textContent =
+      err.code === 'questionnaire_not_found'
+        ? '该问卷链接不存在或已被删除，请检查链接是否正确。'
+        : '无法连接到服务，请稍后重试。';
+    $consentError.classList.remove('hidden');
+  } finally {
+    consentBusy = false;
+    $btnConsent.textContent = '开始实验';
+    $btnConsent.disabled = !$consentCheckbox.checked;
+  }
 });
+
+// 实验完成即结束：终态页面无任何操作按钮，被试可直接关闭页面
 
 init();
