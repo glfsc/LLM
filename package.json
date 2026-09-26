@@ -1,0 +1,15 @@
+{
+  "name": "experiment-chat",
+  "version": "2.0.0",
+  "private": true,
+  "description": "实验平台（论文复刻）：研究2+研究3 固定流程 —— 服务端状态机驱动，零第三方依赖",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node scripts/consistency-check.js",
+    "shots": "node scripts/capture-shots.js",
+    "reset-db": "node scripts/reset-db.js"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  }
+}

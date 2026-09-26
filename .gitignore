@@ -1,0 +1,16 @@
+# 运行时数据（可通过 npm run reset-db 重建，不入库）
+data.db
+data.db-wal
+data.db-shm
+
+# 依赖目录（本项目零第三方依赖，仍防误提交）
+node_modules/
+
+# 日志
+*.log
+npm-debug.log*
+
+# 编辑器 / 系统文件
+.aicoding-chat-workspace
+.DS_Store
+Thumbs.db

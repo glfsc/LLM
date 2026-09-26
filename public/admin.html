@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>实验对话系统 · 管理端</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%23111213'/%3E%3Ccircle cx='16' cy='16' r='5' fill='%23ffffff'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/assets/admin.css">
+</head>
+<body>
+  <!-- 登录视图 -->
+  <div id="login-view" class="login-view">
+    <div class="login-card">
+      <div class="brand">
+        <span class="brand-dot" aria-hidden="true"></span>
+        <span class="brand-name">实验对话系统</span>
+      </div>
+      <h1>管理端登录</h1>
+      <p class="login-sub">输入管理密码，进入情景空间文本管理与被试链接生成。</p>
+      <form id="login-form" autocomplete="off">
+        <input id="login-password" type="password" placeholder="管理密码" autocomplete="current-password">
+        <button id="login-btn" class="primary-btn" type="submit">进入管理端</button>
+      </form>
+      <p id="login-error" class="login-error hidden">密码不正确，请重试。</p>
+      <p class="login-hint">首次使用默认密码：admin123</p>
+    </div>
+  </div>
+
+  <!-- 管理视图 -->
+  <div id="admin-view" class="admin-view hidden">
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="brand">
+          <span class="brand-dot" aria-hidden="true"></span>
+          <span class="brand-name">实验对话系统 · 管理端</span>
+        </div>
+        <button id="btn-logout" class="ghost-btn" type="button">退出登录</button>
+      </div>
+    </header>
+
+    <nav class="tabs">
+      <div class="tabs-inner">
+        <button class="tab active" data-tab="texts" type="button">文本管理</button>
+        <button class="tab" data-tab="links" type="button">被试链接</button>
+      </div>
+    </nav>
+
+    <main class="page">
+      <!-- 情景空间与文本 -->
+      <section id="tab-texts" class="tab-panel">
+        <div class="panel-head">
+          <div>
+            <h2>情景空间与文本</h2>
+            <p class="panel-sub">
+              每个情景是一个独立的空间：情境材料、研究2 相似度文本与评分题、任务清单、
+              以及控制 / 干预两组的研究3 文本。按卡片「保存」后整棵情景即时生效，
+              被试端出现的每一段文字都逐字来自这里，运行时不做任何生成。
+            </p>
+          </div>
+        </div>
+        <div id="scenario-list" class="group-list"></div>
+      </section>
+
+      <!-- 被试链接 -->
+      <section id="tab-links" class="tab-panel hidden">
+        <div class="panel-head">
+          <div>
+            <h2>被试链接</h2>
+            <p class="panel-sub">
+              每个情景空间含控制 / 干预两条独立链接，被试通过链接进入后由系统自动呈现对应文本（页面不显示组别）。
+              链接中的 uid 建议与被试问卷编号保持一致，便于后续将作答数据与问卷数据一一对应。
+            </p>
+          </div>
+        </div>
+
+        <div id="link-cards" class="link-cards"></div>
+
+        <div class="batch-card">
+          <h3>批量生成编号链接</h3>
+          <p class="batch-sub">按编号区间批量生成，便于分发到多份问卷或招募渠道。</p>
+          <div class="batch-form">
+            <label class="field batch-field">
+              <span>分组</span>
+              <select id="batch-group"></select>
+            </label>
+            <label class="field batch-field">
+              <span>起始编号</span>
+              <input id="batch-start" value="1001" inputmode="numeric" autocomplete="off">
+            </label>
+            <label class="field batch-field">
+              <span>数量</span>
+              <input id="batch-count" value="10" inputmode="numeric" autocomplete="off">
+            </label>
+            <button id="btn-batch" class="primary-btn" type="button">生成链接</button>
+          </div>
+          <div id="batch-result" class="batch-result hidden">
+            <textarea id="batch-output" rows="8" readonly spellcheck="false"></textarea>
+            <div class="batch-actions">
+              <span id="batch-count-label" class="batch-count-label"></span>
+              <button id="btn-copy-batch" class="ghost-btn" type="button">复制全部链接</button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast hidden" role="status"></div>
+
+  <script src="/assets/admin.js"></script>
+</body>
+</html>

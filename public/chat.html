@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>智能决策助手</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%23111213'/%3E%3Ccircle cx='16' cy='16' r='5' fill='%23ffffff'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/assets/chat.css">
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="brand">
+          <span class="brand-dot" aria-hidden="true"></span>
+          <span class="brand-name">智能决策助手</span>
+        </div>
+      </div>
+    </header>
+
+    <main id="chat-scroll" class="chat-scroll">
+      <div id="chat-stream" class="chat-stream" aria-live="polite"></div>
+    </main>
+
+    <footer class="composer-wrap">
+      <div id="action-area" class="action-area hidden">
+        <p id="action-question" class="action-question"></p>
+        <div id="action-options" class="action-options"></div>
+        <div class="action-footer">
+          <span id="action-anchor" class="action-anchor"></span>
+          <button id="btn-submit" class="primary-btn" type="button" disabled>确认提交</button>
+        </div>
+      </div>
+      <p id="action-hint" class="composer-hint">请仔细阅读以上材料。</p>
+    </footer>
+  </div>
+
+  <!-- 完成页 -->
+  <div id="done-screen" class="done-screen hidden">
+    <div class="done-card">
+      <div class="done-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 12.5l5.5 5.5L20 6.5"></path>
+        </svg>
+      </div>
+      <h2>感谢您的参与</h2>
+      <p>本次实验任务已全部完成。请妥善保存以下完成码：</p>
+      <div class="done-code" id="done-code">------</div>
+      <div class="done-actions">
+        <button id="btn-restart" class="primary-btn" type="button">重新开始</button>
+        <button id="btn-home" class="ghost-btn" type="button">返回首页</button>
+      </div>
+      <p class="done-tip">您可以关闭本页面。</p>
+    </div>
+  </div>
+
+  <!-- 异常提示页 -->
+  <div id="error-screen" class="done-screen hidden">
+    <div class="done-card">
+      <h2>无法进入实验</h2>
+      <p id="error-text">请检查链接是否正确。</p>
+    </div>
+  </div>
+
+  <script src="/assets/chat.js"></script>
+</body>
+</html>
