@@ -1,0 +1,1278 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>重构预览 v6.2 · 题目解耦版</title>
+<style>
+  :root {
+    --fg: #111213; --fg-soft: #3a3a3f; --muted: #7a7a80; --faint: #b3b3b9;
+    --border: #e8e8ea; --border-strong: #c9c9ce; --bubble: #f4f4f5; --surface: #fafafa;
+    --accent: #111213; --shadow-soft: 0 4px 24px rgba(0,0,0,.06);
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, Consolas, monospace;
+    --ease: cubic-bezier(.21,.9,.35,1);
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: var(--font); color: var(--fg); background: #fff; -webkit-font-smoothing: antialiased; }
+
+  .demo-bar {
+    position: fixed; inset: 0 0 auto 0; z-index: 60; height: 44px; display: flex; align-items: center;
+    gap: 12px; padding: 0 16px; background: #1b1c1f; color: #fff; font-size: 12.5px;
+  }
+  .demo-bar .dot { width: 8px; height: 8px; border-radius: 50%; background: #8ef0a8; }
+  .demo-bar b { font-size: 13px; }
+  .demo-bar .tip { color: #9a9aa2; }
+  .demo-bar .spacer { margin-left: auto; }
+  .demo-bar button { font: inherit; font-size: 12px; color: #fff; background: transparent; border: 1px solid #3a3b40; border-radius: 999px; padding: 5px 12px; cursor: pointer; }
+  .demo-bar button:hover { border-color: #5c5d63; }
+  body.with-bar .admin-layout { padding-top: 44px; }
+
+  .admin-layout { display: flex; min-height: 100vh; }
+  .sidebar { flex: 0 0 auto; width: 246px; border-right: 1px solid var(--border); background: #fff; display: flex; flex-direction: column; padding: 18px 14px; overflow: hidden; }
+  .sidebar-brand { display: flex; align-items: center; gap: 9px; padding: 4px 6px 14px; }
+  .brand-dot { width: 20px; height: 20px; border-radius: 50%; background: var(--accent); position: relative; flex: 0 0 auto; }
+  .brand-dot::after { content: ""; position: absolute; inset: 6px; border-radius: 50%; background: #fff; }
+  .brand-name { font-size: 13px; font-weight: 600; line-height: 1.35; }
+  /* 菜单 / 大纲 切换：编辑时同一块区域复用为题目大纲 */
+  .sidebar-switch { display: flex; gap: 6px; padding: 0 6px 12px; }
+  .seg { flex: 1 1 0; font: inherit; font-size: 12px; color: var(--muted); background: #fff; border: 1px solid var(--border); border-radius: 9px; padding: 6px 0; cursor: pointer; }
+  .seg:hover:not(:disabled) { border-color: var(--border-strong); }
+  .seg.on { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  .seg:disabled { opacity: .4; cursor: not-allowed; }
+  .sidebar-nav { display: flex; flex-direction: column; gap: 4px; }
+  .sidebar-item { display: block; padding: 10px 12px; border-radius: 12px; text-decoration: none; color: var(--fg); transition: background .16s ease; }
+  .sidebar-item:hover { background: var(--surface); }
+  .sidebar-item.active { background: var(--bubble); }
+  .sidebar-item-title { display: block; font-size: 13.5px; font-weight: 600; }
+  .sidebar-item-sub { display: block; font-size: 11.5px; color: var(--muted); margin-top: 3px; }
+  /* 大纲 */
+  .sidebar-outline { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-right: 2px; }
+  .sidebar-outline::-webkit-scrollbar { width: 4px; }
+  .sidebar-outline::-webkit-scrollbar-thumb { background: #e0e0e3; border-radius: 4px; }
+  .ol-sec { display: flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 600; color: var(--muted); padding: 9px 8px 4px; cursor: pointer; }
+  .ol-sec:hover { color: var(--fg); }
+  .ol-item { display: flex; align-items: center; gap: 7px; padding: 6px 8px; border-radius: 9px; color: var(--fg-soft); cursor: pointer; }
+  .ol-item:hover { background: var(--surface); }
+  .ol-item.on { background: var(--bubble); color: var(--fg); font-weight: 600; }
+  .ol-item .ic { flex: 0 0 auto; width: 13px; text-align: center; font-size: 11px; color: var(--faint); }
+  .ol-item .tx { flex: 1 1 auto; min-width: 0; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ol-item .lm { flex: 0 0 auto; font-size: 9.5px; color: #8a5a00; background: #fdf6e9; border: 1px solid #f0e0c4; border-radius: 5px; padding: 0 4px; }
+  .ol-band { display: flex; align-items: center; gap: 6px; font-size: 10.5px; color: var(--muted); padding: 7px 8px 3px; }
+  .ol-band .line { flex: 1 1 auto; height: 1px; background: var(--border); }
+  .sidebar-bottom { margin-top: auto; padding-top: 10px; }
+  .sidebar-tip { font-size: 11.5px; line-height: 1.75; color: var(--faint); margin: 0; padding: 0 4px; }
+
+  .admin-main { flex: 1 1 auto; min-width: 0; padding: 28px 32px 40px; }
+  .admin-main.editing { padding: 0; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+
+  .panel-head { display: flex; align-items: flex-start; gap: 18px; margin-bottom: 20px; }
+  .panel-head h2 { font-size: 19px; font-weight: 600; margin: 0 0 8px; }
+  .panel-sub { font-size: 12.5px; line-height: 1.8; color: var(--muted); margin: 0; max-width: 780px; }
+  .panel-head .grow { flex: 1 1 auto; }
+
+  .primary-btn { font: inherit; font-size: 13px; color: #fff; background: var(--accent); border: 1px solid var(--accent); border-radius: 999px; padding: 9px 18px; cursor: pointer; white-space: nowrap; }
+  .primary-btn:hover { background: #2a2b2e; }
+  .ghost-btn { font: inherit; font-size: 12.5px; color: var(--fg-soft); background: #fff; border: 1px solid var(--border); border-radius: 999px; padding: 7px 14px; cursor: pointer; white-space: nowrap; }
+  .ghost-btn:hover { border-color: var(--border-strong); color: var(--fg); }
+  .ghost-btn.danger { color: #b4332c; }
+  .mini-btn { font: inherit; font-size: 11.5px; color: var(--fg-soft); background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 4px 9px; cursor: pointer; }
+  .mini-btn:hover { border-color: var(--border-strong); }
+  .mini-btn:disabled { opacity: .35; cursor: not-allowed; }
+  .mini-btn.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+  .data-table-wrap { border: 1px solid var(--border); border-radius: 16px; overflow: hidden; }
+  table.data-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  .data-table th { text-align: left; font-weight: 600; font-size: 11.5px; color: var(--muted); background: var(--surface); padding: 11px 14px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  .data-table td { padding: 12px 14px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  .data-table tr:last-child td { border-bottom: 0; }
+  .data-table tbody tr:hover { background: #fcfcfd; }
+  .cell-strong { font-weight: 600; }
+  .cell-code { font-family: var(--mono); font-size: 11px; color: var(--muted); background: var(--bubble); border-radius: 6px; padding: 2px 7px; margin-left: 6px; }
+  .row-actions { display: flex; gap: 8px; }
+  .link-row { display: flex; gap: 8px; align-items: center; min-width: 250px; }
+  .link-row input { flex: 1; min-width: 0; font: inherit; font-size: 12px; font-family: var(--mono); color: var(--fg-soft); background: var(--surface); border: 1px solid var(--border); border-radius: 9px; padding: 7px 10px; outline: none; }
+
+  .editor-head { flex: 0 0 auto; display: flex; align-items: center; gap: 14px; padding: 16px 26px; border-bottom: 1px solid var(--border); }
+  .editor-head h2 { font-size: 16.5px; font-weight: 600; margin: 0; }
+  .editor-head .spacer { margin-left: auto; }
+  .editor-cols { flex: 1; min-height: 0; display: flex; gap: 52px; padding: 22px 26px 0; }
+  .editor-scroll { flex: 1 1 auto; min-width: 0; max-width: 820px; overflow-y: auto; padding-bottom: 34px; }
+  .editor-foot { flex: 0 0 auto; display: flex; align-items: center; gap: 14px; padding: 12px 26px; border-top: 1px solid var(--border); background: #fff; }
+  .editor-foot .hint { font-size: 12px; color: var(--muted); margin-right: auto; }
+
+  .section { margin-bottom: 26px; }
+  .section-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px; }
+  .section-title { font-size: 14.5px; font-weight: 600; margin: 0; }
+  .section-hint { font-size: 12px; line-height: 1.75; color: var(--muted); margin: 0 0 12px; }
+  .field { display: block; margin-bottom: 12px; }
+  .field > span { display: block; font-size: 12.5px; color: var(--muted); margin-bottom: 7px; }
+  .field input[type=text], .field input[type=number], .field textarea, .field select {
+    width: 100%; font: inherit; font-size: 13.5px; line-height: 1.75; color: var(--fg); background: #fff;
+    border: 1px solid var(--border); border-radius: 12px; padding: 10px 13px; outline: none; resize: vertical;
+    transition: border-color .18s ease, box-shadow .18s ease;
+  }
+  .field input:focus, .field textarea:focus, .field select:focus { border-color: var(--border-strong); box-shadow: var(--shadow-soft); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 18px; }
+
+  /* 题卡 */
+  .qcard { position: relative; border: 1px solid var(--border); border-radius: 14px; background: #fff; padding: 12px 14px; margin-bottom: 9px; transition: border-color .16s ease, box-shadow .16s ease; }
+  .qcard:hover { border-color: var(--border-strong); }
+  .qcard.selected { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(17,18,19,.06); }
+  .qcard.dragging { opacity: .45; }
+  .qcard.drop-before { box-shadow: 0 -2px 0 0 var(--accent); }
+  .qcard.drop-after { box-shadow: 0 2px 0 0 var(--accent); }
+  .qcard-head { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+  .drag { flex: 0 0 auto; cursor: grab; color: var(--faint); font-size: 13px; letter-spacing: -1px; padding: 2px 4px; user-select: none; }
+  .drag:active { cursor: grabbing; }
+  .qtype { flex: 0 0 auto; font-size: 11px; font-weight: 600; color: var(--fg-soft); background: var(--bubble); border: 1px solid var(--border); border-radius: 7px; padding: 3px 8px; }
+  .qtitle { flex: 1 1 auto; min-width: 0; font-size: 13.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .qbadges { display: flex; gap: 6px; flex: 0 0 auto; }
+  .qbadge { font-size: 10.5px; color: var(--muted); background: var(--surface); border: 1px solid var(--border); border-radius: 999px; padding: 2px 8px; }
+  .qbadge.limit { color: #7a4a12; background: #fdf6e9; border-color: #f0e0c4; }
+  .qtools { display: flex; gap: 6px; flex: 0 0 auto; }
+  .qsum { font-size: 12px; color: var(--muted); line-height: 1.7; margin: 6px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .qbody { margin-top: 11px; padding-top: 11px; border-top: 1px dashed var(--border); }
+  .limits { border: 1px solid var(--border); border-radius: 12px; background: var(--surface); padding: 11px 12px; margin-top: 4px; }
+  .limits-title { font-size: 12px; font-weight: 600; color: var(--fg-soft); margin: 0 0 8px; }
+  .limit-row { display: flex; align-items: center; gap: 10px; padding: 5px 0; }
+  .limit-row label { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--fg-soft); cursor: pointer; flex: 1 1 auto; }
+  .limit-row input[type=checkbox] { width: 14px; height: 14px; accent-color: #111213; }
+  .limit-row input[type=number] { width: 92px; font: inherit; font-size: 12.5px; padding: 6px 9px; border: 1px solid var(--border); border-radius: 9px; outline: none; }
+  .limit-row input[type=number]:disabled { background: #f2f2f4; color: var(--faint); }
+  .limit-row .inherit { font-size: 11px; color: var(--faint); }
+  .limits-note { font-size: 11px; color: var(--muted); line-height: 1.7; margin: 8px 0 0; }
+
+  .group-band { display: flex; align-items: center; gap: 10px; margin: 16px 0 9px; font-size: 11.5px; color: var(--muted); }
+  .group-band .line { flex: 1 1 auto; height: 1px; background: var(--border); }
+  .group-band .label { flex: 0 0 auto; font-weight: 600; color: var(--fg-soft); }
+
+  .add-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
+  .add-row .lbl { font-size: 12px; color: var(--muted); }
+  .add-select { font: inherit; font-size: 12.5px; color: var(--fg-soft); background: #fff; border: 1px solid var(--border); border-radius: 10px; padding: 7px 10px; outline: none; }
+  .add-num { width: 62px; font: inherit; font-size: 12.5px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 10px; outline: none; }
+
+  .phone-col { flex: 0 0 auto; width: 344px; }
+  .phone-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .pv-tag { font-size: 11.5px; font-weight: 600; color: #0f7b3f; background: #eaf7ee; border-radius: 999px; padding: 4px 10px; }
+  .pv-tag.trial { color: #8a5a00; background: #fdf3e2; }
+  .phone-note { font-size: 11.5px; line-height: 1.7; color: var(--muted); margin: 0 0 10px; }
+  .phone { border: 10px solid #1b1c1f; border-radius: 40px; background: #1b1c1f; box-shadow: 0 20px 46px rgba(0,0,0,.2); display: inline-block; }
+  .screen { width: 314px; height: 664px; background: #fff; border-radius: 30px; overflow: hidden; display: flex; flex-direction: column; }
+  .screen-top { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; padding: 11px 14px; border-bottom: 1px solid var(--border); }
+  .screen-top .dot { width: 15px; height: 15px; border-radius: 50%; background: var(--accent); position: relative; }
+  .screen-top .dot::after { content: ""; position: absolute; inset: 4.5px; border-radius: 50%; background: #fff; }
+  .screen-top .name { font-size: 12px; font-weight: 600; }
+  .screen-body { flex: 1 1 auto; overflow-y: auto; padding: 14px 12px 18px; }
+  .screen-body::-webkit-scrollbar { width: 4px; }
+  .screen-body::-webkit-scrollbar-thumb { background: #e0e0e3; border-radius: 4px; }
+
+  .pv-msg { margin-bottom: 11px; font-size: 12.5px; line-height: 1.72; white-space: pre-wrap; }
+  .pv-msg.user { display: flex; justify-content: flex-end; }
+  .pv-msg.user .bubble { background: var(--bubble); border-radius: 14px; padding: 8px 12px; max-width: 86%; white-space: pre-wrap; }
+  .pv-tagline { font-size: 10.5px; color: var(--faint); margin-bottom: 5px; letter-spacing: .04em; }
+  .pv-skip { font-size: 11px; color: var(--faint); font-style: italic; }
+  .pv-opts { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin: 8px 0 12px; }
+  .pv-opt { font-size: 11.5px; text-align: center; color: var(--fg-soft); background: #fff; border: 1px solid var(--border); border-radius: 11px; padding: 9px 6px; }
+  .pv-opts.one { grid-template-columns: 1fr; }
+  .pv-scale { display: flex; gap: 5px; margin: 8px 0 6px; }
+  .pv-scale span { flex: 1; aspect-ratio: 1; display: flex; align-items: center; justify-content: center; font-size: 11.5px; color: var(--fg-soft); border: 1px solid var(--border); border-radius: 50%; }
+  .pv-anchor { font-size: 10.5px; color: var(--muted); margin: 0 0 12px; }
+  .pv-limit { font-size: 10.5px; color: #8a5a00; background: #fdf6e9; border: 1px solid #f0e0c4; border-radius: 8px; padding: 5px 8px; margin: 0 0 12px; display: inline-block; }
+  .pv-input { font-size: 11.5px; color: var(--faint); background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 9px 10px; margin: 6px 0 12px; }
+  .screen-gate { padding: 18px 14px; display: flex; flex-direction: column; }
+  .screen-gate h3 { font-size: 14px; margin: 6px 0 10px; }
+  .screen-gate .txt { font-size: 12px; line-height: 1.8; color: var(--fg-soft); white-space: pre-wrap; }
+  .screen-gate .check { display: flex; gap: 8px; align-items: flex-start; font-size: 11.5px; color: var(--muted); margin: 16px 0; }
+  .screen-gate .box { flex: 0 0 auto; width: 14px; height: 14px; border: 1.5px solid var(--border-strong); border-radius: 4px; margin-top: 1px; }
+  .screen-gate .go { margin-top: 6px; text-align: center; font-size: 12.5px; color: #fff; background: #cfcfd3; border-radius: 999px; padding: 11px; }
+  .pv-actions { flex: 0 0 auto; border-top: 1px solid var(--border); padding: 10px 12px; background: #fff; }
+  .pv-actions .q { font-size: 12px; font-weight: 600; margin-bottom: 8px; line-height: 1.6; }
+  .pv-actions .row { display: flex; gap: 7px; }
+  .pv-actions .go { flex: 1; text-align: center; font-size: 12.5px; color: #fff; background: var(--accent); border-radius: 999px; padding: 10px; cursor: pointer; }
+  .pv-actions .go.disabled { background: #cfcfd3; cursor: not-allowed; }
+  .pv-actions .hint { font-size: 10.5px; color: var(--muted); margin-top: 7px; }
+  .pv-actions select, .pv-actions input[type=text] { width: 100%; font: inherit; font-size: 12px; border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; outline: none; margin-bottom: 7px; }
+
+  .hidden { display: none !important; }
+  .toast { position: fixed; left: 50%; bottom: 30px; transform: translateX(-50%); background: #1b1c1f; color: #fff; font-size: 12.5px; border-radius: 999px; padding: 9px 18px; opacity: 0; transition: opacity .2s ease; z-index: 70; }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body class="with-bar">
+
+<div class="demo-bar">
+  <span class="dot"></span>
+  <b>重构预览 v6.2</b>
+  <span class="tip">量表 = 多道打分题 · 创作 = 多道文本题 · 8 种题型 · 题目默认展开 · 计时按题勾选 · 拖拽排序 · 左侧栏大纲 · 手机试填</span>
+  <span class="spacer"></span>
+  <button id="demo-close">关闭说明条</button>
+</div>
+
+<div class="admin-layout">
+  <aside class="sidebar">
+    <div class="sidebar-brand">
+      <span class="brand-dot"></span>
+      <span class="brand-name">实验对话系统<br>管理端</span>
+    </div>
+    <div class="sidebar-switch">
+      <button class="seg on" id="seg-menu" type="button">菜单</button>
+      <button class="seg" id="seg-outline" type="button">大纲</button>
+    </div>
+    <nav class="sidebar-nav" id="sidebar-menu">
+      <a class="sidebar-item active" data-nav="exp" href="#">
+        <span class="sidebar-item-title">实验管理</span>
+        <span class="sidebar-item-sub">模板库 · 可复用题目组合</span>
+      </a>
+      <a class="sidebar-item" data-nav="q" href="#">
+        <span class="sidebar-item-title">问卷管理</span>
+        <span class="sidebar-item-sub">链接 · 题目编排 · 数据</span>
+      </a>
+    </nav>
+    <div class="sidebar-outline hidden" id="sidebar-outline"></div>
+    <div class="sidebar-bottom">
+      <p class="sidebar-tip" id="sidebar-tip">
+        只有 8 种题目，量表与创作都是普通题目的组合；
+        实验是可复用的题目模板，问卷插入后即可逐条修改。
+      </p>
+    </div>
+  </aside>
+  <main class="admin-main" id="main"></main>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+'use strict';
+/* =====================================================================
+   题型：只有 8 种。量表 = 多道打分题；创作 = 多道文本题。
+   文本题的输入框高度（行数）是参数，因此不再区分「填空 / 问答」。
+   limits 表示该题型可勾选哪些「限制」。
+   ===================================================================== */
+const TYPE = {
+  message: { label: '消息/材料', icon: '▤', limits: ['delay'] },
+  gate:    { label: '知情同意页', icon: '⛨', limits: [] },
+  debrief: { label: '结束说明页', icon: '◎', limits: [] },
+  rating:  { label: '打分题', icon: '☆', limits: ['wait', 'minSubmit', 'maxAnswer'] },
+  single:  { label: '单选', icon: '◉', limits: ['wait'] },
+  multi:   { label: '多选', icon: '☑', limits: ['wait'] },
+  text:    { label: '文本题', icon: '▭', limits: ['wait', 'minSubmit', 'maxAnswer'] },
+  rank:    { label: '排序', icon: '↕', limits: ['wait'] }
+};
+
+const LIMIT_META = {
+  delay:     { label: '延迟发出', unit: '秒', hint: '内容不立即出现，N 秒后发出（如 AI 反馈）' },
+  wait:      { label: '作答前强制等待', unit: '秒', hint: '需先停留 N 秒才能作答（如强制阅读）' },
+  minSubmit: { label: '最短提交时间', unit: '秒', hint: '提交前的最短等待' },
+  maxAnswer: { label: '最长作答时间', unit: '秒', hint: '到点自动提交已输入内容' }
+};
+
+let uid = 200;
+const nid = () => 'i' + (++uid);
+const clone = (o) => JSON.parse(JSON.stringify(o));
+const esc = (s) => String(s ?? '');
+
+// 问卷 / 实验的计时默认值：默认全为 0（无限制）
+const timing = () => ({ delay: 0, wait: 0, minSubmit: 0, maxAnswer: 0 });
+
+function makeItem(type) {
+  const base = { id: nid(), type, title: '', collapsed: false, limits: {} };
+  if (type === 'message') return { ...base, title: '新材料', text: '' };
+  if (type === 'gate') return { ...base, title: '知情同意说明', text: '您好！非常感谢您参加本次实验！\n\n请您仔细阅读以下信息，并按实验要求完成各项任务。\n\n本实验所收集的信息将只供科学研究使用，我们将对您的数据进行保密。', check: '我已阅读上述信息，自愿同意参加本次实验', button: '开始实验' };
+  if (type === 'debrief') return { ...base, title: '实验说明', text: '感谢你参与本次研究。\n\n需要向你说明的是：你所收到的评价意见均为研究团队预先设定的标准化内容。' };
+  if (type === 'rating') return { ...base, title: '新打分题', min: 1, max: 5, anchor: '1 = 完全不同意　·　5 = 完全同意' };
+  if (type === 'single') return { ...base, title: '单选题', options: ['选项 A', '选项 B'], correct: 0 };
+  if (type === 'multi') return { ...base, title: '多选题', options: ['选项 A', '选项 B', '选项 C'] };
+  if (type === 'text') return { ...base, title: '新文本题', required: true, maxLen: 0, rows: 1, placeholder: '请输入…' };
+  if (type === 'rank') return { ...base, title: '请排序', options: ['项目 1', '项目 2', '项目 3'] };
+  return base;
+}
+
+/* =====================================================================
+   两个实验模板（内容取自实验程序文档）
+   ===================================================================== */
+const TASK_INFO = '欢迎参与本次创造力实验，你即将开始一项工作任务，下面是本次任务的具体信息。\n\n你目前就职于 A 饮品公司市场部，担任内容创作助理。你的日常工作包括参与新品文案撰写、整理产品卖点、协助制作传播物料等。\n\n公司即将上线一款新品——轻野·青柠气泡水。这款产品的特点是：0 糖 0 卡、真实青柠风味、气泡感强、随时饮用无负担；目标人群是 18-30 岁的城市年轻白领。品牌主张是“把日常过成户外”（Everyday, Outdoors）。\n\n今天，品牌创意组要求你为这款新品创作一条广告语（slogan），该广告语将用于新品首发的线上主视觉与短视频片尾。';
+
+const REQUIRE_HIGH = '【青柠气泡水 新品广告语创作任务简介】\n\n一、产品信息\n1. 品牌名：轻野（LIGHTWILD）\n2. 产品名：轻野·青柠气泡水\n3. 产品特点：0 糖 0 卡、真实青柠风味、气泡感强、随时饮用无负担\n4. 目标人群：18-30 岁城市年轻白领，注重健康，同时看重口感与情绪体验\n5. 品牌主张：把日常过成户外（Everyday, Outdoors）\n\n二、创作要求\n1. 广告语须为中文，字数控制在 8-20 字之间（含标点）。\n2. 广告语须体现产品核心利益点（“清爽”或“0 糖无负担”）中的至少一项。\n3. 广告语须与品牌主张“把日常过成户外”相呼应，体现年轻化的生活感。\n4. 广告语须便于记忆与口头传播，避免使用生僻词与冗长句式。\n5. 请勿直接套用饮品行业中的常见句式（如“清爽一夏”“一口畅快”）。\n6. 如需说明创作思路，可在广告语后附不超过 50 字的创作说明。\n\n三、评价标准（满分 100 分）\n品牌契合度（30 分）：是否准确传递产品利益点与品牌主张。\n原创性（30 分）：表达是否新颖，是否避免了行业内的常见句式。\n可记忆性（20 分）：是否朗朗上口、便于复述与二次传播。\n可延展性（20 分）：能否支撑后续海报、短视频等传播物料的延展使用。\n\n四、提交与评审\n完成后，请将广告语与创作说明提交至对应窗口，由评审方进行统一评价。本次评价结果将作为你本季度项目分配与绩效评价的参考。';
+
+const REQUIRE_LOW = '【青柠气泡水 新品广告语创作任务简介】\n\n一、产品信息\n1. 品牌名：轻野（LIGHTWILD）\n2. 产品名：轻野·青柠气泡水\n3. 产品特点：0 糖 0 卡、真实青柠风味、气泡感强、随时饮用无负担\n4. 目标人群：18-30 岁城市年轻白领，注重健康，同时看重口感与情绪体验\n5. 品牌主张：把日常过成户外（Everyday, Outdoors）\n\n二、创作要求\n1. 请为“轻野·青柠气泡水”这款新品创作一条广告语（slogan），用于新品首发宣传。\n2. 请尽力把这条广告语创作好。\n\n三、提交与评审\n完成后，请将广告语提交至对应窗口，由评审方进行统一评价。本次评价结果将作为你本季度项目分配与绩效评价的参考。';
+
+const FEEDBACK = '很感谢你的认真创作，我是轻野品牌创意智能评估系统。关于你提交的这条广告语，在我们关注的几个方面都存在明显的不足：\n\n第一，原创性不够。“清爽”“轻负担”这一类表达在饮品行业中使用频率极高，缺乏区分度，很难让消费者把这句话与“轻野”联系在一起。\n\n第二，表达不够凝练。文案的节奏感偏弱，读起来缺少记忆点，不利于二次传播。\n\n第三，与品牌主张的关联停留在表层。读起来更像一句通用的产品描述，而不是“轻野”的声音。\n\n第四，可延展性不足。这条广告语很难支撑后续海报与短视频的延展表达。\n\n坦白说，这次的完成度与我们的要求还有相当的距离，我对你这次的表现感到失望。';
+
+const CREATE_INTRO = '请在明确产品信息与任务要求后，在 5 分钟内完成内容创作；开始 3 分钟后，可以通过系统对话框向智能评估系统提交你的创作成果。';
+const CREATE2_INTRO = '请根据刚刚收到的反馈以及下面任务信息与任务要求，再次完成内容创作任务。';
+
+// 构造工具：指导语消息 + 若干打分题 = 一套量表（就是普通题目的组合）
+function msg(title, text, limits) { return { id: nid(), type: 'message', title, text, collapsed: false, limits: limits || {} }; }
+function rate(title, min, max, anchor, limits) { return { id: nid(), type: 'rating', title, min, max, anchor, collapsed: false, limits: limits || {} }; }
+function txt(title, opts, limits) { return { id: nid(), type: 'text', title, collapsed: false, limits: limits || {}, ...opts }; }
+function pick(title, options, correct, limits) { return { id: nid(), type: 'single', title, options, correct: correct || 0, collapsed: false, limits: limits || {} }; }
+
+function scaleBlock(scaleTitle, instruction, items, anchor) {
+  const out = [msg(scaleTitle, `${scaleTitle}\n${instruction}`)];
+  for (const t of items) out.push(rate(t, 1, 5, anchor));
+  return out;
+}
+
+// 创作时间窗：相邻且设置相同的题目共用一个窗口
+const CREATE_LIMITS = { minSubmit: 180, maxAnswer: 300 };
+
+function experimentItems(requireText) {
+  return [
+    msg('任务信息', TASK_INFO),
+    msg('任务要求', requireText),
+    ...scaleBlock('目标清晰度测量', '请根据刚才收到的任务材料，评价下列说法与你的实际感受的符合程度。',
+      ['我清楚地知道这项创作任务的目标是什么。', '我对这项任务的具体要求有清晰的理解。', '我知道评价这件作品的标准是什么。', '我清楚自己应该朝着哪个方向努力。', '这项任务的要求是明确而具体的。'],
+      '1 = 完全不同意　·　5 = 完全同意'),
+    msg('创作指引', CREATE_INTRO),
+    txt('广告语', { required: true, rows: 1, maxLen: 20, placeholder: '请输入广告语（8–20 字）' }, CREATE_LIMITS),
+    txt('创作说明（选填）', { required: false, rows: 2, maxLen: 50, placeholder: '可简要说明创作思路' }, CREATE_LIMITS),
+    msg('负面反馈', FEEDBACK, { delay: 30 }),
+    pick('注意力检测', ['表达不够精炼', '可延展性不足', '格式不符合要求', '与品牌主张的关联停留在表层'], 3, { wait: 40 }),
+    pick('反馈来源识别', ['品牌创意组组长 PH', '品牌创意智能评估系统（AI 系统）'], 2),
+    ...scaleBlock('反馈公平性', '你如何评价刚才收到的那条关于你作品的反馈？',
+      ['我认为反馈者的评价是公正的。', '我认为这次反馈的内容是客观的。', '我认为反馈者对我的作品做出了合理的判断。', '我认为这次评价没有受到个人偏好的影响。', '我认为这次反馈给了我应得的评价。', '总体而言，我认为这次反馈的处理方式是公平的。'],
+      '1 = 非常正面　·　5 = 非常负面'),
+    ...scaleBlock('元过程测量', '请回想你在这项任务中，尤其是收到反馈之后的感受，选择最符合的程度。',
+      ['我在意这次评价会如何影响别人对我的看法。', '我会反复回想对方这个人是怎么看我的。', '我担心自己的专业能力受到质疑。', '我花了不少心思去想，这次评价对我的形象意味着什么。', '我感觉被评价的是我这个人，而不只是我的作品。'],
+      '1 = 完全不同意　·　5 = 完全同意'),
+    ...scaleBlock('任务过程测量', '请回想你在收到反馈之后的真实想法与反应，选择最符合的程度。',
+      ['收到反馈后，我更多的是在思考怎样调整我的创作方法。', '我在想有哪些具体的做法可以让我的这条广告语变得更好。', '我试着去分析我的作品与要求之间的差距究竟在哪里。', '我把注意力放在了改进作品的具体策略上。'],
+      '1 = 完全不同意　·　5 = 完全同意'),
+    msg('再次创作指引', CREATE2_INTRO),
+    msg('任务信息（重复呈现）', TASK_INFO),
+    msg('任务要求（重复呈现）', requireText),
+    txt('广告语（再次创作）', { required: true, rows: 1, maxLen: 20, placeholder: '请输入广告语（8–20 字）' }, CREATE_LIMITS),
+    txt('创作说明（选填）', { required: false, rows: 2, maxLen: 50, placeholder: '可简要说明创作思路' }, CREATE_LIMITS)
+  ];
+}
+
+/* =====================================================================
+   状态
+   ===================================================================== */
+const state = {
+  view: 'exp-list',
+  editingExp: null,
+  editingQ: null,
+  selected: null,
+  trial: null,
+  dragId: null,
+  sidebarMode: 'menu',
+  experiments: [
+    { id: 'group3-high-clarity', name: '组别3 · AI反馈 + 目标清晰度高', timing: timing(), items: experimentItems(REQUIRE_HIGH), usedBy: 1 },
+    { id: 'group4-low-clarity', name: '组别4 · AI反馈 + 目标清晰度低', timing: timing(), items: experimentItems(REQUIRE_LOW), usedBy: 1 }
+  ],
+  questionnaires: [
+    { id: 'ahqpmerd', title: '组别3 · AI反馈 + 目标清晰度高', timing: timing(), items: questionnaireItems(REQUIRE_HIGH), sessions: 0, createdAt: '2026-10-06 15:20' },
+    { id: 'b8xgvzsm', title: '组别4 · AI反馈 + 目标清晰度低', timing: timing(), items: questionnaireItems(REQUIRE_LOW), sessions: 0, createdAt: '2026-10-06 15:20' }
+  ]
+};
+
+function tailItems() {
+  return [
+    msg('结束语', ''),
+    { id: nid(), type: 'debrief', title: '实验说明', collapsed: false, limits: {}, text: '感谢你参与本次研究。本次研究旨在考察：面对负面信息的时候，个体的创造力会提升还是会下降。\n\n需要向你说明的是：你所收到的评价意见及其回应，都是由研究团队预先设定的标准化内容，由系统按统一规则返回，并非针对你个人作品的个性化判断。你所提交的作品已被匿名保存，仅用于学术分析。\n\n实验组联系方式：周颖 zyingzhou@whut.edu.cn' }
+  ];
+}
+function newQuestionnaireItems() {
+  return [
+    msg('欢迎语', ''),
+    { id: nid(), type: 'gate', title: '知情同意说明', collapsed: false, limits: {}, text: makeItem('gate').text, check: makeItem('gate').check, button: '开始实验' },
+    ...tailItems()
+  ];
+}
+function questionnaireItems(requireText) {
+  return [
+    msg('欢迎语', ''),
+    { id: nid(), type: 'gate', title: '知情同意说明', collapsed: false, limits: {}, text: makeItem('gate').text, check: makeItem('gate').check, button: '开始实验' },
+    ...experimentItems(requireText),
+    ...tailItems()
+  ];
+}
+
+/* =====================================================================
+   工具
+   ===================================================================== */
+const $ = (s, r = document) => r.querySelector(s);
+const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
+let toastTimer = null;
+function toast(m) { const t = $('#toast'); t.textContent = m; t.classList.add('show'); clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 1900); }
+
+// 生效值：题目勾选优先，否则用全局默认
+function eff(item, key, globals) {
+  const v = item.limits ? item.limits[key] : null;
+  if (v != null) return Number(v) || 0;
+  return Number(globals[key]) || 0;
+}
+// 相邻且时间窗设置相同的题目共用一个窗口（用于「创作」这种跨多题的环节）
+function sharedWindowWith(prev, it) {
+  if (!prev || !it) return false;
+  const a = prev.limits || {}, b = it.limits || {};
+  return ['minSubmit', 'maxAnswer'].every((k) => (a[k] ?? null) === (b[k] ?? null) && a[k] != null);
+}
+
+function itemSummary(it) {
+  switch (it.type) {
+    case 'message': return (it.text || '（空）').split('\n')[0].slice(0, 64) || '（空）';
+    case 'gate': return '进入实验前的伦理门槛，勾选后开始';
+    case 'debrief': return (it.text || '').split('\n')[0].slice(0, 64);
+    case 'rating': return `${it.min}–${it.max} 分 · ${it.anchor || '无锚点'}`;
+    case 'single': case 'multi': return `${it.options.length} 个选项${it.correct ? ' · 正确答案 ' + 'ABCDEFGH'[it.correct - 1] : ''}`;
+    case 'rank': return `${it.options.length} 项排序`;
+    case 'text': return `${it.required ? '必答' : '选答'} · ${it.rows || 1} 行${it.maxLen ? ' · 上限 ' + it.maxLen + ' 字' : ''} · ${it.placeholder || ''}`;
+    default: return it.title || '';
+  }
+}
+
+function limitBadges(it, globals) {
+  const out = [];
+  for (const k of TYPE[it.type].limits) {
+    const v = eff(it, k, globals);
+    if (v > 0) out.push(`${LIMIT_META[k].label} ${v}s${it.limits[k] != null ? '' : '（默认）'}`);
+  }
+  return out;
+}
+
+/* =====================================================================
+   题卡编辑区（实验与问卷共用）
+   ===================================================================== */
+function buildItemEditor(list, globals, opts = {}) {
+  const wrap = el('div');
+
+  function render() {
+    wrap.innerHTML = '';
+    let lastBand = null;
+
+    list.forEach((it, idx) => {
+      if (it.fromTemplate && it.fromTemplate !== lastBand) {
+        lastBand = it.fromTemplate;
+        const band = el('div', 'group-band');
+        band.append(el('span', 'label', '来自模板：' + it.fromTemplate), el('span', 'line'));
+        const del = el('button', 'mini-btn', '整组删除');
+        del.onclick = () => {
+          for (let i = list.length - 1; i >= 0; i -= 1) if (list[i].fromTemplate === it.fromTemplate) list.splice(i, 1);
+          toast('已删除整组');
+          render();
+        };
+        band.appendChild(del);
+        wrap.appendChild(band);
+      } else if (!it.fromTemplate) lastBand = null;
+
+      const card = el('div', 'qcard' + (state.selected === it.id ? ' selected' : ''));
+      card.dataset.id = it.id;
+
+      const head = el('div', 'qcard-head');
+      const handle = el('span', 'drag', '⠿');
+      handle.title = '拖动排序';
+      handle.draggable = true;
+      handle.addEventListener('dragstart', (e) => {
+        state.dragId = it.id;
+        card.classList.add('dragging');
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', it.id);
+      });
+      handle.addEventListener('dragend', () => {
+        state.dragId = null;
+        card.classList.remove('dragging');
+        wrap.querySelectorAll('.drop-before,.drop-after').forEach((n) => n.classList.remove('drop-before', 'drop-after'));
+      });
+      card.addEventListener('dragover', (e) => {
+        if (!state.dragId || state.dragId === it.id) return;
+        e.preventDefault();
+        const r = card.getBoundingClientRect();
+        const after = e.clientY > r.top + r.height / 2;
+        card.classList.toggle('drop-before', !after);
+        card.classList.toggle('drop-after', after);
+      });
+      card.addEventListener('dragleave', () => card.classList.remove('drop-before', 'drop-after'));
+      card.addEventListener('drop', (e) => {
+        e.preventDefault();
+        const r = card.getBoundingClientRect();
+        const after = e.clientY > r.top + r.height / 2;
+        moveItem(list, state.dragId, it.id, after);
+        state.dragId = null;
+        toast('已调整顺序');
+        render();
+      });
+
+      head.appendChild(handle);
+      head.appendChild(el('span', 'qtype', TYPE[it.type].icon + ' ' + TYPE[it.type].label));
+      head.appendChild(el('span', 'qtitle', it.title || '（未命名）'));
+      const badges = el('div', 'qbadges');
+      for (const b of limitBadges(it, globals)) badges.appendChild(el('span', 'qbadge limit', b));
+      if (it.type === 'rating') badges.appendChild(el('span', 'qbadge', `${it.min}–${it.max}`));
+      if (it.type === 'single' || it.type === 'multi' || it.type === 'rank') badges.appendChild(el('span', 'qbadge', `${it.options.length} 项`));
+      head.appendChild(badges);
+
+      const tools = el('div', 'qtools');
+      const mk = (label, title, fn) => { const b = el('button', 'mini-btn', label); b.title = title; b.onclick = (ev) => { ev.stopPropagation(); fn(); }; return b; };
+      tools.append(
+        mk(it.collapsed ? '展开' : '折叠', '折叠 / 展开该题', () => { it.collapsed = !it.collapsed; render(); }),
+        mk('复制', '复制该题', () => { const c = clone(it); c.id = nid(); delete c.fromTemplate; list.splice(idx + 1, 0, c); toast('已复制'); render(); }),
+        mk('删除', '删除该题', () => { list.splice(idx, 1); render(); })
+      );
+      head.appendChild(tools);
+      card.appendChild(head);
+
+      if (it.collapsed) {
+        card.appendChild(el('p', 'qsum', itemSummary(it)));
+      } else {
+        const body = el('div', 'qbody');
+        body.appendChild(buildFields(it, globals));
+        card.appendChild(body);
+      }
+
+      // 点击题卡 = 选中 + 展开
+      head.addEventListener('click', () => {
+        state.selected = it.id;
+        it.collapsed = false;
+        render();
+      });
+      wrap.appendChild(card);
+    });
+
+    // 插入区
+    const addRow = el('div', 'add-row');
+    addRow.appendChild(el('span', 'lbl', '插入题目：'));
+    const sel = el('select', 'add-select');
+    for (const [t, meta] of Object.entries(TYPE)) {
+      const o = el('option', '', meta.icon + ' ' + meta.label);
+      o.value = t;
+      sel.appendChild(o);
+    }
+    const addBtn = el('button', 'mini-btn', '+ 插入');
+    addBtn.onclick = () => {
+      const it = makeItem(sel.value);
+      insertItem(list, it);
+      state.selected = it.id;
+      toast('已插入：' + TYPE[sel.value].label);
+      render();
+    };
+    addRow.append(sel, addBtn);
+
+    // 批量插入打分题（原来「量表」的便捷入口，本质是多道打分题）
+    addRow.appendChild(el('span', 'lbl', '　批量打分题：'));
+    const num = el('input', 'add-num');
+    num.type = 'number';
+    num.value = '5';
+    num.min = '1';
+    const bulkBtn = el('button', 'mini-btn', '+ 插入 N 道');
+    bulkBtn.onclick = () => {
+      const n = Math.max(1, Math.min(30, Number(num.value) || 1));
+      const items = [];
+      for (let i = 0; i < n; i += 1) items.push(rate(`打分题 ${i + 1}`, 1, 5, '1 = 完全不同意　·　5 = 完全同意'));
+      insertItem(list, ...items);
+      toast(`已插入 ${n} 道打分题（量表就是它们的组合）`);
+      render();
+    };
+    addRow.append(num, bulkBtn);
+
+    if (opts.withTemplateInsert) {
+      addRow.appendChild(el('span', 'lbl', '　插入实验模板：'));
+      const tsel = el('select', 'add-select');
+      for (const e of state.experiments) {
+        const o = el('option', '', e.name);
+        o.value = e.id;
+        tsel.appendChild(o);
+      }
+      const tbtn = el('button', 'mini-btn', '+ 插入整组');
+      tbtn.onclick = () => {
+        const e = state.experiments.find((x) => x.id === tsel.value);
+        const copies = e.items.map((it) => { const c = clone(it); c.id = nid(); c.fromTemplate = e.name; return c; });
+        insertItem(list, ...copies);
+        toast(`已插入模板「${e.name}」的 ${copies.length} 道题（可逐条修改）`);
+        render();
+      };
+      addRow.append(tsel, tbtn);
+    }
+    wrap.appendChild(addRow);
+    opts.onChange && opts.onChange(list);
+  }
+
+  render();
+  return { wrap, render, getList: () => list };
+}
+
+function moveItem(list, dragId, targetId, after) {
+  const from = list.findIndex((x) => x.id === dragId);
+  const to = list.findIndex((x) => x.id === targetId);
+  if (from < 0 || to < 0 || from === to) return;
+  const [it] = list.splice(from, 1);
+  let at = list.findIndex((x) => x.id === targetId);
+  if (after) at += 1;
+  list.splice(at, 0, it);
+}
+
+// 插入位置：跳过开头（欢迎语 / 知情同意）与结尾（结束语 / 结束说明页）
+function insertItem(list, ...items) {
+  let at = list.length;
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    const t = list[i].type;
+    if (t === 'debrief' || (t === 'message' && /结束语/.test(list[i].title || ''))) at = i;
+    else break;
+  }
+  let min = 0;
+  if (list[0] && list[0].type === 'message') min = 1;
+  if (list[min] && list[min].type === 'gate') min += 1;
+  list.splice(Math.max(at, min), 0, ...items);
+}
+
+/* ---------- 字段编辑 ---------- */
+function field(labelText, value, onInput, rows) {
+  const w = el('label', 'field');
+  w.appendChild(el('span', '', labelText));
+  let input;
+  if (rows && rows > 1) { input = el('textarea'); input.rows = rows; } else { input = el('input'); input.type = 'text'; }
+  input.value = esc(value);
+  input.addEventListener('input', () => onInput(input.value));
+  w.appendChild(input);
+  return w;
+}
+function numField(labelText, value, onInput) {
+  const w = el('label', 'field');
+  w.appendChild(el('span', '', labelText));
+  const i = el('input'); i.type = 'number'; i.value = esc(value);
+  i.addEventListener('input', () => onInput(i.value));
+  w.appendChild(i);
+  return w;
+}
+
+// 计时限制：勾选即启用，勾选后填写数值；未勾选则用全局默认
+function limitsBox(it, globals) {
+  const keys = TYPE[it.type].limits;
+  if (!keys.length) return null;
+  const box = el('div', 'limits');
+  box.appendChild(el('p', 'limits-title', '计时限制（勾选即启用，未勾选的用问卷默认值）'));
+  for (const k of keys) {
+    const meta = LIMIT_META[k];
+    const row = el('div', 'limit-row');
+    const label = el('label');
+    const cb = el('input'); cb.type = 'checkbox'; cb.checked = it.limits[k] != null;
+    const span = el('span', '', meta.label + '（' + meta.unit + '）');
+    label.append(cb, span);
+    const num = el('input'); num.type = 'number'; num.min = '0';
+    num.value = it.limits[k] != null ? it.limits[k] : eff(it, k, globals);
+    num.disabled = !cb.checked;
+    num.title = meta.hint;
+    cb.addEventListener('change', () => {
+      if (cb.checked) it.limits[k] = Number(num.value) || 0;
+      else delete it.limits[k];
+      num.disabled = !cb.checked;
+      num.value = it.limits[k] != null ? it.limits[k] : eff(it, k, globals);
+      renderPhoneOnly();
+    });
+    num.addEventListener('input', () => { if (cb.checked) { it.limits[k] = Number(num.value) || 0; renderPhoneOnly(); } });
+    const inh = el('span', 'inherit', `默认 ${eff({ limits: {} }, k, globals)}s`);
+    row.append(label, num, inh);
+    box.appendChild(row);
+  }
+  box.appendChild(el('p', 'limits-note', '「最短提交 / 最长作答」加在相邻题目上且数值相同时，它们共用一个作答窗口（用于「创作」这类跨多题的环节）。'));
+  return box;
+}
+
+function buildFields(it, globals) {
+  const frag = document.createDocumentFragment();
+  frag.appendChild(field('题目标题（仅管理端显示）', it.title, (v) => { it.title = v; const t = document.querySelector(`.qcard[data-id="${it.id}"] .qtitle`); if (t) t.textContent = v || '（未命名）'; renderPhoneOnly(); }));
+  if (it.type === 'message') {
+    frag.appendChild(field('消息正文（被试端逐字呈现，留空则跳过）', it.text, (v) => { it.text = v; renderPhoneOnly(); }, 6));
+  } else if (it.type === 'gate') {
+    frag.append(field('正文', it.text, (v) => { it.text = v; renderPhoneOnly(); }, 6), field('勾选文案', it.check, (v) => { it.check = v; renderPhoneOnly(); }), field('按钮文案', it.button, (v) => { it.button = v; renderPhoneOnly(); }));
+  } else if (it.type === 'debrief') {
+    frag.appendChild(field('正文', it.text, (v) => { it.text = v; renderPhoneOnly(); }, 6));
+  } else if (it.type === 'rating') {
+    const row = el('div', 'grid2');
+    row.append(numField('最低分', it.min, (v) => { it.min = Number(v); renderPhoneOnly(); }), numField('最高分', it.max, (v) => { it.max = Number(v); renderPhoneOnly(); }));
+    frag.append(row, field('锚点文字', it.anchor, (v) => { it.anchor = v; renderPhoneOnly(); }));
+  } else if (it.type === 'single' || it.type === 'multi') {
+    frag.appendChild(field('选项（一行一个）', it.options.join('\n'), (v) => { it.options = v.split('\n').map((s) => s.trim()).filter(Boolean); renderPhoneOnly(); }, 5));
+    if (it.type === 'single') frag.appendChild(numField('正确答案序号（1 = A；0 = 不计对错）', it.correct, (v) => { it.correct = Number(v); renderPhoneOnly(); }));
+  } else if (it.type === 'rank') {
+    frag.appendChild(field('排序项（一行一个）', it.options.join('\n'), (v) => { it.options = v.split('\n').map((s) => s.trim()).filter(Boolean); renderPhoneOnly(); }, 5));
+  } else if (it.type === 'text') {
+    const row = el('div', 'grid2');
+    row.append(
+      numField('输入框高度（行数；1 = 单行）', it.rows || 1, (v) => { it.rows = Math.max(1, Math.min(12, Number(v) || 1)); renderPhoneOnly(); }),
+      numField('字数上限（0 = 不限）', it.maxLen, (v) => { it.maxLen = Number(v); renderPhoneOnly(); })
+    );
+    frag.append(row, field('输入框提示语', it.placeholder, (v) => { it.placeholder = v; renderPhoneOnly(); }));
+    const req = el('label', 'limit-row');
+    const cb = el('input'); cb.type = 'checkbox'; cb.checked = !!it.required;
+    cb.addEventListener('change', () => { it.required = cb.checked; renderPhoneOnly(); });
+    const lb = el('label'); lb.append(cb, el('span', '', '必答'));
+    req.appendChild(lb);
+    frag.appendChild(req);
+  }
+  const lb = limitsBox(it, globals);
+  if (lb) frag.appendChild(lb);
+  return frag;
+}
+
+/* =====================================================================
+   手机预览 + 从头试填
+   ===================================================================== */
+function renderPhoneBody(bodyEl, list, globals, opts = {}) {
+  bodyEl.innerHTML = '';
+  const upTo = opts.upTo == null ? list.length : opts.upTo;
+  for (let i = 0; i < Math.min(upTo, list.length); i += 1) {
+    const it = list[i];
+    const prev = i > 0 ? list[i - 1] : null;
+    switch (it.type) {
+      case 'message': {
+        if (!String(it.text || '').trim()) { bodyEl.appendChild(el('div', 'pv-skip', `（${it.title || '消息'}为空 · 被试端跳过）`)); break; }
+        const d = eff(it, 'delay', globals);
+        if (d > 0) bodyEl.appendChild(el('div', 'pv-tagline', `系统将在 ${d} 秒后发出 ↓`));
+        bodyEl.appendChild(el('div', 'pv-msg', it.text));
+        break;
+      }
+      case 'gate': {
+        const g = el('div', 'screen-gate');
+        g.append(el('h3', '', it.title || '知情同意说明'), el('div', 'txt', it.text || ''));
+        const c = el('div', 'check'); c.append(el('span', 'box'), el('span', '', it.check || '我已阅读'));
+        g.append(c, el('div', 'go', it.button || '开始实验'));
+        bodyEl.appendChild(g);
+        break;
+      }
+      case 'debrief': {
+        const g = el('div', 'screen-gate');
+        g.append(el('h3', '', it.title || '实验说明'), el('div', 'txt', it.text || ''));
+        bodyEl.appendChild(g);
+        break;
+      }
+      case 'rating': {
+        bodyEl.appendChild(el('div', 'pv-msg', it.title));
+        const row = el('div', 'pv-scale');
+        for (let v = Number(it.min) || 1; v <= (Number(it.max) || 5); v += 1) row.appendChild(el('span', '', String(v)));
+        bodyEl.appendChild(row);
+        if (it.anchor) bodyEl.appendChild(el('div', 'pv-anchor', it.anchor));
+        const w = eff(it, 'wait', globals);
+        if (w > 0) bodyEl.appendChild(el('div', 'pv-limit', `需先停留 ${w} 秒才能作答`));
+        break;
+      }
+      case 'single': case 'multi': {
+        bodyEl.appendChild(el('div', 'pv-msg', it.title));
+        const box = el('div', 'pv-opts' + (it.options.length > 2 ? '' : ' one'));
+        it.options.forEach((o, k) => box.appendChild(el('div', 'pv-opt', 'ABCDEFGH'[k] + '．' + o)));
+        bodyEl.appendChild(box);
+        const w = eff(it, 'wait', globals);
+        if (w > 0) bodyEl.appendChild(el('div', 'pv-limit', `需先停留 ${w} 秒才能作答`));
+        break;
+      }
+      case 'rank': {
+        bodyEl.appendChild(el('div', 'pv-msg', it.title));
+        const box = el('div', 'pv-opts one');
+        it.options.forEach((o) => box.appendChild(el('div', 'pv-opt', o)));
+        bodyEl.appendChild(box);
+        break;
+      }
+      case 'text': {
+        bodyEl.appendChild(el('div', 'pv-msg', it.title + (it.required ? '' : '（选填）')));
+        const box = el('div', 'pv-input', it.placeholder || '请输入…');
+        const rows = Math.max(1, Number(it.rows) || 1);
+        if (rows > 1) box.style.minHeight = `${rows * 19}px`;
+        bodyEl.appendChild(box);
+        const shared = sharedWindowWith(prev, it);
+        const mn = eff(it, 'minSubmit', globals);
+        const mx = eff(it, 'maxAnswer', globals);
+        if (shared) bodyEl.appendChild(el('div', 'pv-limit', '与上一题共用同一个作答窗口'));
+        else if (mn || mx) bodyEl.appendChild(el('div', 'pv-limit', `${mn ? `${mn}s 后可提交` : ''}${mn && mx ? ' · ' : ''}${mx ? `${mx}s 到点自动提交` : ''}`));
+        break;
+      }
+      default: break;
+    }
+  }
+}
+
+function renderPhoneOnly() {
+  const body = $('#pv-body');
+  if (!body) return;
+  if (state.trial) return renderTrial();
+  // 退出试填 / 普通预览：复位标签与底部作答区
+  const tag = $('#pv-tag');
+  if (tag) { tag.textContent = '实时预览 · 跟随编辑'; tag.classList.remove('trial'); }
+  const btn = $('#pv-trial');
+  if (btn) btn.textContent = '▶ 从头试填';
+  const actions = $('#pv-actions');
+  if (actions) { actions.classList.add('hidden'); actions.innerHTML = ''; }
+  const list = state.view === 'exp-editor' ? state.editingExp.items : state.editingQ.items;
+  const globals = state.view === 'exp-editor' ? state.editingExp.timing : state.editingQ.timing;
+  renderPhoneBody(body, list, globals, {});
+}
+
+/* ---------- 从头试填 ---------- */
+function startTrial() {
+  const list = state.view === 'exp-editor' ? state.editingExp.items : state.editingQ.items;
+  state.trial = { idx: 0, answers: [], list };
+  toast('已进入试填（本地演示，不保存任何数据）');
+  renderTrial();
+}
+function exitTrial() {
+  state.trial = null;
+  toast('已退出试填');
+  renderPhoneOnly();
+}
+function renderTrial() {
+  const t = state.trial;
+  const body = $('#pv-body');
+  const actions = $('#pv-actions');
+  const tag = $('#pv-tag');
+  const btn = $('#pv-trial');
+  if (!body || !actions) return;
+  const globals = state.view === 'exp-editor' ? state.editingExp.timing : state.editingQ.timing;
+  const it = t.list[t.idx];
+  if (tag) { tag.textContent = '试填中 · 本地演示（不保存）'; tag.classList.add('trial'); }
+  if (btn) btn.textContent = '■ 退出试填';
+  actions.classList.remove('hidden');
+
+  if (!it) {
+    renderPhoneBody(body, t.list, globals, { upTo: t.list.length });
+    actions.innerHTML = '';
+    actions.appendChild(el('div', 'go', '试填结束 · 数据未保存'));
+    body.scrollTop = body.scrollHeight;
+    return;
+  }
+  renderPhoneBody(body, t.list, globals, { upTo: t.idx + 1 });
+  for (const a of t.answers) {
+    const u = el('div', 'pv-msg user');
+    u.appendChild(el('div', 'bubble', a));
+    body.appendChild(u);
+  }
+  body.scrollTop = body.scrollHeight;
+
+  actions.innerHTML = '';
+  const next = (echo) => {
+    if (echo) t.answers.push(echo);
+    t.idx += 1;
+    renderTrial();
+  };
+  const go = (label, disabled, echo) => {
+    const b = el('div', 'go' + (disabled ? ' disabled' : ''), label);
+    if (!disabled) b.onclick = () => next(echo);
+    actions.appendChild(b);
+  };
+
+  switch (it.type) {
+    case 'message':
+      go(eff(it, 'delay', globals) > 0 ? `继续（等待 ${eff(it, 'delay', globals)} 秒后收到）` : '继续');
+      break;
+    case 'gate':
+      go(it.button || '开始实验', false, '（已同意并开始）');
+      break;
+    case 'debrief':
+      go('我已阅读，结束', false, null);
+      break;
+    case 'rating': {
+      actions.appendChild(el('div', 'q', it.title));
+      const sel = el('select');
+      for (let v = Number(it.min) || 1; v <= (Number(it.max) || 5); v += 1) { const o = el('option', '', `${v} 分`); o.value = String(v); sel.appendChild(o); }
+      actions.appendChild(sel);
+      const w = eff(it, 'wait', globals);
+      if (w > 0) actions.appendChild(el('div', 'hint', `需先停留 ${w} 秒才能作答`));
+      go('确认提交', false, `评分：${sel.value} 分`);
+      break;
+    }
+    case 'single': case 'multi': {
+      actions.appendChild(el('div', 'q', it.title));
+      const sel = el('select');
+      it.options.forEach((o, k) => { const op = el('option', '', 'ABCDEFGH'[k] + '．' + o); op.value = String(k + 1); sel.appendChild(op); });
+      actions.appendChild(sel);
+      go('确认提交', false, `我的选择：${'ABCDEFGH'[Number(sel.value) - 1]}．${it.options[Number(sel.value) - 1]}`);
+      break;
+    }
+    case 'rank':
+      actions.appendChild(el('div', 'q', it.title));
+      actions.appendChild(el('div', 'hint', '（试填演示：按默认顺序提交）'));
+      go('确认提交', false, `我的排序：${it.options.map((o, i) => `${i + 1}. ${o}`).join('  ')}`);
+      break;
+    case 'text': {
+      actions.appendChild(el('div', 'q', it.title + (it.required ? '' : '（选填）')));
+      const rows = Math.max(1, Number(it.rows) || 1);
+      const inp = rows > 1 ? el('textarea') : el('input');
+      if (rows > 1) inp.rows = Math.min(6, rows);
+      else inp.type = 'text';
+      inp.placeholder = it.placeholder || '请输入…';
+      actions.appendChild(inp);
+      const mn = eff(it, 'minSubmit', globals);
+      const mx = eff(it, 'maxAnswer', globals);
+      if (mn || mx) actions.appendChild(el('div', 'hint', `${mn ? `${mn}s 后可提交` : ''}${mn && mx ? ' · ' : ''}${mx ? `${mx}s 到点自动提交` : ''}`));
+      const b = el('div', 'go', '提交');
+      b.onclick = () => next(`我的回答：${inp.value || '（空）'}`);
+      actions.appendChild(b);
+      break;
+    }
+    default:
+      go('继续');
+  }
+}
+
+/* =====================================================================
+   侧边栏：编辑时同一块区域复用为「题目大纲」
+   ===================================================================== */
+function currentEditing() {
+  if (state.view === 'exp-editor') return state.editingExp;
+  if (state.view === 'q-editor') return state.editingQ;
+  return null;
+}
+
+function setSidebarMode(mode) {
+  const editing = !!currentEditing();
+  if (mode === 'outline' && !editing) return;
+  state.sidebarMode = mode;
+  $('#sidebar-menu').classList.toggle('hidden', mode !== 'menu');
+  $('#sidebar-outline').classList.toggle('hidden', mode !== 'outline');
+  $('#seg-menu').classList.toggle('on', mode === 'menu');
+  $('#seg-outline').classList.toggle('on', mode === 'outline');
+  $('#seg-outline').disabled = !editing;
+  $('#sidebar-tip').textContent = editing
+    ? '大纲与编辑器双向联动：点大纲跳到该题，点题卡高亮大纲；拖动题卡排序，大纲同步更新。'
+    : '只有 8 种题目，量表与创作都是普通题目的组合；实验是可复用的题目模板，问卷插入后即可逐条修改。';
+  if (mode === 'outline') renderOutline();
+}
+
+function renderOutline() {
+  const target = currentEditing();
+  const box = $('#sidebar-outline');
+  if (!target || !box) return;
+  box.innerHTML = '';
+
+  const isExp = state.view === 'exp-editor';
+  for (const [label, anchor] of [[isExp ? '模板信息' : '问卷信息', 'sec-basic'], ['计时默认值', 'sec-timing'], [`题目编排（${target.items.length} 道）`, 'sec-items']]) {
+    const s = el('div', 'ol-sec', label);
+    s.onclick = () => {
+      const node = document.getElementById(anchor);
+      if (node) node.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    };
+    box.appendChild(s);
+  }
+
+  let lastBand = null;
+  target.items.forEach((it) => {
+    if (it.fromTemplate && it.fromTemplate !== lastBand) {
+      lastBand = it.fromTemplate;
+      const band = el('div', 'ol-band');
+      band.append(el('span', '', '来自模板'), el('span', 'line'));
+      box.appendChild(band);
+    } else if (!it.fromTemplate) lastBand = null;
+
+    const row = el('div', 'ol-item' + (state.selected === it.id ? ' on' : ''));
+    row.appendChild(el('span', 'ic', TYPE[it.type].icon));
+    row.appendChild(el('span', 'tx', it.title || '（未命名）'));
+    const active = limitBadges(it, target.timing).length;
+    if (active) row.appendChild(el('span', 'lm', String(active)));
+    row.title = `${TYPE[it.type].label} · ${it.title || ''}`;
+    row.onclick = () => {
+      state.selected = it.id;
+      it.collapsed = false;
+      render();
+      const card = document.querySelector(`.qcard[data-id="${it.id}"]`);
+      if (card) card.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      const on = document.querySelector('.ol-item.on');
+      if (on) on.scrollIntoView({ block: 'nearest' });
+    };
+    box.appendChild(row);
+  });
+}
+
+/* =====================================================================
+   列表页
+   ===================================================================== */
+function renderExpList() {
+  const main = $('#main');
+  main.className = 'admin-main';
+  main.innerHTML = '';
+  const head = el('div', 'panel-head');
+  const box = el('div', 'grow');
+  box.append(el('h2', '', '实验管理'), el('p', 'panel-sub',
+    '实验是可复用的题目模板：一套题目 + 计时默认值。问卷「插入实验」时整组复制，复制后即可逐条修改。只有 9 种题目——量表是多道打分题，创作是多道问答题。'));
+  const btn = el('button', 'primary-btn', '+ 新建实验');
+  btn.onclick = () => toast('预览：真实实现里会创建空白模板并进入编辑页');
+  head.append(box, btn);
+  main.appendChild(head);
+
+  const wrap = el('div', 'data-table-wrap');
+  const table = el('table', 'data-table');
+  const thead = el('thead');
+  const hr = el('tr');
+  ['实验名称', '模板 ID', '题目数', '计时默认值', '被问卷引用', '操作'].forEach((t) => hr.appendChild(el('th', '', t)));
+  thead.appendChild(hr);
+  const tbody = el('tbody');
+  for (const e of state.experiments) {
+    const tr = el('tr');
+    const td1 = el('td');
+    td1.append(el('div', 'cell-strong', e.name), el('code', 'cell-code', e.id));
+    tr.append(td1, el('td', '', e.id), el('td', '', `${e.items.length} 道`),
+      el('td', '', `${e.timing.delay}/${e.timing.wait}/${e.timing.minSubmit}/${e.timing.maxAnswer}s（默认 0 = 不限）`),
+      el('td', '', `${e.usedBy} 份`));
+    const td6 = el('td');
+    const row = el('div', 'row-actions');
+    const b1 = el('button', 'ghost-btn', '复制'); b1.onclick = (ev) => { ev.stopPropagation(); toast('预览：复制为新模板'); };
+    const b2 = el('button', 'ghost-btn danger', '删除'); b2.onclick = (ev) => { ev.stopPropagation(); toast('预览：模板可自由删除（问卷已复制走题目）'); };
+    const b3 = el('button', 'ghost-btn', '进入编辑'); b3.onclick = (ev) => { ev.stopPropagation(); openExp(e.id); };
+    row.append(b1, b2, b3);
+    td6.appendChild(row);
+    tr.appendChild(td6);
+    tr.onclick = () => openExp(e.id);
+    tbody.appendChild(tr);
+  }
+  table.append(thead, tbody);
+  wrap.appendChild(table);
+  main.appendChild(wrap);
+}
+
+function renderQList() {
+  const main = $('#main');
+  main.className = 'admin-main';
+  main.innerHTML = '';
+  const head = el('div', 'panel-head');
+  const box = el('div', 'grow');
+  box.append(el('h2', '', '问卷管理'), el('p', 'panel-sub',
+    '每份问卷 = 一条链接 + 一列题目 + 计时默认值。可逐题插入，也可整组插入实验模板；数据按问卷隔离，被试编号按进入顺序自动分配。'));
+  const btn = el('button', 'primary-btn', '+ 新建问卷');
+  btn.onclick = () => {
+    const q = { id: Math.random().toString(36).slice(2, 10), title: '未命名问卷', timing: timing(), items: newQuestionnaireItems(), sessions: 0, createdAt: '2026-10-06 16:20' };
+    state.questionnaires.unshift(q);
+    toast('预览：已创建问卷，默认含欢迎语 / 知情同意页 / 结束语 / 结束说明页（欢迎语与结束语默认为空）');
+    openQ(q.id);
+  };
+  head.append(box, btn);
+  main.appendChild(head);
+
+  const wrap = el('div', 'data-table-wrap');
+  const table = el('table', 'data-table');
+  const thead = el('thead');
+  const hr = el('tr');
+  ['问卷名称', '被试链接', '题目数', '数据量', '创建时间', '操作'].forEach((t) => hr.appendChild(el('th', '', t)));
+  thead.appendChild(hr);
+  const tbody = el('tbody');
+  for (const q of state.questionnaires) {
+    const tr = el('tr');
+    const td1 = el('td');
+    td1.append(el('div', 'cell-strong', q.title), el('code', 'cell-code', q.id));
+    tr.appendChild(td1);
+    const td2 = el('td');
+    const lr = el('div', 'link-row');
+    const li = el('input'); li.value = `http://localhost:3000/chat?q=${q.id}`; li.readOnly = true; li.onclick = () => li.select();
+    const cp = el('button', 'ghost-btn', '复制'); cp.onclick = (ev) => { ev.stopPropagation(); toast('链接已复制（预览）'); };
+    lr.append(li, cp); td2.appendChild(lr); tr.appendChild(td2);
+    tr.append(el('td', '', `${q.items.length} 道`), el('td', '', `${q.sessions} 份`), el('td', '', q.createdAt));
+    const td6 = el('td');
+    const row = el('div', 'row-actions');
+    const bE = el('button', 'ghost-btn', '修改'); bE.onclick = (ev) => { ev.stopPropagation(); openQ(q.id); };
+    const bD = el('button', 'ghost-btn', '数据'); bD.onclick = (ev) => { ev.stopPropagation(); toast('预览：真实实现里进入数据页（列表 / 个案 / 导出）'); };
+    const bX = el('button', 'ghost-btn danger', '删除'); bX.onclick = (ev) => { ev.stopPropagation(); toast('预览：删除问卷（有数据时二次确认）'); };
+    row.append(bE, bD, bX); td6.appendChild(row); tr.appendChild(td6);
+    tbody.appendChild(tr);
+  }
+  table.append(thead, tbody);
+  wrap.appendChild(table);
+  main.appendChild(wrap);
+}
+
+/* =====================================================================
+   编辑页骨架
+   ===================================================================== */
+function editorShell({ title, backLabel, onBack, saveLabel, hint, body, phoneTitle, withTrial }) {
+  const main = $('#main');
+  main.className = 'admin-main editing';
+  main.innerHTML = '';
+  const head = el('div', 'editor-head');
+  const back = el('button', 'ghost-btn', '← ' + backLabel);
+  back.onclick = onBack;
+  head.append(back, el('h2', '', title));
+  main.appendChild(head);
+
+  const cols = el('div', 'editor-cols');
+  const scroll = el('div', 'editor-scroll');
+  scroll.appendChild(body);
+  cols.appendChild(scroll);
+
+  const col = el('div', 'phone-col');
+  const bar = el('div', 'phone-bar');
+  const tag = el('span', 'pv-tag', '实时预览 · 跟随编辑');
+  tag.id = 'pv-tag';
+  bar.appendChild(tag);
+  if (withTrial) {
+    const btn = el('button', 'mini-btn', '▶ 从头试填');
+    btn.id = 'pv-trial';
+    btn.onclick = () => (state.trial ? exitTrial() : startTrial());
+    bar.appendChild(btn);
+  }
+  col.appendChild(bar);
+  col.appendChild(el('p', 'phone-note', '编辑左侧内容此处实时更新；点题卡任意处即选中该题并跟随预览。' + (withTrial ? '「从头试填」可在手机里完整走一遍（不保存）。' : '')));
+  const phone = el('div', 'phone');
+  const screen = el('div', 'screen');
+  const top = el('div', 'screen-top');
+  top.append(el('span', 'dot'), el('span', 'name', phoneTitle));
+  const sbody = el('div', 'screen-body'); sbody.id = 'pv-body';
+  const acts = el('div', 'pv-actions hidden'); acts.id = 'pv-actions';
+  screen.append(top, sbody, acts);
+  phone.appendChild(screen);
+  col.appendChild(phone);
+  cols.appendChild(col);
+  main.appendChild(cols);
+
+  const foot = el('div', 'editor-foot');
+  foot.appendChild(el('span', 'hint', hint || ''));
+  const save = el('button', 'primary-btn', saveLabel);
+  save.onclick = () => toast('预览：真实实现里保存后即时生效（进行中的会话按快照继续）');
+  foot.appendChild(save);
+  main.appendChild(foot);
+}
+
+/* =====================================================================
+   实验编辑页
+   ===================================================================== */
+function openExp(id) { state.editingExp = state.experiments.find((e) => e.id === id); state.selected = null; state.trial = null; state.sidebarMode = 'outline'; state.view = 'exp-editor'; render(); }
+function openQ(id) { state.editingQ = state.questionnaires.find((q) => q.id === id); state.selected = null; state.trial = null; state.sidebarMode = 'outline'; state.view = 'q-editor'; render(); }
+
+function renderExpEditor() {
+  const e = state.editingExp;
+  const body = el('div');
+
+  const s1 = el('div', 'section');
+  s1.id = 'sec-basic';
+  const h1 = el('div', 'section-head');
+  h1.appendChild(el('h3', 'section-title', '模板信息'));
+  s1.appendChild(h1);
+  s1.appendChild(el('p', 'section-hint', '实验是可复用的题目模板；问卷「插入实验」时整组复制其题目，复制后即可逐条修改。'));
+  s1.appendChild(field('实验名称', e.name, (v) => { e.name = v; }));
+  body.appendChild(s1);
+
+  const s2 = el('div', 'section');
+  s2.id = 'sec-timing';
+  const h2 = el('div', 'section-head'); h2.appendChild(el('h3', 'section-title', '计时默认值（秒，默认 0 = 无限制）'));
+  s2.append(h2, el('p', 'section-hint', '这里只是"默认值"：题目里勾选了具体限制就以题目为准，未勾选的按这里生效。'));
+  const g = el('div', 'grid2');
+  const mk = (label, key, hintTxt) => {
+    const w = el('label', 'field');
+    w.appendChild(el('span', '', label));
+    const i = el('input'); i.type = 'number'; i.value = e.timing[key];
+    i.addEventListener('input', () => { e.timing[key] = Number(i.value) || 0; renderPhoneOnly(); });
+    w.appendChild(i);
+    w.appendChild(el('em', '', hintTxt));
+    return w;
+  };
+  g.append(mk('AI 回复延迟（秒）', 'delay', '0 = 立即发出'), mk('强制阅读（秒）', 'wait', '0 = 读完即可作答'),
+    mk('最短提交时间（秒）', 'minSubmit', '0 = 随时可提交'), mk('最长作答时间（秒）', 'maxAnswer', '0 = 不限时'));
+  s2.appendChild(g);
+  body.appendChild(s2);
+
+  const s3 = el('div', 'section');
+  s3.id = 'sec-items';
+  const h3 = el('div', 'section-head');
+  const t3 = el('h3', 'section-title', `题目编排（${e.items.length} 道 · 默认全部展开）`);
+  h3.appendChild(t3);
+  s3.append(h3, el('p', 'section-hint', '拖动左侧手柄排序；点题卡即选中并展开，点「折叠」收起。被试端按此顺序呈现。'));
+  const editor = buildItemEditor(e.items, e.timing, { onChange: () => { t3.textContent = `题目编排（${e.items.length} 道 · 默认全部展开）`; renderPhoneOnly(); } });
+  s3.appendChild(editor.wrap);
+  body.appendChild(s3);
+
+  editorShell({
+    title: '实验 · ' + e.name,
+    backLabel: '返回实验列表',
+    onBack: () => { state.view = 'exp-list'; state.trial = null; render(); },
+    saveLabel: '保存该实验',
+    hint: `模板共 ${e.items.length} 道题`,
+    body,
+    phoneTitle: '实验模板预览',
+    withTrial: true
+  });
+  renderPhoneOnly();
+}
+
+/* =====================================================================
+   问卷编辑页
+   ===================================================================== */
+function renderQEditor() {
+  const q = state.editingQ;
+  const body = el('div');
+
+  const s1 = el('div', 'section');
+  s1.id = 'sec-basic';
+  const h1 = el('div', 'section-head'); h1.appendChild(el('h3', 'section-title', '问卷信息'));
+  s1.append(h1, el('p', 'section-hint', '问卷 = 一条链接 + 一列题目 + 计时默认值。链接自动生成（8 位不透明短码）。'));
+  s1.appendChild(field('问卷名称', q.title, (v) => { q.title = v; }));
+  const lr = el('div', 'link-row');
+  const li = el('input'); li.value = `http://localhost:3000/chat?q=${q.id}`; li.readOnly = true;
+  const cp = el('button', 'ghost-btn', '复制'); cp.onclick = () => toast('预览：链接已复制');
+  lr.append(li, cp);
+  s1.appendChild(lr);
+  body.appendChild(s1);
+
+  const s2 = el('div', 'section');
+  s2.id = 'sec-timing';
+  const h2 = el('div', 'section-head'); h2.appendChild(el('h3', 'section-title', '计时默认值（秒，默认 0 = 无限制）'));
+  s2.append(h2, el('p', 'section-hint', '插入实验模板时继承模板的默认值；题目可单独勾选覆盖。'));
+  const g = el('div', 'grid2');
+  const mk = (label, key) => {
+    const w = el('label', 'field');
+    w.appendChild(el('span', '', label));
+    const i = el('input'); i.type = 'number'; i.value = q.timing[key];
+    i.addEventListener('input', () => { q.timing[key] = Number(i.value) || 0; renderPhoneOnly(); });
+    w.appendChild(i);
+    return w;
+  };
+  g.append(mk('AI 回复延迟', 'delay'), mk('强制阅读', 'wait'), mk('最短提交时间', 'minSubmit'), mk('最长作答时间', 'maxAnswer'));
+  s2.appendChild(g);
+  body.appendChild(s2);
+
+  const s3 = el('div', 'section');
+  s3.id = 'sec-items';
+  const h3 = el('div', 'section-head');
+  const t3 = el('h3', 'section-title', `题目编排（${q.items.length} 道 · 默认全部展开）`);
+  h3.appendChild(t3);
+  s3.append(h3, el('p', 'section-hint',
+    '问卷默认已含欢迎语（空）、知情同意页、结束语（空）、结束说明页，均可编辑或删除。可逐题插入、批量插入打分题，或整组插入实验模板后逐条修改。'));
+  const editor = buildItemEditor(q.items, q.timing, {
+    withTemplateInsert: true,
+    onChange: () => { t3.textContent = `题目编排（${q.items.length} 道 · 默认全部展开）`; renderPhoneOnly(); }
+  });
+  s3.appendChild(editor.wrap);
+  body.appendChild(s3);
+
+  editorShell({
+    title: '修改问卷 · ' + q.title,
+    backLabel: '返回问卷列表',
+    onBack: () => { state.view = 'q-list'; state.trial = null; render(); },
+    saveLabel: '保存问卷',
+    hint: `共 ${q.items.length} 道题`,
+    body,
+    phoneTitle: q.title,
+    withTrial: true
+  });
+  renderPhoneOnly();
+}
+
+/* =====================================================================
+   路由
+   ===================================================================== */
+function render() {
+  document.querySelectorAll('.sidebar-item').forEach((a) => {
+    const nav = a.dataset.nav;
+    a.classList.toggle('active', (state.view.startsWith('exp') && nav === 'exp') || (state.view.startsWith('q') && nav === 'q'));
+  });
+  // 进入编辑页默认切到大纲；回到列表页切回菜单
+  const editing = !!currentEditing();
+  setSidebarMode(editing ? (state.sidebarMode === 'menu' ? 'menu' : 'outline') : 'menu');
+  if (state.view === 'exp-list') renderExpList();
+  else if (state.view === 'exp-editor') renderExpEditor();
+  else if (state.view === 'q-list') renderQList();
+  else if (state.view === 'q-editor') renderQEditor();
+  window.scrollTo(0, 0);
+}
+
+document.querySelectorAll('.sidebar-item').forEach((a) => {
+  a.addEventListener('click', (e) => {
+    e.preventDefault();
+    state.trial = null;
+    state.view = a.dataset.nav === 'exp' ? 'exp-list' : 'q-list';
+    render();
+  });
+});
+$('#seg-menu').onclick = () => setSidebarMode('menu');
+$('#seg-outline').onclick = () => setSidebarMode('outline');
+$('#demo-close').onclick = () => { document.body.classList.remove('with-bar'); $('.demo-bar').remove(); };
+
+render();
+</script>
+</body>
+</html>

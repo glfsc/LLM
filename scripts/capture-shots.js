@@ -1,9 +1,5 @@
-// 界面截图工具：调用本机 Chrome/Edge 的无头模式（CDP 协议）自动操作页面并截图
-// 用途：交付验收截图（入口说明 / 管理端问卷管理（列表 · 新建 · 修改）/ 流程与情景页 /
-//       被试端全流程（同意 → 决策 → 评分 → 分组文本 → 结束说明终态）/ 手机端适配 /
-//       问卷数据（行级视图 · 实验/问题筛选）与个案详情）
+// 界面走查：管理端（两栏 + 编辑期大纲 + 题卡 + 手机预览与试填）与被试端（9 种题型全流程）
 // 用法：先启动服务（npm start），再执行：node scripts/capture-shots.js
-// 说明：脚本会复用或创建一份「演示问卷·控制组」，并向其提交一条完整被试会话用于数据页截图。
 'use strict';
 
 const { spawn } = require('node:child_process');
@@ -20,28 +16,16 @@ const BASE = process.env.BASE || 'http://localhost:3000';
 const PORT = Number(process.env.CDP_PORT) || 9333;
 const OUT_DIR = path.join(__dirname, '..', 'screenshots');
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
-const DEMO_NAME = '演示问卷·控制组';
+// 演示问卷：复制组别3 的问卷（题目与文档逐字一致），计时改短便于走查
+const DEMO_NAME = '演示问卷（走查用）';
+const DEMO_TIMING = { delay: 4, wait: 5, minSubmit: 6, maxAnswer: 12 };   // maxAnswer 也留一段，走查里能看到「作答倒计时」
 
-const DEMO_FLOW = {
-  welcomeText: '欢迎参加本次研究。\n接下来你会阅读一段情境材料，并按照自己的真实想法做出判断与选择。',
-  nextTaskText: '下面进入下一个任务。请同样先阅读情境材料，再根据自己的判断作答。',
-  endText: '以上是本次实验的全部任务，感谢你的认真参与。',
-  consentText:
-    '【研究知情同意书】\n\n本研究旨在了解人们在面对决策情境时的判断过程。你的参与完全自愿，可随时退出，且不会对你有任何不利影响。\n\n实验中不会收集任何可直接识别你身份的信息；所有作答数据仅以匿名编号形式用于学术分析，不作他用。\n\n继续即表示你已理解上述说明，并同意参与本次研究。',
-  debriefText:
-    '【结束说明】\n\n感谢你的参与。本研究的目的是考察在决策情境中，不同类型的信息呈现方式对判断与选择的影响。\n\n实验中你看到的文本由研究团队事先编写，并非针对个人的评估或建议。\n\n如有任何疑问，可通过实验招募信息中的联系方式与研究者沟通。'
-};
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function findBrowser() {
-  for (const p of CHROME_CANDIDATES) {
-    if (fs.existsSync(p)) return p;
-  }
-  throw new Error('未找到 Chrome / Edge 可执行文件');
+  for (const p of CHROME_CANDIDATES) if (fs.existsSync(p)) return p;
+  throw new Error('未找到 Chrome / Edge');
 }
-
-/* ---------------------------------------------------------------- 演示问卷准备 */
 
 async function adminFetch(token, route, options = {}) {
   const headers = {};
@@ -57,362 +41,483 @@ async function adminFetch(token, route, options = {}) {
   return data;
 }
 
-// 复用已有的「演示问卷·控制组」；不存在则创建（流程文案与实验编排：研究2 + 研究3）
-async function ensureDemoQuestionnaire() {
-  const login = await adminFetch('', '/api/admin/login', { body: { password: ADMIN_PASSWORD } });
-  const token = login.token;
-
+// 准备演示问卷：每次重建，保证数据页只有一条完整会话
+async function ensureDemo() {
+  const token = (await adminFetch('', '/api/admin/login', { body: { password: ADMIN_PASSWORD } })).token;
   const list = await adminFetch(token, '/api/admin/questionnaires');
-  const existing = list.questionnaires.find((q) => q.name === DEMO_NAME);
-  if (existing) {
-    console.log(`复用演示问卷：${existing.name}（${existing.id}）`);
-    return { token, questionnaire: existing };
+  for (const q of list.questionnaires.filter((x) => x.title === DEMO_NAME)) {
+    await adminFetch(token, '/api/admin/questionnaire/delete', { body: { id: q.id, force: true } });
   }
-
-  const scenarioList = await adminFetch(token, '/api/admin/scenarios');
-  const scenario = scenarioList.scenarios.find((s) => s.id === 'medical') || scenarioList.scenarios[0];
-  if (!scenario) throw new Error('没有可用情景，请先在管理端创建情景');
-
-  const created = await adminFetch(token, '/api/admin/questionnaire/create', {
-    body: {
-      name: DEMO_NAME,
-      groupRole: 'control',
-      flow: DEMO_FLOW,
-      experiments: [
-        { kind: 'r2', scenarioId: scenario.id },
-        { kind: 'r3', scenarioId: scenario.id }
-      ]
-    }
+  const source = list.questionnaires.find((x) => /组别3/.test(x.title));
+  const created = (await adminFetch(token, '/api/admin/questionnaire/create', { body: { title: DEMO_NAME, copyFrom: source.id } })).questionnaire;
+  // 缩短题目级计时（模板插入的题目都带显式限制）
+  const items = created.items.map((it) => {
+    const limits = { ...it.limits };
+    if (limits.delay) limits.delay = DEMO_TIMING.delay;
+    if (limits.wait) limits.wait = DEMO_TIMING.wait;
+    if (limits.minSubmit) limits.minSubmit = DEMO_TIMING.minSubmit;
+    if (limits.maxAnswer) limits.maxAnswer = DEMO_TIMING.maxAnswer;
+    return { ...it, limits };
   });
-  console.log(`已创建演示问卷：${created.questionnaire.name}（${created.questionnaire.id}）`);
-  return { token, questionnaire: created.questionnaire };
+  console.log('  含计时限制的题目：' + items.filter((i) => Object.keys(i.limits).length).map((i) => `${i.title}[${JSON.stringify(i.limits)}]`).join(' '));
+  await adminFetch(token, '/api/admin/questionnaire/update', {
+    body: { id: created.id, title: DEMO_NAME, timing: created.timing, items }
+  });
+  console.log(`演示问卷：${DEMO_NAME}（${created.id}）· 题目 ${items.length} 道`);
+  return { token, questionnaire: created };
 }
-
-/* ---------------------------------------------------------------- 极简 CDP 客户端 */
 
 class CDP {
   constructor(ws) {
-    this.ws = ws;
-    this.nextId = 0;
-    this.pending = new Map();
-    this.events = [];
-    this.waiters = [];
-
+    this.ws = ws; this.nextId = 0; this.pending = new Map(); this.events = []; this.waiters = [];
     ws.addEventListener('message', (ev) => {
       const msg = JSON.parse(ev.data);
       if (msg.id && this.pending.has(msg.id)) {
         const { resolve, reject } = this.pending.get(msg.id);
         this.pending.delete(msg.id);
-        if (msg.error) reject(new Error(msg.error.message));
-        else resolve(msg.result);
+        msg.error ? reject(new Error(msg.error.message)) : resolve(msg.result);
         return;
       }
       if (msg.method) {
         this.events.push(msg);
-        this.waiters = this.waiters.filter((w) => {
-          if (w.method !== msg.method) return true;
-          w.resolve(msg.params);
-          return false;
-        });
+        this.waiters = this.waiters.filter((w) => { if (w.method !== msg.method) return true; w.resolve(msg.params); return false; });
       }
     });
   }
-
   send(method, params = {}) {
     const id = (this.nextId += 1);
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
       this.ws.send(JSON.stringify({ id, method, params }));
-      setTimeout(() => {
-        if (this.pending.has(id)) {
-          this.pending.delete(id);
-          reject(new Error(`CDP 超时: ${method}`));
-        }
-      }, 20000);
+      setTimeout(() => { if (this.pending.has(id)) { this.pending.delete(id); reject(new Error(`CDP 超时: ${method}`)); } }, 25000);
     });
   }
-
   waitEvent(method, timeout = 15000) {
     const found = this.events.find((e) => e.method === method);
     if (found) return Promise.resolve(found.params);
     return new Promise((resolve, reject) => {
       const waiter = { method, resolve };
       this.waiters.push(waiter);
-      setTimeout(() => {
-        this.waiters = this.waiters.filter((w) => w !== waiter);
-        reject(new Error(`等待事件超时: ${method}`));
-      }, timeout);
+      setTimeout(() => { this.waiters = this.waiters.filter((w) => w !== waiter); reject(new Error(`等待事件超时: ${method}`)); }, timeout);
     });
   }
 }
 
-/* ---------------------------------------------------------------- 主流程 */
+let browserProc = null;
+let shotIndex = 0;
 
 async function main() {
   fs.mkdirSync(OUT_DIR, { recursive: true });
-  const { token, questionnaire } = await ensureDemoQuestionnaire();
-  const scenarioId = questionnaire.experiments[0].scenarioId;
+  const { token, questionnaire } = await ensureDemo();
   const browserPath = findBrowser();
-  const userDataDir = path.join(os.tmpdir(), `expchat-capture-${Date.now()}`);
+  const browser = spawn(browserPath, [
+    '--headless=new', `--remote-debugging-port=${PORT}`,
+    `--user-data-dir=${path.join(os.tmpdir(), `expchat-capture-${Date.now()}`)}`,
+    '--window-size=1440,1000', '--hide-scrollbars', '--no-first-run', '--disable-extensions', '--mute-audio',
+    'about:blank'
+  ], { stdio: 'ignore' });
+  browserProc = browser;
+  process.on('exit', () => { try { browser.kill(); } catch { /* 忽略 */ } });
 
-  const browser = spawn(
-    browserPath,
-    [
-      '--headless=new',
-      `--remote-debugging-port=${PORT}`,
-      `--user-data-dir=${userDataDir}`,
-      '--window-size=1280,900',
-      '--hide-scrollbars',
-      '--no-first-run',
-      '--disable-extensions',
-      '--mute-audio',
-      'about:blank'
-    ],
-    { stdio: 'ignore' }
-  );
-  process.on('exit', () => {
-    try {
-      browser.kill();
-    } catch {
-      /* 忽略 */
-    }
-  });
-
-  // 等待调试端口就绪
   let ready = false;
   for (let i = 0; i < 60; i += 1) {
-    try {
-      const res = await fetch(`http://127.0.0.1:${PORT}/json/version`);
-      if (res.ok) {
-        ready = true;
-        break;
-      }
-    } catch {
-      /* 继续等待 */
-    }
+    try { const res = await fetch(`http://127.0.0.1:${PORT}/json/version`); if (res.ok) { ready = true; break; } } catch { /* 等待 */ }
     await sleep(250);
   }
   if (!ready) throw new Error('浏览器调试端口未就绪');
 
-  // 新建页面 target
   let target = null;
-  try {
-    const res = await fetch(`http://127.0.0.1:${PORT}/json/new`, { method: 'PUT' });
-    if (res.ok) target = await res.json();
-  } catch {
-    /* 降级到已有 target */
-  }
-  if (!target) {
-    const list = await fetch(`http://127.0.0.1:${PORT}/json/list`).then((r) => r.json());
-    target = list.find((t) => t.type === 'page');
-  }
-  if (!target) throw new Error('未找到可用的浏览器页面');
+  try { const res = await fetch(`http://127.0.0.1:${PORT}/json/new`, { method: 'PUT' }); if (res.ok) target = await res.json(); } catch { /* 降级 */ }
+  if (!target) target = (await fetch(`http://127.0.0.1:${PORT}/json/list`).then((r) => r.json())).find((t) => t.type === 'page');
+  if (!target) throw new Error('未找到浏览器页面');
 
   const ws = new WebSocket(target.webSocketDebuggerUrl);
   await new Promise((resolve, reject) => {
     ws.addEventListener('open', resolve, { once: true });
-    ws.addEventListener('error', () => reject(new Error('CDP WebSocket 连接失败')), { once: true });
+    ws.addEventListener('error', () => reject(new Error('CDP 连接失败')), { once: true });
   });
-
   const cdp = new CDP(ws);
   await cdp.send('Page.enable');
   await cdp.send('Runtime.enable');
-  await cdp.send('Emulation.setDeviceMetricsOverride', {
-    width: 1280,
-    height: 900,
-    deviceScaleFactor: 2,
-    mobile: false
-  });
+  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1000, deviceScaleFactor: 2, mobile: false });
 
-  let shotIndex = 0;
   const shot = async (name) => {
     shotIndex += 1;
     const { data } = await cdp.send('Page.captureScreenshot', { format: 'png' });
-    const file = path.join(OUT_DIR, `${name}.png`);
-    fs.writeFileSync(file, Buffer.from(data, 'base64'));
-    console.log(`[${shotIndex}] 已保存 ${file}`);
+    fs.writeFileSync(path.join(OUT_DIR, `${name}.png`), Buffer.from(data, 'base64'));
+    console.log(`[${shotIndex}] ${name}`);
   };
-
-  const goto = async (url, settle = 600) => {
+  const goto = async (url, settle = 700) => {
     cdp.events = [];
     await cdp.send('Page.navigate', { url });
     await cdp.waitEvent('Page.loadEventFired');
     await sleep(settle);
   };
-
-  const evaluate = async (expression, awaitPromise = false) => {
-    const res = await cdp.send('Runtime.evaluate', {
-      expression,
-      awaitPromise,
-      returnByValue: true
-    });
+  const evaluate = async (expression) => {
+    const res = await cdp.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
     if (res.exceptionDetails) {
-      const desc =
-        (res.exceptionDetails.exception && res.exceptionDetails.exception.description) ||
-        res.exceptionDetails.text;
-      throw new Error(`页面脚本出错: ${desc}`);
+      throw new Error('页面脚本出错: ' + ((res.exceptionDetails.exception && res.exceptionDetails.exception.description) || res.exceptionDetails.text));
     }
     return res.result.value;
   };
-
-  // ---- hash 路由切换助手（同文档导航，不触发整页加载）
-  const hashTo = async (hash, settle = 700) => {
-    await evaluate(`(() => { location.hash = ${JSON.stringify(hash)}; return 'ok'; })()`);
-    await sleep(settle);
+  const hashTo = async (hash, settle = 800) => { await evaluate(`(() => { location.hash = ${JSON.stringify(hash)}; return 'ok'; })()`); await sleep(settle); };
+  const waitFor = async (expression, timeout, label) => {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      const ok = await evaluate(`(() => { try { return !!(${expression}); } catch (e) { return false; } })()`);
+      if (ok) return true;
+      await sleep(400);
+    }
+    throw new Error('等待超时：' + label);
   };
 
-  // ---- 1. 入口说明页
+  // ---- 管理端
   await goto(`${BASE}/`, 900);
-  await shot('v3-01-home');
-
-  // ---- 2. 管理端登录页
+  await shot('v6-01-home');
   await goto(`${BASE}/admin`, 900);
-  await shot('v3-02-admin-login');
+  await shot('v6-02-admin-login');
+  await evaluate(`sessionStorage.setItem('expchat_admin_token', ${JSON.stringify(token)})`);
+  await goto(`${BASE}/admin`, 1200);
+  await shot('v6-03-admin-exp-list');
+  await hashTo('#/exp/group3-high-clarity', 1200);
+  await shot('v6-04-admin-exp-editor');
+  await evaluate(`document.querySelectorAll('#sidebar-outline .ol-item')[6].click()`);
+  await sleep(700);
+  await shot('v6-05-admin-exp-outline');
+  // 选中「内容创作」题组并滚动到视口中央（选中态会展开为完整编辑器，含子题）
+  await evaluate(`(() => { const c=[...document.querySelectorAll('.qcard')].find(x=>/内容创作/.test(x.querySelector('.qtitle').textContent)); if (c) c.querySelector('.qcard-head').click(); return 'ok'; })()`);
+  await sleep(600);
+  await evaluate(`(() => { const c=[...document.querySelectorAll('.qcard')].find(x=>/内容创作/.test(x.querySelector('.qtitle').textContent)); if (c) c.scrollIntoView({ block: 'center' }); return 'ok'; })()`);
+  await sleep(600);
+  await shot('v6-06-admin-timing-limits');
+  // 从头试填
+  await evaluate(`startTrial()`);
+  await sleep(1200);
+  // 试填使用真实控件：点「继续」推进到打分局，再截图（可见可点的数字按钮而非下拉栏）
+  for (let i = 0; i < 5; i += 1) {
+    await evaluate(`(() => { const b=[...document.querySelectorAll('#pv-actions .go')].find(x=>/继续|开始实验/.test(x.textContent) && !x.classList.contains('disabled')); if (b) { b.click(); return 'clicked'; } return 'skip'; })()`);
+    await sleep(500);
+  }
+  await shot('v6-07-admin-trial');
+  await evaluate(`exitTrial()`);
+  await sleep(500);
+  await hashTo('#/q', 900);
+  await shot('v6-08-admin-q-list');
+  await hashTo(`#/q/${questionnaire.id}`, 1200);
+  await shot('v6-09-admin-q-editor');
 
-  // ---- 3. 登录（写入 sessionStorage 后刷新进入）→ 问卷管理列表
-  await evaluate(
-    `(() => { sessionStorage.setItem('expchat_admin_token', ${JSON.stringify(token)}); return 'ok'; })()`
-  );
-  await goto(`${BASE}/admin`, 1100);
-  await shot('v3-03-admin-q-list');
-
-  // ---- 4. 新建问卷页（填写名称，展示流程文案快照 + 实验编排）
-  await hashTo('#/q/new', 900);
-  await evaluate(`(() => {
-    const input = document.querySelector('#q-editor .editor-section input');
-    if (input) input.value = '演示问卷 · 新建示例';
+  // ---- 从头试填（问卷编辑页，20× 倍速）跑到「试填结束」：回归「点试填后手机屏空白」——空消息必须被跳过
+  await evaluate(`(() => { const s = document.querySelector('.pv-speed'); s.value = '20'; s.dispatchEvent(new Event('change')); state.previewSpeed = 20; return 'ok'; })()`);
+  const splitterOk = JSON.parse(await evaluate(`(() => {
+    const side = document.getElementById('split-sidebar');
+    const main = document.querySelector('.editor-cols > .splitter');
+    return JSON.stringify({ side: !!side, main: !!main, tools: ['btn-side-out', 'btn-side-in', 'btn-side-collapse', 'btn-side-expand'].every((id) => !!document.getElementById(id)) });
+  })()`));
+  console.log('三栏布局：分隔线（菜单栏 ' + (splitterOk.side ? '有' : '缺') + ' / 编辑·手机 ' + (splitterOk.main ? '有' : '缺')
+    + '）+ 菜单栏折叠与缩放按钮 ' + (splitterOk.tools ? '齐全 ✔' : '缺失 ✘'));
+  await evaluate(`startTrial()`);
+  const trialStep = () => evaluate(`(() => {
+    const b = document.getElementById('pv-body');
+    const gates = [...b.querySelectorAll('.screen-gate')];
+    const gate = gates.find((g) => !g.querySelector('.go').classList.contains('done-flag')) || null;
+    const card = b.querySelector('.pv-qcard.active');
+    const doneCards = [...b.querySelectorAll('.pv-qcard.done')];
+    return JSON.stringify({
+      kids: b.children.length,
+      done: !!b.querySelector('.pv-done'),
+      gate: gate ? gate.querySelector('.go').textContent : null,
+      gateChecked: gate ? gate.querySelector('.check').classList.contains('checked') : null,
+      consentCount: gates.filter((g) => /知情同意/.test(g.textContent)).length,
+      q: card ? (card.querySelector('.pv-qtitle') || {}).textContent || '' : null,
+      opts: card ? [...card.querySelectorAll('.option-btn')].map((x) => x.textContent.trim()) : [],
+      timer: card && card.querySelector('.pv-timer') ? card.querySelector('.pv-timer').textContent : '',
+      doneCards: doneCards.length,
+      toggles: doneCards.filter((c) => c.querySelector('.pv-qtoggle')).length,
+      idx: state.trial ? state.trial.idx : null
+    });
+  })()`);
+  const trialAnswer = () => evaluate(`(() => {
+    const card = document.querySelector('#pv-body .pv-qcard.active');
+    if (!card) return 'no-card';
+    const first = card.querySelector('.rating-btn, .option-btn');
+    if (first && !card.querySelector('.rating-btn.selected, .option-btn.selected')) first.click();
+    card.querySelectorAll('textarea, input').forEach((inp) => { if (!inp.value) { inp.value = '试填内容'; inp.dispatchEvent(new Event('input')); } });
+    const s = card.querySelector('.pv-submit');
+    if (s && !s.disabled) s.click();
     return 'ok';
   })()`);
+  let trialGuard = 0;
+  let trialBlankAt = null;
+  let trialReached = false;
+  let trialOpts = null;
+  let trialTimer = null;
+  let trialConsentLeft = null;
+  let trialToggleSeen = 0;
+  let sawConsent = false;
+  let trialChoiceShot = false;
+  const trialSeen = [];
+  while (trialGuard++ < 900) {
+    const st = JSON.parse(await trialStep());
+    if (st.idx != null && !trialSeen.includes(st.idx)) trialSeen.push(st.idx);
+    if (!trialOpts && st.opts.length) trialOpts = st.opts;
+    if (!trialTimer && st.timer) trialTimer = st.timer;
+    if (st.consentCount > 0) sawConsent = true;
+    else if (sawConsent) trialConsentLeft = 0;                        // 同意页确认后不再留在屏内
+    if (st.doneCards > 0 && st.toggles === st.doneCards) trialToggleSeen = Math.max(trialToggleSeen, st.doneCards);
+    if (st.done) { trialReached = true; break; }
+    if (!st.kids) { trialBlankAt = st.idx; break; }
+    if (st.gate) {
+      await evaluate(`(() => { const gs = [...document.querySelectorAll('#pv-body .screen-gate')]; const last = gs[gs.length - 1];
+        if (!last.querySelector('.check').classList.contains('checked')) last.querySelector('.check').click(); else last.querySelector('.go').click(); return 'ok'; })()`);
+      await sleep(400);
+      continue;
+    }
+    if (st.q && st.opts.length && !trialChoiceShot) { trialChoiceShot = true; await sleep(250); await shot('v6-21-admin-trial-choice'); }
+    if (st.q) { await trialAnswer(); await sleep(400); continue; }
+    await sleep(300);
+  }
+  await sleep(400);
+  await shot('v6-20-admin-trial-end');
+  console.log('从头试填（20×）：' + (trialReached
+    ? `跑到「试填结束」✔（经过 ${trialSeen.length} 个步骤）`
+    : `未跑完 ✘${trialBlankAt != null ? `，在第 ${trialBlankAt} 步出现空白屏` : '（超时）'}`));
+  console.log('  试填检查：选项文字 ' + (trialOpts && trialOpts.every((t) => t) ? `非空 ✔ ${JSON.stringify(trialOpts)}` : '空白 ✘')
+    + '；知情同意确认后已从屏内清空 ' + (trialConsentLeft === 0 ? '✔' : '✘')
+    + `；已答题折叠按钮 ${trialToggleSeen > 0 ? `${trialToggleSeen} 张全覆盖 ✔` : '缺失 ✘'}`
+    + '；右上角倒计时 ' + (trialTimer ? `出现过（${trialTimer}）✔` : '未出现 ✘'));
+  await evaluate(`if (state.trial) exitTrial(); 0`);
+  await sleep(400);
+
+  // ---- 被试端全流程（新会话，避免沿用管理端同一浏览器里的记录）
+  await evaluate(`localStorage.clear()`);
+  await goto(`${BASE}/chat?q=${questionnaire.id}&fresh=1`, 1200);
+  await waitFor(`!document.getElementById('page-screen').classList.contains('hidden')`, 30000, '知情同意页');
+  await shot('v6-10-chat-consent');
+  await evaluate(`(() => { const cb=document.getElementById('page-check'); cb.checked=true; cb.dispatchEvent(new Event('change')); return 'ok'; })()`);
   await sleep(300);
-  await shot('v3-04-admin-q-new');
+  await evaluate(`document.getElementById('page-btn').click()`);
+  await waitFor(`(() => { const a=state.action; return !!(a && a.type==='rating' && state.questionNodes.get(a.itemId)); })()`, 120000, '首个打分题');
+  await shot('v6-11-chat-rating');
 
-  // ---- 5. 修改问卷（独立编辑页）
-  await hashTo(`#/q/${questionnaire.id}/edit`, 900);
-  await shot('v3-05-admin-q-edit');
-
-  // ---- 6. 流程页面（默认文案模板）
-  await hashTo('#/flow', 800);
-  await shot('v3-06-admin-flow');
-
-  // ---- 7. 研究2 情景编辑页
-  await hashTo(`#/r2/${scenarioId}`, 900);
-  await shot('v3-07-admin-r2-editor');
-
-  // ---- 操作区助手：点选选项并提交，等待动画完成
-  const answer = async (selector, value, waitMs) => {
+  // 内联作答：直接点卡片内的控件（打分局/单选点选即提交；题组/文本点提交）
+  const answerCurrent = async () => {
+    const info = await evaluate(`(() => {
+      const a = state.action;
+      if (!a) return null;
+      const node = state.questionNodes.get(a.itemId);
+      if (!node) return null;
+      return { type: a.type, id: a.itemId, gated: node.submitBtn ? node.submitBtn.disabled : false };
+    })()`);
+    if (!info) return null;
     await evaluate(`(() => {
-      const btn = document.querySelector(${JSON.stringify(selector)} + '[data-value="' + ${JSON.stringify(String(value))} + '"]');
-      if (!btn) throw new Error('未找到选项 ' + ${JSON.stringify(String(value))});
-      btn.click();
-      document.getElementById('btn-submit').click();
+      const a = state.action;
+      const node = state.questionNodes.get(a.itemId);
+      if (!node) return 'skip';
+      const card = node.card;
+      // 1) 先选/填（控件在门控期间也可操作）
+      if (a.type === 'rating' || a.type === 'single') {
+        const b = card.querySelector('.rating-btn') || card.querySelector('.option-btn');
+        if (b) b.click();
+      } else if (a.type === 'multi') {
+        card.querySelectorAll('.option-btn').forEach((b2, i) => { if (i === 0) b2.click(); });
+      } else if (a.type === 'text') {
+        const inp = card.querySelector('.answer-input');
+        if (inp && !inp.value) { inp.value = '轻负担，一口青柠爽'; inp.dispatchEvent(new Event('input')); }
+      } else if (a.type === 'group') {
+        card.querySelectorAll('.answer-input').forEach((inp, i) => {
+          if (!inp.value) { inp.value = i === 0 ? '轻负担，一口青柠爽' : '突出 0 糖'; inp.dispatchEvent(new Event('input')); }
+        });
+      }
+      // 2) 再点提交（按钮未到放行时间时会被服务端 too_early 兜底，由外层循环等待）
+      if (node.submitBtn && !node.submitBtn.disabled) node.submitBtn.click();
+      // 记下「本轮提交前的最后一条内容」，用于校验新内容是否落在视口顶部（issue 5）
+      const s = document.getElementById('chat-stream');
+      s.querySelectorAll('[data-step-base]').forEach((n) => n.removeAttribute('data-step-base'));
+      if (s.lastElementChild) s.lastElementChild.setAttribute('data-step-base', '1');
       return 'ok';
     })()`);
-    await sleep(waitMs);
+    await sleep(420);
+    return info;
   };
 
-  // ---- 8. 被试端：知情同意页（问卷级文案）
-  await goto(`${BASE}/chat?q=${questionnaire.id}`, 900);
-  await shot('v3-08-chat-consent');
-
-  // ---- 9. 勾选同意并开始 → 欢迎语 + 情境材料 → 决策操作区
-  await evaluate(`(() => {
-    const cb = document.getElementById('consent-checkbox');
-    cb.checked = true;
-    cb.dispatchEvent(new Event('change'));
-    document.getElementById('btn-consent').click();
-    return 'ok';
+  // 当前待作答卡片是否处于门控 / 计时状态
+  const seen = [];
+  // 按服务端门控时刻精确等待：availableAtMs（强制阅读）/ minSubmitAtMs（最短提交）/ pendingAt（延迟消息）
+  const gateInfo = () => evaluate(`(() => {
+    const a = state.action;
+    const pendingAt = state.pendingAtMs || 0;
+    return {
+      type: a ? a.type : null, itemId: a ? a.itemId : null,
+      availableAtMs: a ? (a.availableAtMs || 0) : 0,
+      minSubmitAtMs: a ? (a.minSubmitAtMs || 0) : 0,
+      deadlineMs: a ? (a.deadlineMs || 0) : 0,
+      serverNow: (typeof serverNow === 'function' ? serverNow() : Date.now()),
+      pendingAt,
+      // 正处于「等 AI 回复」的过渡窗口：此时视口按设计跟随底部等待，不计入落点判定
+      pending: !!(pendingAt && pendingAt > (typeof serverNow === 'function' ? serverNow() : Date.now())),
+      locked: !!(a && state.questionNodes.get(a.itemId) && state.questionNodes.get(a.itemId).card.classList.contains('locked')),
+      hint: (a && state.questionNodes.get(a.itemId) && state.questionNodes.get(a.itemId).hint) ? state.questionNodes.get(a.itemId).hint.textContent : '',
+      waiting: !!document.querySelector('.thinking-label'),
+      // 题目右上角倒计时徽标（门控 → 作答倒计时）
+      timer: (a && state.questionNodes.get(a.itemId) && state.questionNodes.get(a.itemId).timer)
+        ? state.questionNodes.get(a.itemId).timer.textContent : '',
+      cardDone: (() => {
+        const n = a && state.questionNodes.get(a.itemId);
+        return !!(n && n.card.classList.contains('done'));
+      })(),
+      completed: state.completed,
+      cardTop: (a && state.questionNodes.get(a.itemId))
+        ? Math.round(state.questionNodes.get(a.itemId).card.getBoundingClientRect().top
+          - document.getElementById('chat-scroll').getBoundingClientRect().top)
+        : null,
+      // 本轮新增内容的开头应贴视口顶部（issue 5）：期望 scrollTop = 该节点顶部 - 12（不够滚则贴底）
+      stepTop: (() => {
+        const sc = document.getElementById('chat-scroll');
+        const s = document.getElementById('chat-stream');
+        if (!sc || !s) return null;
+        const base = s.querySelector('[data-step-base]');
+        const node = base ? base.nextElementSibling : s.firstElementChild;
+        if (!node) return null;
+        const desired = Math.max(0, node.getBoundingClientRect().top - sc.getBoundingClientRect().top + sc.scrollTop - 12);
+        const max = sc.scrollHeight - sc.clientHeight;
+        return { got: Math.round(sc.scrollTop), desired: Math.round(desired), max: Math.round(max),
+          dom: s.children.length + 'n/' + s.querySelectorAll('.qcard').length + 'c/' + s.querySelectorAll('.qcard.done').length + 'd' };
+      })(),
+      pageVisible: !document.getElementById('page-screen').classList.contains('hidden'),
+      pageTitle: document.getElementById('page-title').textContent,
+      pageBtnHidden: document.getElementById('page-btn').classList.contains('hidden')
+    };
   })()`);
-  await sleep(11000);
-  await shot('v3-09-chat-choice');
 
-  // ---- 10. 决策①完成 → 研究2 匹配文本 → 相似度评分
-  await answer('.option-btn', 1, 9000);
-  await shot('v3-10-chat-rating');
+  let guard = 0;
+  const landings = {};        // 每道新题首次出现时，「本轮新增内容」距视口顶部的像素（issue 5）
+  const chatTimers = [];      // 被试端右上角倒计时的取值样本
+  while (guard++ < 1500) {
+    const info = await gateInfo();
+    if (info.timer && !chatTimers.includes(info.timer)) chatTimers.push(info.timer);
+    // 只在「题目待作答且不处于等 AI 回复」时判定落点
+    if (info.itemId && info.stepTop && !info.pending && !info.waiting && !info.cardDone) {
+      // 取「进入下一题之前的最后一次采样」：平滑滚动可能仍在进行，首帧会偏
+      const st = info.stepTop;
+      const ok = st.desired >= st.max - 40 ? st.got >= st.max - 40 : Math.abs(st.got - st.desired) <= 8;   // 贴底容差：倒计时徽标出现会让卡片略增高
+      const prev = landings[info.itemId];
+      const samples = (prev ? prev.samples : 0) + 1;
+      // 只取题目出现后的前 3 次采样（此后的变化是「等待 AI 回复跟随底部」等设计行为，不属落点判定）
+      if (!prev || prev.samples < 3) {
+        landings[info.itemId] = { type: info.type, ok, got: st.got, desired: st.desired, max: st.max, samples, trace: (prev ? prev.trace : []), dom: st.dom };
+      } else {
+        prev.samples = samples;
+      }
+      const lg = landings[info.itemId];
+      if (lg.trace.length < 10) lg.trace.push(st.got + '/' + st.desired + '/' + st.max + (info.waiting ? 'W' : '') + '[' + st.dom + ']');
+    }
+    // 1) 等待延迟发出的消息
+    if (info.pendingAt && info.pendingAt > info.serverNow) {
+      if (!seen.includes('WAIT-FEEDBACK')) { seen.push('WAIT-FEEDBACK'); await shot('v6-12-chat-waiting'); }
+      await sleep(Math.min(1500, info.pendingAt - info.serverNow + 120));
+      continue;
+    }
+    // 2) 等待作答前强制阅读
+    if (info.availableAtMs && info.availableAtMs > info.serverNow) {
+      if (!seen.includes('WAIT-READING')) { seen.push('WAIT-READING'); await shot('v6-13-chat-reading-gate'); }
+      await sleep(Math.min(1500, info.availableAtMs - info.serverNow + 120));
+      continue;
+    }
+    // 3) 等待最短提交时间（创作窗口）：同时抓一张创作窗口截图
+    if (info.minSubmitAtMs && info.minSubmitAtMs > info.serverNow) {
+      if (!seen.includes('SHOT-CREATION') && (info.type === 'text' || info.type === 'group')) { seen.push('SHOT-CREATION'); await shot('v6-14-chat-text-window'); }
+      await sleep(Math.min(1500, info.minSubmitAtMs - info.serverNow + 120));
+      continue;
+    }
+    // 4) 全屏页面题：知情同意 / 结束说明 → 截图后点按钮继续
+    if (info.type === 'gate' || info.type === 'debrief') {
+      const key = `${info.type}:${info.itemId}`;
+      if (!seen.includes(key)) seen.push(key);
+      if (info.type === 'debrief' && !seen.includes('SHOT-DEBRIEF')) {
+        seen.push('SHOT-DEBRIEF');
+        await sleep(600);
+        await shot('v6-15-chat-debrief');
+      }
+      if (info.type === 'gate') {
+        await evaluate(`(() => { const cb=document.getElementById('page-check'); cb.checked=true; cb.dispatchEvent(new Event('change')); return 'ok'; })()`);
+        await sleep(250);
+      }
+      await evaluate(`document.getElementById('page-btn').click()`);
+      await sleep(700);
+      continue;
+    }
+    // 5) 结束（已无待作答单元）
+    if (info.completed || !info.type) break;
+    // 6) 作答当前单元
+    const key = `${info.type}:${info.itemId}`;
+    if (!seen.includes(key)) seen.push(key);
+    await answerCurrent();
+    await sleep(900);        // 等平滑滚动落定，再采样落点
+    // 已提交的卡片就地保留（只读 + ✓ 已提交）——抓一张回看
+    if (info.type === 'rating' && !seen.includes('SHOT-ANSWERED')) {
+      seen.push('SHOT-ANSWERED');
+      await evaluate(`(() => {
+        const done = document.querySelectorAll('#chat-scroll .qcard.done');
+        const last = done[done.length - 1];
+        if (last) { const sc = document.getElementById('chat-scroll'); sc.scrollTop = Math.max(0, last.offsetTop - 80); }
+        return 'ok';
+      })()`);
+      await sleep(500);
+      await shot('v6-19-chat-answered');
+    }
+  }  await sleep(800);
+  if (!seen.includes('SHOT-DEBRIEF')) await shot('v6-15-chat-debrief');
+  // 结束页：同一设备给下一位被试的「重新开始」入口
+  const finalInfo = JSON.parse(await evaluate(`(() => {
+    const b = document.getElementById('page-btn');
+    return JSON.stringify({
+      visible: !document.getElementById('page-screen').classList.contains('hidden'),
+      label: b.textContent,
+      hint: document.getElementById('page-hint').textContent
+    });
+  })()`));
+  console.log('结束页换人入口：' + (finalInfo.visible && /重新开始/.test(finalInfo.label) ? `按钮「${finalInfo.label}」✔` : '缺失 ✘'));
+  if (finalInfo.visible) await shot('v6-22-chat-final');
+  const done = await evaluate('JSON.stringify({ answered: state.answeredCount, total: state.totalAnswers, completed: state.completed })');
+  // issue 5：每道新题出现时，滚动位置是否落在「本轮新增内容的开头」（内容不足一屏则贴底也算合格）
+  const rows = Object.values(landings);
+  const bad = rows.filter((r) => !r.ok);
+  console.log('新内容落点（滚动位置 / 期望位置）：共 ' + rows.length + ' 题，'
+    + (bad.length
+      ? `${bad.length} 处未落到内容开头 ✘ ` + bad.map((r) => `${r.type} got=${r.got} desired=${r.desired} max=${r.max}`).join('；')
+      : '均落在内容开头 ✔'));
+  console.log('被试端完成情况：' + done + '（等待类型：' + seen.filter((x) => x.startsWith('WAIT')).join(', ') + '）');
+  const answeringTimer = chatTimers.find((t) => /作答计时/.test(t));
+  console.log('  被试端右上角倒计时：共 ' + chatTimers.length + ' 种取值' + (chatTimers.length ? '（' + chatTimers.slice(0, 3).map((t) => `「${t}」`).join(' ') + '…）' : '')
+    + '；作答倒计时阶段 ' + (answeringTimer ? `出现过「${answeringTimer}」✔` : '未出现 ✘'));
 
-  // ---- 11. 评分完成 → 衔接语 + 下一任务材料（多次博弈）→ 决策
-  await answer('.rating-btn', 5, 9000);
-  await shot('v3-11-chat-next-task');
+  // ---- 手机端
+  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 375, height: 812, deviceScaleFactor: 2, mobile: true });
+  await evaluate(`localStorage.clear()`);
+  await goto(`${BASE}/chat?q=${questionnaire.id}&fresh=1`, 1200);
+  await waitFor(`!document.getElementById('page-screen').classList.contains('hidden')`, 30000, '手机端知情同意页');
+  await evaluate(`(() => { const cb=document.getElementById('page-check'); cb.checked=true; cb.dispatchEvent(new Event('change')); document.getElementById('page-btn').click(); return 'ok'; })()`);
+  await waitFor(`(() => { const a=state.action; return !!(a && a.type==='rating' && state.questionNodes.get(a.itemId)); })()`, 120000, '手机端打分题');
+  await shot('v6-16-mobile-rating');
+  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1000, deviceScaleFactor: 2, mobile: false });
 
-  // ---- 12. 第二次评分完成 → 研究3 段：基线决策
-  await answer('.option-btn', 2, 9000);
-  await answer('.rating-btn', 6, 11000);
-  await shot('v3-12-chat-r3-base');
-
-  // ---- 13. 基线决策完成 → 控制组文本呈现 → 再次决策
-  await answer('.option-btn', 2, 9000);
-  await shot('v3-13-chat-group-text');
-
-  // ---- 14. 快速走完剩余步骤 → 结束说明页（终态：无任何跳转按钮）
-  await answer('.option-btn', 4, 9000);
-  await answer('.option-btn', 1, 11000);
-  await answer('.option-btn', 3, 11000);
-  await sleep(1600);
-  await shot('v3-14-chat-debrief');
-
-  // ---- 视口切换助手（手机端适配检查）
-  const setViewport = async (width, height, mobile) => {
-    await cdp.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 2, mobile });
-    await sleep(350);
-  };
-
-  // ---- 15. 手机端（375×812）：知情同意页
-  await setViewport(375, 812, true);
-  await goto(`${BASE}/chat?q=${questionnaire.id}&fresh=1`, 900);
-  await shot('v3-15-mobile-consent');
-
-  // ---- 16. 手机端：勾选同意开始 → 选项卡片界面（2 列紧凑 + 右上角折叠按钮）
-  await evaluate(`(() => {
-    const cb = document.getElementById('consent-checkbox');
-    cb.checked = true;
-    cb.dispatchEvent(new Event('change'));
-    document.getElementById('btn-consent').click();
-    return 'ok';
-  })()`);
-  await sleep(11000);
-  await shot('v3-16-mobile-choice');
-
-  // ---- 恢复桌面视口
-  await setViewport(1280, 900, false);
-
-  // ---- 17. 问卷数据页（行级作答视图：实验 / 问题筛选 + 导出）
-  await goto(`${BASE}/admin`, 1100);
-  await hashTo(`#/q/${questionnaire.id}`, 1300);
-  await shot('v3-17-data-list');
-
-  // ---- 18. 数据页筛选：实验＝研究3 → 问题＝基线决策
-  await evaluate(`(() => {
-    const selects = document.querySelectorAll('#q-detail-toolbar select');
-    if (selects.length < 2) throw new Error('筛选器未渲染');
-    selects[0].value = '2';
-    selects[0].dispatchEvent(new Event('change'));
-    return 'ok';
-  })()`);
-  await sleep(1300);
-  await evaluate(`(() => {
-    const selects = document.querySelectorAll('#q-detail-toolbar select');
-    selects[1].value = 'r3_base';
-    selects[1].dispatchEvent(new Event('change'));
-    return 'ok';
-  })()`);
-  await sleep(1300);
-  await shot('v3-18-data-filtered');
-
-  // ---- 19. 个案详情（会话信息 + 作答明细 + 对话时间线）
-  await evaluate(`(() => {
-    const row = document.querySelector('#q-detail-list .data-row');
-    if (!row) throw new Error('数据列表为空，无法进入详情');
-    row.click();
-    return 'ok';
-  })()`);
-  await sleep(1300);
-  await shot('v3-19-data-detail');
+  // ---- 数据页
+  await goto(`${BASE}/admin`, 1200);
+  await hashTo(`#/q/${questionnaire.id}/data`, 1400);
+  await shot('v6-17-admin-data');
+  await evaluate(`(() => { const r=document.querySelector('#admin-main .data-table tbody tr'); if (r) r.click(); return 'ok'; })()`);
+  await sleep(1400);
+  await shot('v6-18-admin-session');
 
   ws.close();
   browser.kill();
-  console.log(`全部截图完成，共 ${shotIndex} 张，输出目录：${OUT_DIR}`);
+  console.log(`\n走查完成，共 ${shotIndex} 张截图 → ${OUT_DIR}`);
 }
 
-main().catch((err) => {
-  console.error('CAPTURE ERROR:', err.message);
-  process.exitCode = 1;
-});
+main()
+  .then(() => process.exit(0))
+  .catch((err) => {
+    console.error('CAPTURE ERROR:', err.message);
+    try { if (browserProc) browserProc.kill(); } catch { /* 忽略 */ }
+    process.exit(1);
+  });

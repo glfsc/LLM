@@ -83,24 +83,24 @@
       max-width: 720px;
     }
 
-    .scenario {
+    .entry-section {
       margin-bottom: 28px;
     }
 
-    .scenario-head {
+    .entry-section-head {
       display: flex;
       align-items: baseline;
       gap: 10px;
       margin: 0 0 12px;
     }
 
-    .scenario-head h2 {
+    .entry-section-head h2 {
       font-size: 15.5px;
       font-weight: 600;
       margin: 0;
     }
 
-    .scenario-head code {
+    .entry-section-head code {
       font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
       font-size: 11.5px;
       color: var(--muted);
@@ -241,26 +241,26 @@
 
     <h1>入口说明</h1>
     <p class="sub">
-      管理者在管理端为每项研究创建一份问卷：命名、确认流程文案、插入研究实验（研究2 / 研究3，可单个或多个混排），
-      生成后自动得到一条专属链接。把链接发给被试，被试按问卷流程依次完成全部实验；
-      数据按提交顺序编号汇总在问卷详情页，支持按实验 / 问题筛选，导出时可选择全部或当前筛选内容。
+      一切皆题目：系统只有 9 种题型（消息/材料、知情同意页、结束说明页、题组、打分题、单选、多选、文本题、排序）——
+      量表就是多道打分题，内容创作就是一个题组（广告语 + 创作说明同屏作答、一次提交）。实验是可复用的题目模板，问卷则是一条链接 + 一列题目 + 计时默认值：
+      可逐题插入，也可整组插入实验模板后逐条修改。把链接发给被试即可开始作答。
     </p>
 
-    <section class="scenario">
-      <div class="scenario-head"><h2>管理端</h2><code>/admin</code></div>
+    <section class="entry-section">
+      <div class="entry-section-head"><h2>管理端</h2><code>/admin</code></div>
       <div class="group-grid">
         <a class="link-card" href="/admin">
           <span>
-            <span class="link-title">问卷管理</span><br>
-            <span class="link-desc">新建 / 修改问卷 · 复制被试链接 · 查看数据与导出 Excel</span>
+            <span class="link-title">实验管理 / 问卷管理</span><br>
+            <span class="link-desc">维护实验模板 · 编排问卷题目（左侧大纲 + 右侧手机预览）· 数据与导出</span>
           </span>
           <span class="arrow">→</span>
         </a>
       </div>
     </section>
 
-    <section class="scenario">
-      <div class="scenario-head"><h2>被试端</h2><code>/chat?q=问卷短码</code></div>
+    <section class="entry-section">
+      <div class="entry-section-head"><h2>被试端</h2><code>/chat?q=问卷短码</code></div>
       <form class="entry-form" id="entry-form">
         <input id="entry-code" type="text" placeholder="输入问卷短码（在问卷管理页复制链接）" autocomplete="off">
         <button type="submit">进入被试端</button>

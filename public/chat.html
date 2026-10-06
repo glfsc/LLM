@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>智能决策助手</title>
+  <title>智能评估系统</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%23111213'/%3E%3Ccircle cx='16' cy='16' r='5' fill='%23ffffff'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/assets/chat.css">
 </head>
@@ -13,61 +13,37 @@
       <div class="topbar-inner">
         <div class="brand">
           <span class="brand-dot" aria-hidden="true"></span>
-          <span class="brand-name">智能决策助手</span>
+          <span class="brand-name">智能评估系统</span>
           <span id="brand-sub" class="brand-sub hidden"></span>
         </div>
+        <button id="btn-collapse-all" class="ghost-btn" type="button">折叠已答题</button>
       </div>
     </header>
 
     <main id="chat-scroll" class="chat-scroll">
       <div id="chat-stream" class="chat-stream" aria-live="polite"></div>
     </main>
-
-    <footer class="composer-wrap">
-      <div id="action-area" class="action-area hidden">
-        <div class="action-head">
-          <p id="action-question" class="action-question"></p>
-          <button id="action-collapse" class="action-collapse" type="button" aria-label="收起 / 展开作答区">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
-          </button>
-        </div>
-        <div id="action-options" class="action-options"></div>
-        <div class="action-footer">
-          <span id="action-anchor" class="action-anchor"></span>
-          <button id="btn-submit" class="primary-btn" type="button" disabled>确认提交</button>
-        </div>
-      </div>
-      <p id="action-hint" class="composer-hint">请仔细阅读以上材料。</p>
-    </footer>
   </div>
 
-  <!-- 知情同意页（进入实验前的伦理门槛，勾选后方可开始） -->
-  <div id="consent-screen" class="done-screen gate hidden">
-    <div class="done-card gate-card">
-      <h2>知情同意说明</h2>
-      <div id="consent-text" class="gate-text"></div>
-      <label class="consent-check">
-        <input id="consent-checkbox" type="checkbox">
-        <span>我已阅读上述信息，自愿同意参加本次实验</span>
+  <!-- 全屏页面：知情同意页（gate）/ 结束说明页（debrief） -->
+  <div id="page-screen" class="page-screen hidden">
+    <div class="page-card">
+      <h2 id="page-title"></h2>
+      <div id="page-text" class="page-text"></div>
+      <label id="page-check-wrap" class="page-check">
+        <input id="page-check" type="checkbox">
+        <span id="page-check-label"></span>
       </label>
-      <p id="consent-error" class="gate-error hidden"></p>
-      <button id="btn-consent" class="primary-btn" type="button" disabled>开始实验</button>
-    </div>
-  </div>
-
-  <!-- 结束说明页（实验完成后展示，即最终界面；不再跳转其他页面） -->
-  <div id="debrief-screen" class="done-screen gate hidden">
-    <div class="done-card gate-card">
-      <h2 id="debrief-title">实验说明</h2>
-      <div id="debrief-text" class="gate-text"></div>
+      <p id="page-hint" class="page-hint hidden"></p>
+      <button id="page-btn" class="page-go" type="button">继续</button>
     </div>
   </div>
 
   <!-- 异常提示页 -->
-  <div id="error-screen" class="done-screen hidden">
-    <div class="done-card">
-      <h2>无法进入实验</h2>
-      <p id="error-text">请检查链接是否正确。</p>
+  <div id="error-screen" class="page-screen hidden">
+    <div class="page-card">
+      <h2>无法进入</h2>
+      <p id="error-text" class="page-text">请检查链接是否正确。</p>
     </div>
   </div>
 

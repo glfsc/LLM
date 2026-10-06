@@ -1,406 +1,301 @@
-// 一致性自检（问卷化流程：为问卷插入研究2 / 研究3 实验编排）
+// 一致性自检（统一题目模型）
 // 验证目标：
-//   1) 同一问卷内，相同作答序列的两个会话，AI 消息序列逐字一致
-//   2) 控制组 / 干预组两份问卷（相同实验编排、相同作答序列）：除研究3 组别文本外其余消息逐字一致
-//   3) 研究2 匹配文本随决策方向变化：仅决策①换向时，仅对应匹配文本不同
-//   4) 落库正确：responses 的 value/phase/task_index/play_count/experiment_sort/时间戳
-//      （shown_at = answered_at − elapsed_ms）、messages 全量入库且与接口返回一致
-//   5) 问卷数据页接口（编号按进入顺序）与 xlsx 导出可用
+//   1) 题目顺序与作答单元展开正确：38 道题 → 28 个作答单元（消息类自动跳过）
+//   2) 同问卷两个会话按相同作答序列走完，AI 消息序列逐字一致
+//   3) 组别3 / 组别4：仅「任务要求」两处不同，其余消息逐字一致
+//   4) 计时门控（服务端权威）：延迟发出 / 作答前强制等待 / 最短提交 / 最长作答（共用窗口）
+//   5) 落库：按题目记录（item_id / 题型 / 值 / 文本 / 呈现与作答时间戳 / 耗时）
+//   6) 数据页与 xlsx 导出（汇总一被试一行 + 作答明细）
+//   7) 中途退出恢复窗口三态；自检不留残留、不污染设置
 // 用法：先启动服务（npm start），再执行：node scripts/consistency-check.js
-// 说明：脚本会创建两份「自检问卷·控制组 / 干预组」跑完全流程校验，结束后自动删除，不留数据。
 'use strict';
-
-const path = require('node:path');
-const { DatabaseSync } = require('node:sqlite');
 
 const BASE = process.env.BASE || 'http://localhost:3000';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
+const zlib = require('node:zlib');
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
 const DB_FILE = path.join(__dirname, '..', 'data.db');
 
-const Q_NAME_CONTROL = '自检问卷·控制组';
-const Q_NAME_TREAT = '自检问卷·干预组';
+const EXP_NAME = '自检实验模板';
+const Q_NAME = '自检问卷';
+const Q_NAME_2 = '自检问卷·组别4';
+const TINY = { delay: 1, wait: 1, minSubmit: 1, maxAnswer: 0 };
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function request(route, options = {}) {
-  const res = await fetch(BASE + route, {
-    method: options.body ? 'POST' : 'GET',
-    headers: options.body ? { 'Content-Type': 'application/json' } : undefined,
-    body: options.body ? JSON.stringify(options.body) : undefined
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(`${route} -> ${res.status} ${JSON.stringify(data)}`);
-  return data;
+let passed = 0;
+const failures = [];
+function check(name, cond, detail) {
+  if (cond) { passed += 1; console.log(`  ✓ ${name}`); }
+  else { failures.push({ name, detail }); console.log(`  ✗ ${name}${detail ? ` —— ${detail}` : ''}`); }
 }
 
-let adminToken = '';
-
-async function admin(route, options = {}) {
-  const headers = { Authorization: `Bearer ${adminToken}` };
+async function request(route, options = {}) {
+  const headers = {};
   if (options.body) headers['Content-Type'] = 'application/json';
+  if (options.token) headers.Authorization = `Bearer ${options.token}`;
   const res = await fetch(BASE + route, {
     method: options.body ? 'POST' : 'GET',
     headers,
     body: options.body ? JSON.stringify(options.body) : undefined
   });
-  const contentType = res.headers.get('content-type') || '';
-  if (options.raw) {
-    if (!res.ok) throw new Error(`${route} -> ${res.status}`);
-    return { res, buffer: Buffer.from(await res.arrayBuffer()) };
+  return { status: res.status, ok: res.ok, data: await res.json().catch(() => ({})) };
+}
+
+let adminToken = '';
+async function admin(route, options = {}) {
+  const res = await request(route, { ...options, token: adminToken });
+  if (!res.ok) throw new Error(`${route} -> ${res.status} ${JSON.stringify(res.data)}`);
+  return res.data;
+}
+
+/* ---------------------------------------------------------------- zip 读取（校验 xlsx） */
+function unzipEntry(buf, name) {
+  const target = Buffer.from(name, 'utf8');
+  let eocd = -1;
+  for (let i = buf.length - 22; i >= 0 && i > buf.length - 66000; i -= 1) {
+    if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
   }
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(`${route} -> ${res.status} ${JSON.stringify(data)}`);
-  return data;
-}
-
-/* ---------------------------------------------------------------- 会话驱动 */
-
-// 实验编排展开为作答序列：研究2 段每任务 2 步（决策① → 评分），研究3 段每任务 2 步（基线决策 → 再决策）
-function buildAnswers(expDefs) {
-  const answers = [];
-  expDefs.forEach((exp) => {
-    exp.tasks.forEach((playCount, taskIndex) => {
-      if (exp.kind === 'r2') {
-        answers.push(taskIndex % 2 === 0 ? 1 : 2, taskIndex % 2 === 0 ? 5 : 6);
-      } else {
-        answers.push(taskIndex % 2 === 0 ? 2 : 1, taskIndex % 2 === 0 ? 4 : 3);
-      }
-    });
-  });
-  return answers;
-}
-
-function expectedShape(expDefs) {
-  const phases = [];
-  const taskIndex = [];
-  const playCount = [];
-  const experimentSort = [];
-  expDefs.forEach((exp, expIndex) => {
-    exp.tasks.forEach((pc, tIndex) => {
-      const pair = exp.kind === 'r2' ? ['r2_choice', 'r2_rating'] : ['r3_base', 'r3_choice'];
-      phases.push(...pair);
-      taskIndex.push(tIndex, tIndex);
-      playCount.push(pc, pc);
-      experimentSort.push(expIndex + 1, expIndex + 1);
-    });
-  });
-  return { phases, taskIndex, playCount, experimentSort };
-}
-
-// 按固定作答序列走完整个流程，收集消息序列与逐步状态
-async function runSession(code, answers) {
-  const created = await request('/api/session', { body: { q: code } });
-
-  const aiSequence = created.messages.map((m) => m.content);
-  const messageSequence = created.messages.map((m) => ({ role: m.role, content: m.content }));
-  const steps = [];
-
-  let action = created.action;
-  for (let i = 0; i < answers.length; i += 1) {
-    if (!action) throw new Error(`第 ${i + 1} 步缺少待作答操作`);
-    const elapsedMs = 1600 + i * 250;
-    const res = await request('/api/step', {
-      body: { sessionId: created.session.id, value: answers[i], elapsedMs }
-    });
-    messageSequence.push({ role: res.userMessage.role, content: res.userMessage.content });
-    for (const m of res.messages) {
-      aiSequence.push(m.content);
-      messageSequence.push({ role: m.role, content: m.content });
+  if (eocd < 0) return '';
+  const count = buf.readUInt16LE(eocd + 10);
+  let off = buf.readUInt32LE(eocd + 16);
+  for (let i = 0; i < count; i += 1) {
+    if (buf.readUInt32LE(off) !== 0x02014b50) break;
+    const nameLen = buf.readUInt16LE(off + 28);
+    const extraLen = buf.readUInt16LE(off + 30);
+    const commentLen = buf.readUInt16LE(off + 32);
+    const localOff = buf.readUInt32LE(off + 42);
+    if (buf.slice(off + 46, off + 46 + nameLen).equals(target)) {
+      const method = buf.readUInt16LE(localOff + 8);
+      const csize = buf.readUInt32LE(localOff + 18);
+      const lnameLen = buf.readUInt16LE(localOff + 26);
+      const lextraLen = buf.readUInt16LE(localOff + 28);
+      const start = localOff + 30 + lnameLen + lextraLen;
+      const data = buf.slice(start, start + csize);
+      return method === 0 ? data.toString('utf8') : zlib.inflateRawSync(data).toString('utf8');
     }
-    steps.push({ value: answers[i], elapsedMs, action, next: res.action, session: res.session });
-    action = res.action;
+    off += 46 + nameLen + extraLen + commentLen;
   }
-
-  return {
-    sessionId: created.session.id,
-    seq: created.session.seq,
-    aiSequence,
-    messageSequence,
-    steps,
-    finalSession: steps[steps.length - 1].session
-  };
+  return '';
 }
-
-// 逐步状态机结构校验：操作类型按步骤展开轮换、结束后 action 为空、会话完成
-function checkFlow(run, phases) {
-  const errors = [];
-  if (run.steps[0].action?.phase !== phases[0]) {
-    errors.push(`首个待作答阶段应为 ${phases[0]}，实际 ${run.steps[0].action?.phase}`);
-  }
-  const expectedNext = phases.slice(1).map((p) => (p === 'r2_rating' ? 'rating' : 'choice')).concat([null]);
-  run.steps.forEach((s, i) => {
-    const type = s.next ? s.next.type : null;
-    if (type !== expectedNext[i]) errors.push(`第 ${i + 1} 步后的操作类型应为 ${expectedNext[i]}，实际 ${type}`);
-  });
-  if (run.finalSession.status !== 'completed') errors.push('流程结束会话状态应为 completed');
-  if (errors.length) throw new Error(errors.join('；'));
+function unzipSheetNames(buf) {
+  return [...unzipEntry(buf, 'xl/workbook.xml').matchAll(/<sheet[^>]*name="([^"]*)"/g)].map((m) => m[1]);
 }
-
-const sameSeq = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
-
-function findDiffIndices(a, b) {
-  const out = [];
-  const len = Math.min(a.length, b.length);
-  for (let i = 0; i < len; i += 1) if (a[i] !== b[i]) out.push(i);
-  return out;
-}
-
-/* ---------------------------------------------------------------- 落库校验 */
-
-function openDbReadOnly() {
-  try {
-    return new DatabaseSync(DB_FILE, { readOnly: true });
-  } catch {
-    return new DatabaseSync(DB_FILE);
-  }
-}
-
-function makeQuery(db) {
-  return async (sql, params = []) => {
-    let lastErr;
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      try {
-        return db.prepare(sql).all(...params);
-      } catch (err) {
-        lastErr = err;
-        await sleep(120);
-      }
-    }
-    throw lastErr;
-  };
-}
-
-async function checkDb(account, expected, code) {
-  const db = openDbReadOnly();
-  const all = makeQuery(db);
-  const problems = [];
-
-  // —— responses：值 / 阶段 / 任务 / 实验段 / 时间戳
-  const rows = await all('SELECT * FROM responses WHERE session_id = ? ORDER BY id ASC', [account.sessionId]);
-  if (rows.length !== expected.answers.length) {
-    problems.push(`responses 数量应为 ${expected.answers.length}，实际 ${rows.length}`);
-  } else {
-    rows.forEach((row, i) => {
-      const no = `第 ${i + 1} 条 response`;
-      if (Number(row.value) !== expected.answers[i]) problems.push(`${no} value 应为 ${expected.answers[i]}，实际 ${row.value}`);
-      if (row.phase !== expected.phases[i]) problems.push(`${no} phase 应为 ${expected.phases[i]}，实际 ${row.phase}`);
-      if (Number(row.task_index) !== expected.taskIndex[i]) problems.push(`${no} task_index 应为 ${expected.taskIndex[i]}，实际 ${row.task_index}`);
-      if (Number(row.play_count) !== expected.playCount[i]) problems.push(`${no} play_count 应为 ${expected.playCount[i]}，实际 ${row.play_count}`);
-      if (Number(row.experiment_sort) !== expected.experimentSort[i]) {
-        problems.push(`${no} experiment_sort 应为 ${expected.experimentSort[i]}，实际 ${row.experiment_sort}`);
-      }
-      if (row.questionnaire_id !== code) problems.push(`${no} questionnaire_id 应为 ${code}，实际 ${row.questionnaire_id}`);
-      if (!row.option_label) problems.push(`${no} option_label 为空`);
-      if (row.shown_at && row.answered_at) {
-        const diff = new Date(row.answered_at).getTime() - new Date(row.shown_at).getTime();
-        if (Math.abs(diff - account.steps[i].elapsedMs) > 2) {
-          problems.push(`${no} 时间戳不符：answered_at − shown_at = ${diff}ms，应为 ${account.steps[i].elapsedMs}ms`);
-        }
-      } else {
-        problems.push(`${no} 缺少 shown_at / answered_at`);
-      }
-    });
-  }
-
-  // —— messages：全量入库且顺序与接口返回一致
-  const msgRows = await all('SELECT role, content FROM messages WHERE session_id = ? ORDER BY seq ASC', [account.sessionId]);
-  const expectMsgs = account.messageSequence;
-  const messagesOk =
-    msgRows.length === expectMsgs.length &&
-    msgRows.every((row, i) => row.role === expectMsgs[i].role && row.content === expectMsgs[i].content);
-  if (!messagesOk) problems.push(`messages 落库不一致（库中 ${msgRows.length} 条，期望 ${expectMsgs.length} 条）`);
-
+function backdateSession(sessionId, hoursAgo) {
+  const db = new DatabaseSync(DB_FILE);
+  db.prepare('UPDATE sessions SET started_at = ? WHERE id = ?')
+    .run(new Date(Date.now() - hoursAgo * 3600 * 1000).toISOString(), sessionId);
   db.close();
-  if (problems.length) throw new Error(problems.join('；'));
-  return { responseCount: rows.length, messageCount: msgRows.length };
+}
+
+/* ---------------------------------------------------------------- 驱动 */
+// 确定性作答：按题型给出可预期的值
+function answerBody(action, seed) {
+  switch (action.type) {
+    case 'gate': return { consent: true };
+    case 'debrief': return { ack: true };
+    case 'rating': return { value: 3 };
+    case 'single': return { value: action.options.length >= 3 ? 3 : 2 };
+    case 'multi': return { values: [1, Math.min(2, action.options.length)] };
+    case 'rank': return { order: action.options.map((o) => o.value) };
+    case 'text': return { text: `作品${seed}` };
+    case 'group': return { answers: (action.subs || []).map((sub) => (sub.type === 'text' ? { text: `作品${seed}` } : { value: 1 })) };
+    default: return {};
+  }
+}
+
+async function walk(questionnaireId, { record } = {}) {
+  const created = await request('/api/session', { body: { q: questionnaireId } });
+  if (!created.ok) throw new Error('创建会话失败: ' + JSON.stringify(created.data));
+  const sessionId = created.data.session.id;
+  let action = created.data.action;
+  const messages = created.data.messages.map((m) => ({ role: m.role, content: m.content }));
+
+  let guard = 0;
+  let seed = 0;
+  const seen = [];
+  const flags = { delay: false, wait: false, window: false, shared: false, autoSubmit: false };
+
+  while (action && guard++ < 120) {
+    if (!seen.includes(`${action.type}:${action.itemId}`)) seen.push(`${action.type}:${action.itemId}`);
+    if (action.availableAtMs && action.availableAtMs > (action.nowMs || 0)) flags.wait = true;
+    if (action.minSubmitAtMs || action.deadlineMs) flags.window = true;
+    if (action.sharedWindow) flags.shared = true;
+    if (action.type === 'group' && (action.minSubmitAtMs || action.deadlineMs)) flags.groupWindow = true;
+
+    if (action.type === 'text' || action.type === 'group') seed += 1;
+    const res = await request('/api/step', { body: { sessionId, elapsedMs: 400, ...answerBody(action, seed) } });
+    if (res.status === 400 && res.data.error === 'too_early') {
+      await sleep(Math.max(0, (res.data.availableAtMs || 0) - Date.now()) + 60);
+      continue;
+    }
+    if (!res.ok) throw new Error('step 失败: ' + JSON.stringify(res.data));
+    if (res.data.pendingAt) flags.delay = true;
+    messages.push({ role: 'user', content: '(echo)' });
+    for (const m of res.data.messages) messages.push({ role: m.role, content: m.content });
+    action = res.data.action;
+    if (res.data.session.status === 'completed') break;
+  }
+  if (record) Object.assign(record, { seen, flags, messages, sessionId, finished: !action });
+  return { sessionId, messages, action, seen, flags };
 }
 
 /* ---------------------------------------------------------------- 主流程 */
 
-function clip(text, n = 46) {
-  return text.length > n ? `${text.slice(0, n)}…` : text;
+async function cleanup() {
+  const login = await request('/api/admin/login', { body: { password: ADMIN_PASSWORD } });
+  if (!login.ok) throw new Error('管理端登录失败，请确认服务已启动');
+  adminToken = login.data.token;
+  for (const q of (await admin('/api/admin/questionnaires')).questionnaires) {
+    if (q.title === Q_NAME || q.title === Q_NAME_2) {
+      await admin('/api/admin/questionnaire/delete', { body: { id: q.id, force: true } });
+    }
+  }
+  for (const e of (await admin('/api/admin/experiments')).experiments) {
+    if (e.name === EXP_NAME) await admin('/api/admin/experiment/delete', { body: { id: e.id } });
+  }
 }
 
 async function main() {
-  console.log(`一致性自检开始（BASE = ${BASE}）`);
-  let allPass = true;
-  const check = (name, ok, extra) => {
-    allPass = allPass && ok;
-    console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}${extra ? `  -> ${extra}` : ''}`);
-  };
+  console.log('一致性自检（统一题目模型）');
+  console.log(`服务：${BASE}\n`);
+  await cleanup();
 
-  // 0) 登录管理端，读取一个情景（优先 medical）作为实验材料
-  const login = await request('/api/admin/login', { body: { password: ADMIN_PASSWORD } });
-  adminToken = login.token;
+  // 0) 自检模板：复制组别3 并把题目级计时改小，便于快速走查
+  const base = (await admin('/api/admin/experiment?id=group3-high-clarity')).experiment;
+  const tinyItems = base.items.map((it) => {
+    const limits = { ...it.limits };
+    if (limits.delay) limits.delay = TINY.delay;
+    if (limits.wait) limits.wait = TINY.wait;
+    if (limits.minSubmit) limits.minSubmit = TINY.minSubmit;
+    if (limits.maxAnswer) limits.maxAnswer = TINY.maxAnswer;
+    return { ...it, limits };
+  });
+  const exp = (await admin('/api/admin/experiment/create', { body: { name: EXP_NAME, copyFrom: 'group3-high-clarity' } })).experiment;
+  await admin('/api/admin/experiment/update', { body: { id: exp.id, name: EXP_NAME, timing: { delay: 0, wait: 0, minSubmit: 0, maxAnswer: 0 }, items: tinyItems } });
 
-  const scenarioList = await admin('/api/admin/scenarios');
-  const scenario = scenarioList.scenarios.find((s) => s.id === 'medical') || scenarioList.scenarios[0];
-  if (!scenario) throw new Error('没有可用情景，请先在管理端创建情景');
-  const groups = scenario.groups || [];
-  const controlGroup = groups.find((g) => g.role === 'control') || groups[0];
-  const treatGroup = groups.find((g) => g.role === 'treat') || groups[1];
-  const groupText = (group, playCount) => (Number(playCount) === 1 ? group.r3Once : group.r3Multi);
-  console.log(`使用情景：${scenario.name}（${scenario.id}），任务清单 [${scenario.tasks.join(', ')}]`);
+  // 问卷1：默认 4 题 + 插入自检模板题目 + 收尾
+  const q1 = (await admin('/api/admin/questionnaire/create', { body: { title: Q_NAME, timing: { delay: 0, wait: 0, minSubmit: 0, maxAnswer: 0 } } })).questionnaire;
+  const parts = [...q1.items];
+  const tail = parts.splice(parts.length - 2, 2);
+  const copies = tinyItems.map((it, i) => ({ ...it, id: `t0_${i}_${it.id}`, fromTemplateId: exp.id, fromTemplateName: EXP_NAME }));
+  const q1Full = (await admin('/api/admin/questionnaire/update', { body: { id: q1.id, title: Q_NAME, timing: q1.timing, items: [...parts, ...copies, ...tail] } })).questionnaire;
 
-  // 1) 清理旧的同名自检问卷（避免重复运行堆积）
-  const existing = await admin('/api/admin/questionnaires');
-  for (const q of existing.questionnaires) {
-    if (q.name === Q_NAME_CONTROL || q.name === Q_NAME_TREAT) {
-      await admin('/api/admin/questionnaire/delete', { body: { id: q.id, force: true } });
-      console.log(`已清理旧问卷：${q.name}`);
-    }
+  // 问卷2：复制组别4 的原始问卷（用于组间逐字比对）
+  const g4 = (await admin('/api/admin/questionnaires')).questionnaires.find((x) => /组别4/.test(x.title));
+  const q2Full = (await admin('/api/admin/questionnaire/create', { body: { title: Q_NAME_2, copyFrom: g4.id } })).questionnaire;
+
+  console.log('\n[1] 题目模型与作答单元展开');
+  check('自检问卷题目数 = 2 + 36 + 2 = 40', q1Full.items.length === 40, String(q1Full.items.length));
+  const uniqTypes = [...new Set(q1Full.items.map((i) => i.type))].sort();
+  check('使用到的题型都在 9 种之内', uniqTypes.every((t) => ['message', 'gate', 'debrief', 'group', 'rating', 'single', 'multi', 'text', 'rank'].includes(t)), uniqTypes.join(','));
+  check('量表 = 多道打分题（20 道打分题）', q1Full.items.filter((i) => i.type === 'rating').length === 20);
+  const groups = q1Full.items.filter((i) => i.type === 'group');
+  check('创作 = 2 个题组（各 2 道文本子题）',
+    groups.length === 2 && groups.every((g) => g.subs.length === 2 && g.subs.every((x) => x.type === 'text')),
+    JSON.stringify(groups.map((g) => g.subs.map((x) => x.title))));
+  check('作答门控默认全为 0（无限制）', ['delay', 'wait', 'minSubmit', 'maxAnswer'].every((k) => q1Full.timing[k] === 0), JSON.stringify(q1Full.timing));
+  check('呈现节奏默认值（思考 420ms / 流式 11ms 每字）',
+    q1Full.timing.thinkMs === 420 && q1Full.timing.typeMs === 11, JSON.stringify(q1Full.timing));
+
+  console.log('\n[2] 同问卷逐字一致 + 环节序列');
+  const recA = {};
+  const recB = {};
+  const sesA = await walk(q1Full.id, { record: recA });
+  const sesB = await walk(q1Full.id, { record: recB });
+  check('流程走完（会话已完成）', recA.finished && recB.finished);
+  // 期望序列直接由问卷题目推导：除 message 外每道题一个作答单元
+  const expectSeq = q1Full.items.filter((it) => it.type !== 'message').map((it) => `${it.type}:${it.id}`);
+  check('环节序列与预期一致（28 个作答单元）', JSON.stringify(recA.seen) === JSON.stringify(expectSeq),
+    `实际 ${recA.seen.length} 项：${recA.seen.join(' ')}`);
+  const aiA = recA.messages.filter((m) => m.role === 'assistant').map((m) => m.content);
+  const aiB = recB.messages.filter((m) => m.role === 'assistant').map((m) => m.content);
+  check('同问卷两会话 AI 消息条数一致', aiA.length === aiB.length, `${aiA.length} vs ${aiB.length}`);
+  check('同问卷两会话 AI 消息逐字一致', aiA.every((t, i) => t === aiB[i]),
+    aiA.length === aiB.length ? `首个差异 ${aiA.findIndex((t, i) => t !== aiB[i]) + 1}` : '');
+
+  console.log('\n[3] 组别3 / 组别4 差异');
+  const sesC = await walk(q2Full.id, {});
+  const aiC = sesC.messages.filter((m) => m.role === 'assistant').map((m) => m.content);
+  const diff = [];
+  for (let i = 0; i < Math.max(aiA.length, aiC.length); i += 1) if (aiA[i] !== aiC[i]) diff.push(i + 1);
+  check('两组消息条数一致', aiA.length === aiC.length, `${aiA.length} vs ${aiC.length}`);
+  check('两组差异恰为「任务要求」两处', diff.length === 2, `差异位置 ${diff.join(', ')}`);
+  if (diff.length === 2) {
+    const [p1, p2] = diff;
+    check('差异内容为任务要求且组内两处相同',
+      aiA[p1 - 1].startsWith('【青柠气泡水') && aiA[p1 - 1] === aiA[p2 - 1] && aiC[p1 - 1] === aiC[p2 - 1] && aiA[p1 - 1] !== aiC[p1 - 1]);
   }
 
-  // 2) 创建控制组 / 干预组两份问卷（相同实验编排；流程文案留空，消息只由材料与文本构成）
-  const experiments = [
-    { kind: 'r2', scenarioId: scenario.id },
-    { kind: 'r3', scenarioId: scenario.id }
-  ];
-  const controlQ = (
-    await admin('/api/admin/questionnaire/create', {
-      body: { name: Q_NAME_CONTROL, groupRole: 'control', flow: {}, experiments }
-    })
-  ).questionnaire;
-  const treatQ = (
-    await admin('/api/admin/questionnaire/create', {
-      body: { name: Q_NAME_TREAT, groupRole: 'treat', flow: {}, experiments }
-    })
-  ).questionnaire;
+  console.log('\n[4] 计时门控');
+  check('触发过延迟发出的等待', recA.flags.delay);
+  check('触发过作答前强制等待', recA.flags.wait);
+  check('触发过最短提交 / 最长作答时间窗', recA.flags.window);
+  check('创作题组承载最短提交 / 最长作答窗口', recA.flags.groupWindow === true, JSON.stringify(recA.flags));
 
-  const expDefs = [
-    { kind: 'r2', tasks: scenario.tasks },
-    { kind: 'r3', tasks: scenario.tasks }
-  ];
-  const answers = buildAnswers(expDefs);
-  const shape = expectedShape(expDefs);
-  const expected = { answers, ...shape };
+  console.log('\n[5] 落库核验');
+  const detail = await admin(`/api/admin/questionnaire/session?id=${q1Full.id}&sid=${sesA.sessionId}`);
+  // 题组一次提交写入多行（2 个题组 × 2 子题），故总行数 = 26 单元 + 2 额外子题 = 28
+  check('作答记录 28 行（26 个作答单元，其中 2 个题组各多 1 行子题）', detail.responses.length === 28, String(detail.responses.length));
+  check('题组子题按行落库（含文本）', detail.responses.filter((r) => r.itemType === 'text' && r.text).length === 4);
+  check('单选题带对错判定', detail.responses.some((r) => r.itemType === 'single' && (r.isCorrect === '正确' || r.isCorrect === '错误')));
+  check('量表题标签归入量表', detail.responses.some((r) => /目标清晰度测量 第 1 题/.test(r.itemLabel)));
+  check('呈现/作答时间戳齐全且顺序合理',
+    detail.responses.every((r) => r.presentedAt && r.answeredAt && Date.parse(r.presentedAt) <= Date.parse(r.answeredAt) + 1000));
+  check('对话流含延迟反馈全文', detail.messages.some((m) => m.content.startsWith('很感谢你的认真创作')));
 
-  // 3) 运行业务会话
-  console.log('\n[流程与时序]');
-  const controlA = await runSession(controlQ.id, answers);
-  const controlB = await runSession(controlQ.id, answers);
-  const treatA = await runSession(treatQ.id, answers);
-  checkFlow(controlA, shape.phases);
-  checkFlow(treatA, shape.phases);
-  check('流程状态机（8 步：决策→评分×2 + 基线→再决策×2）', true);
+  console.log('\n[6] 数据页与导出');
+  const list = await admin(`/api/admin/questionnaire/sessions?id=${q1Full.id}`);
+  check('会话列表含 2 位被试', list.sessions.length === 2, String(list.sessions.length));
+  check('会话作答进度 = 28', list.sessions.every((s) => s.answerCount === 28));
+  const xlsxRes = await fetch(`${BASE}/api/admin/questionnaire/export.xlsx?id=${q1Full.id}`, { headers: { Authorization: `Bearer ${adminToken}` } });
+  const buf = Buffer.from(await xlsxRes.arrayBuffer());
+  check('xlsx 导出可用（PK 头）', xlsxRes.ok && buf.slice(0, 2).toString() === 'PK', `${buf.length} 字节`);
+  const sheets = unzipSheetNames(buf);
+  check('含「汇总（一被试一行）」与「作答明细」两个 sheet',
+    sheets.includes('汇总（一被试一行）') && sheets.includes('作答明细'), sheets.join(' / '));
+  const s1 = unzipEntry(buf, 'xl/worksheets/sheet1.xml');
+  check('汇总表含量表均分与两次作品列',
+    /目标清晰度测量（均分）/.test(s1) && /广告语/.test(s1) && /创作说明（选填）/.test(s1) && /注意力检测·是否正确/.test(s1));
+  check('汇总表含被试作品文本', /作品1|作品2/.test(s1));
 
-  check('同问卷两会话 AI 消息逐字一致', sameSeq(controlA.aiSequence, controlB.aiSequence));
+  console.log('\n[7] 中途退出与恢复窗口');
+  const settings = (await admin('/api/admin/settings')).settings;
+  const partial = await request('/api/session', { body: { q: q1Full.id } });
+  const partialId = partial.data.session.id;
+  const inWindow = await request(`/api/bootstrap?q=${q1Full.id}&session=${partialId}`);
+  check('窗口内重进：可恢复进行中的会话', inWindow.ok && !!inWindow.data.session);
+  await admin('/api/admin/settings', { body: { resumeWindowHours: 24 } });
+  backdateSession(partialId, 100);
+  const outWindow = await request(`/api/bootstrap?q=${q1Full.id}&session=${partialId}`);
+  check('超窗重进：返回空会话（重新开始）', outWindow.ok && outWindow.data.session === null);
+  const stillThere = await admin(`/api/admin/questionnaire/session?id=${q1Full.id}&sid=${partialId}`);
+  check('超窗后旧会话仍保留在数据中', stillThere.session && stillThere.session.status === 'in_progress');
+  await admin('/api/admin/settings', { body: { resumeWindowHours: 0 } });
+  const unlimited = await request(`/api/bootstrap?q=${q1Full.id}&session=${partialId}`);
+  check('窗口设为 0（不限制）：可继续恢复', unlimited.ok && !!unlimited.data.session);
 
-  // 组别对照：仅研究3 组别文本不同
-  const groupDiff = findDiffIndices(controlA.aiSequence, treatA.aiSequence);
-  const controlTexts = scenario.tasks.map((pc) => groupText(controlGroup, pc));
-  const treatTexts = scenario.tasks.map((pc) => groupText(treatGroup, pc));
-  const groupsAsExpected =
-    controlA.aiSequence.length === treatA.aiSequence.length &&
-    groupDiff.length === scenario.tasks.length &&
-    groupDiff.every(
-      (idx, k) => controlA.aiSequence[idx] === controlTexts[k] && treatA.aiSequence[idx] === treatTexts[k]
-    );
-  check(
-    '控制/干预组仅研究3文本不同',
-    groupsAsExpected,
-    `差异位置 [${groupDiff.join(', ')}]（期望 ${scenario.tasks.length} 处）`
-  );
-  if (groupsAsExpected) {
-    console.log(`  · 控制组研究3文本：${clip(controlTexts[0])}`);
-    console.log(`  · 干预组研究3文本：${clip(treatTexts[0])}`);
+  console.log('\n[8] 清理与设置还原');
+  await admin('/api/admin/questionnaire/delete', { body: { id: q1Full.id, force: true } });
+  await admin('/api/admin/questionnaire/delete', { body: { id: q2Full.id, force: true } });
+  await admin('/api/admin/experiment/delete', { body: { id: exp.id } });
+  const restQ = (await admin('/api/admin/questionnaires')).questionnaires;
+  const restE = (await admin('/api/admin/experiments')).experiments;
+  check('问卷残留清零（仅剩预设问卷）', restQ.every((q) => q.title !== Q_NAME && q.title !== Q_NAME_2));
+  check('实验残留清零（仅剩组别3 / 组别4 模板）', restE.every((e) => e.name !== EXP_NAME));
+  await admin('/api/admin/settings', { body: { resumeWindowHours: settings.resumeWindowHours } });
+  const restored = (await admin('/api/admin/settings')).settings;
+  check('全局设置已还原（恢复窗口）', restored.resumeWindowHours === settings.resumeWindowHours,
+    `${restored.resumeWindowHours} vs ${settings.resumeWindowHours}`);
+
+  console.log(`\n断言通过 ${passed} 项，失败 ${failures.length} 项`);
+  if (failures.length) {
+    console.log('\n失败明细：');
+    for (const f of failures) console.log(`  ✗ ${f.name}${f.detail ? ` —— ${f.detail}` : ''}`);
+    process.exit(1);
   }
-
-  // 方向对照：仅决策①换向（1 → 4）
-  const flipped = [...answers];
-  flipped[0] = answers[0] === 1 ? 4 : 1;
-  const controlFlip = await runSession(controlQ.id, flipped);
-  const dirDiff = findDiffIndices(controlA.aiSequence, controlFlip.aiSequence);
-  const expectedMatch = flipped[0] <= 2 ? scenario.r2OnceA : scenario.r2OnceB;
-  const directionAsExpected =
-    dirDiff.length === 1 &&
-    controlA.aiSequence[dirDiff[0]] === scenario.r2OnceA &&
-    controlFlip.aiSequence[dirDiff[0]] === expectedMatch;
-  check('研究2匹配文本随决策方向变化', directionAsExpected, `差异位置 [${dirDiff.join(', ')}]（期望 1 处）`);
-
-  // 4) 落库校验
-  try {
-    const dbInfo = await checkDb(controlA, expected, controlQ.id);
-    check('responses 值/阶段/实验段/时间戳落库正确', true, `${dbInfo.responseCount} 条`);
-    check('messages 全量入库且顺序一致', true, `${dbInfo.messageCount} 条`);
-  } catch (err) {
-    check('responses/messages 落库校验', false, err.message);
-  }
-
-  // 5) 问卷数据页接口：行级作答视图 + 实验 / 问题筛选
-  try {
-    const list = await admin(`/api/admin/questionnaire/sessions?id=${controlQ.id}`);
-    const seqs = [...new Set(list.rows.map((r) => r.seq))].sort((a, b) => a - b);
-    const idsIncluded = [controlA, controlB, controlFlip].every((r) =>
-      list.rows.some((row) => row.sessionId === r.sessionId)
-    );
-    check(
-      '数据页接口：行级作答 + 编号按进入顺序 1 起连续',
-      idsIncluded &&
-        list.rowCount === 24 &&
-        list.sessionCount === 3 &&
-        seqs.length === 3 &&
-        seqs.every((n, i) => n === i + 1),
-      `${list.rowCount} 条作答 / ${list.sessionCount} 位被试，编号 [${seqs.join(', ')}]`
-    );
-    check(
-      '数据页接口：行字段完整（实验 / 问题 / 作答值 / 时间）',
-      list.rows.every(
-        (r) => r.experimentSort && r.phaseLabel && r.phase && r.answeredAt != null && r.value != null && r.optionLabel
-      ),
-      clip(`${list.rows[0]?.experimentSort}. ${list.rows[0]?.phaseLabel} = ${list.rows[0]?.value}`)
-    );
-
-    const filtered = await admin(`/api/admin/questionnaire/sessions?id=${controlQ.id}&experiment=2&phase=r3_base`);
-    // 研究3 段共 2 个任务（任务清单 [1, 100]），每个任务一条基线决策：3 会话 × 2 = 6 条
-    check(
-      '数据页接口：实验 / 问题筛选生效',
-      filtered.rowCount === 6 && filtered.rows.every((r) => r.experimentSort === 2 && r.phase === 'r3_base'),
-      `experiment=2&phase=r3_base -> ${filtered.rowCount} 条`
-    );
-  } catch (err) {
-    check('数据页接口', false, err.message);
-  }
-
-  // 6) xlsx 导出：按实验分表；文件名跟随筛选（问卷名-实验-问题）
-  try {
-    const { res, buffer } = await admin(`/api/admin/questionnaire/export.xlsx?id=${controlQ.id}`, { raw: true });
-    const isZip = buffer.length > 4 && buffer[0] === 0x50 && buffer[1] === 0x4b;
-    check(
-      'xlsx 导出（全部）可用',
-      isZip && /spreadsheetml/.test(res.headers.get('content-type') || ''),
-      `${buffer.length} 字节`
-    );
-
-    const filtered = await admin(`/api/admin/questionnaire/export.xlsx?id=${controlQ.id}&experiment=2&phase=r3_base`, {
-      raw: true
-    });
-    const disposition = decodeURIComponent(filtered.res.headers.get('content-disposition') || '');
-    check(
-      'xlsx 导出（筛选）：文件名＝问卷名-实验-问题',
-      /attachment/.test(disposition) &&
-        disposition.includes(`${Q_NAME_CONTROL}-研究3·${scenario.name}-基线决策.xlsx`),
-      disposition.replace('attachment; ', '')
-    );
-  } catch (err) {
-    check('xlsx 导出', false, err.message);
-  }
-
-  // 7) 清理：删除自检问卷（连同数据），不留痕
-  try {
-    await admin('/api/admin/questionnaire/delete', { body: { id: controlQ.id, force: true } });
-    await admin('/api/admin/questionnaire/delete', { body: { id: treatQ.id, force: true } });
-    console.log('\n已清理自检问卷与数据');
-  } catch (err) {
-    console.log(`\n清理自检问卷失败（可手动删除）：${err.message}`);
-  }
-
-  console.log(`\n---- result: ${allPass ? 'ALL PASS' : 'HAS FAILURES'} ----`);
-  process.exitCode = allPass ? 0 : 1;
+  console.log('ALL PASS ✓');
 }
 
-main().catch((err) => {
-  console.error('SELF-CHECK ERROR:', err.message);
-  console.error(`请确认服务已启动：${BASE}`);
-  process.exitCode = 1;
-});
+main().catch((err) => { console.error('自检异常：', err.message); process.exit(1); });

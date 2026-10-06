@@ -1,5 +1,6 @@
 // 数据层：SQLite（Node 内置 node:sqlite）—— 建表、种子数据与访问函数
-// 结构：情景（scenario，空间）→ 组（group，控制/干预）；所有文本固定存储，运行时不做任何生成。
+// 模型：一切皆题目（item）。实验 = 可复用的题目模板（模板库）；问卷 = 一条链接 + 一列题目 + 计时默认值。
+// 会话创建时把题目与计时快照进 sessions，此后修改模板 / 问卷不影响进行中的会话。
 'use strict';
 
 const { DatabaseSync } = require('node:sqlite');
@@ -9,102 +10,78 @@ const path = require('node:path');
 const DB_PATH = path.join(__dirname, 'data.db');
 const db = new DatabaseSync(DB_PATH);
 
+// 并发与性能 pragma：WAL 提升提交吞吐，synchronous=NORMAL 避免每次提交 fsync
 db.exec(`
-  -- 情景（空间）：情境材料、单次/多次提问、研究2匹配文本
-  CREATE TABLE IF NOT EXISTS scenarios (
-    id               TEXT PRIMARY KEY,
-    name             TEXT NOT NULL,
-    context_text     TEXT NOT NULL DEFAULT '',
-    once_question    TEXT NOT NULL DEFAULT '',
-    multi_question   TEXT NOT NULL DEFAULT '',
-    r2_once_a        TEXT NOT NULL DEFAULT '',
-    r2_once_b        TEXT NOT NULL DEFAULT '',
-    r2_multi_a       TEXT NOT NULL DEFAULT '',
-    r2_multi_b       TEXT NOT NULL DEFAULT '',
-    rating_question  TEXT NOT NULL DEFAULT '',
-    enabled          INTEGER NOT NULL DEFAULT 1,
-    sort             INTEGER NOT NULL DEFAULT 0,
-    updated_at       TEXT
-  );
+  PRAGMA journal_mode = WAL;
+  PRAGMA synchronous = NORMAL;
+  PRAGMA busy_timeout = 5000;
+  PRAGMA temp_store = MEMORY;
+`);
 
-  -- 组：每个情景固定 2 组（控制 / 干预），差异在"研究3文本"
-  CREATE TABLE IF NOT EXISTS groups (
-    id           TEXT PRIMARY KEY,
-    scenario_id  TEXT NOT NULL,
-    name         TEXT NOT NULL,
-    role         TEXT NOT NULL DEFAULT 'control',
-    r3_once      TEXT NOT NULL DEFAULT '',
-    r3_multi     TEXT NOT NULL DEFAULT '',
-    enabled      INTEGER NOT NULL DEFAULT 1,
-    updated_at   TEXT
-  );
-
-  -- 任务清单：情景包含哪些任务（单次 1 / 多次 100）及顺序
-  CREATE TABLE IF NOT EXISTS scenario_tasks (
-    scenario_id TEXT NOT NULL,
-    sort        INTEGER NOT NULL,
-    play_count  INTEGER NOT NULL DEFAULT 1,
-    PRIMARY KEY (scenario_id, sort)
-  );
-
-  -- 问卷（独立空间）：一条通用链接、固定组别、独立流程文案与实验编排
-  CREATE TABLE IF NOT EXISTS questionnaires (
-    id          TEXT PRIMARY KEY,             -- 链接短码（/chat?q=<id>）
+db.exec(`
+  -- 实验模板库：一套可复用的题目 + 计时默认值
+  CREATE TABLE IF NOT EXISTS experiments (
+    id          TEXT PRIMARY KEY,             -- 模板 ID（8 位短码）
     name        TEXT NOT NULL,
-    group_role  TEXT NOT NULL DEFAULT 'control',  -- control / treat（研究3 文本版本）
-    flow_json   TEXT NOT NULL DEFAULT '{}',       -- 流程文案：欢迎语/衔接语/结束语/知情同意/结束说明/问卷链接
+    timing_json TEXT NOT NULL DEFAULT '{}',   -- 计时默认值（题目未勾选时生效）
+    items_json  TEXT NOT NULL DEFAULT '[]',   -- 题目列表
     created_at  TEXT,
     updated_at  TEXT
   );
 
-  -- 问卷的实验编排：每个实验 = 类型（研究2 / 研究3）+ 情景，按 sort 顺序执行
-  CREATE TABLE IF NOT EXISTS questionnaire_experiments (
-    questionnaire_id TEXT NOT NULL,
-    sort             INTEGER NOT NULL,
-    kind             TEXT NOT NULL,           -- r2 / r3
-    scenario_id      TEXT NOT NULL,
-    PRIMARY KEY (questionnaire_id, sort)
+  -- 问卷：一条通用链接（/chat?q=<id>）+ 一列题目 + 计时默认值
+  CREATE TABLE IF NOT EXISTS questionnaires (
+    id          TEXT PRIMARY KEY,
+    title       TEXT NOT NULL,
+    timing_json TEXT NOT NULL DEFAULT '{}',
+    items_json  TEXT NOT NULL DEFAULT '[]',
+    created_at  TEXT,
+    updated_at  TEXT
   );
 
+  -- 会话：题目与计时在创建时快照，此后修改不影响进行中的会话
   CREATE TABLE IF NOT EXISTS sessions (
-    id               TEXT PRIMARY KEY,
-    scenario_id      TEXT NOT NULL,
-    group_id         TEXT NOT NULL,
-    uid              TEXT,
-    status           TEXT NOT NULL DEFAULT 'in_progress',
-    started_at       TEXT,
-    ended_at         TEXT,
-    duration_sec     INTEGER,
-    code             TEXT,
-    user_agent       TEXT,
-    questionnaire_id TEXT,                    -- 所属问卷（旧数据为空）
-    seq              INTEGER,                 -- 问卷内编号（按进入顺序从 1 开始）
-    group_role       TEXT,                    -- 组别快照：control / treat
-    plan_json        TEXT                     -- 实验计划快照（会话开始时固化，后续改问卷不影响进行中的会话）
+    id                   TEXT PRIMARY KEY,
+    questionnaire_id     TEXT NOT NULL,
+    seq                  INTEGER,                 -- 问卷内编号（按进入顺序从 1 开始）
+    status               TEXT NOT NULL DEFAULT 'in_progress',
+    started_at           TEXT,
+    ended_at             TEXT,
+    duration_sec         INTEGER,
+    user_agent           TEXT,
+    items_json           TEXT NOT NULL DEFAULT '[]',
+    timing_json          TEXT NOT NULL DEFAULT '{}',
+    pending_presented_at TEXT                     -- 当前待作答单元的呈现时刻（服务端口径）
   );
 
-  -- 消息流：AI 消息 + 用户动作回显（role: assistant / user）
+  -- 消息流：AI 消息 + 用户动作回显；visible_at = 定时消息（延迟发出）的可见时间
   CREATE TABLE IF NOT EXISTS messages (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL,
     role       TEXT NOT NULL,
     content    TEXT NOT NULL,
     seq        INTEGER,
-    created_at TEXT
+    created_at TEXT,
+    visible_at TEXT,
+    think_ms   INTEGER,          -- 该条消息的 AI 思考时长（毫秒）
+    type_ms    INTEGER           -- 该条消息的流式输出速度（毫秒/字）
   );
 
-  -- 作答记录：决策 / 评分（含时间戳与耗时）
+  -- 作答记录：一行 = 一个作答单元
+  --   presented_at 服务端记录的呈现时刻（用于门控与共用窗口）
+  --   elapsed_ms   前端上报的作答耗时
   CREATE TABLE IF NOT EXISTS responses (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id   TEXT NOT NULL,
-    scenario_id  TEXT NOT NULL,
-    group_id     TEXT NOT NULL,
-    task_index   INTEGER NOT NULL,
-    play_count   INTEGER NOT NULL,
-    phase        TEXT NOT NULL,
-    value        INTEGER NOT NULL,
+    item_id      TEXT NOT NULL,
+    item_index   INTEGER NOT NULL,     -- 题目在问卷中的位置
+    item_type    TEXT NOT NULL,
+    unit_index   INTEGER NOT NULL DEFAULT 0,  -- 作答单元序号（题组的多道子题同属一个单元）
+    sub_index    INTEGER NOT NULL DEFAULT 0,  -- 题组内子题序号（非题组为 0）
+    value        INTEGER,
+    value_text   TEXT NOT NULL DEFAULT '',
     option_label TEXT NOT NULL DEFAULT '',
-    shown_at     TEXT,
+    presented_at TEXT,
     answered_at  TEXT,
     elapsed_ms   INTEGER
   );
@@ -114,310 +91,375 @@ db.exec(`
     value TEXT
   );
 
-  -- 通用问卷（问卷星式，独立空间）：与实验问卷完全隔离
-  CREATE TABLE IF NOT EXISTS surveys (
-    id          TEXT PRIMARY KEY,             -- 链接短码（/survey?c=<id>）
-    title       TEXT NOT NULL DEFAULT '',
-    start_text  TEXT NOT NULL DEFAULT '',     -- 卷首语（可空）
-    end_text    TEXT NOT NULL DEFAULT '',     -- 结束语（可空）
-    created_at  TEXT,
-    updated_at  TEXT
-  );
-
-  -- 通用问卷题目：sort 顺序；options_json 选项数组；config_json 各题型扩展配置
-  CREATE TABLE IF NOT EXISTS survey_questions (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    survey_id    TEXT NOT NULL,
-    sort         INTEGER NOT NULL,
-    type         TEXT NOT NULL,               -- single/multi/text/rating/rank/qa/experiment
-    title        TEXT NOT NULL DEFAULT '',
-    required     INTEGER NOT NULL DEFAULT 1,
-    options_json TEXT NOT NULL DEFAULT '[]',
-    config_json  TEXT NOT NULL DEFAULT '{}'
-  );
-
-  -- 填写会话：按进入顺序编号 seq（被试编号）
-  CREATE TABLE IF NOT EXISTS survey_sessions (
-    id           TEXT PRIMARY KEY,
-    survey_id    TEXT NOT NULL,
-    seq          INTEGER,
-    status       TEXT NOT NULL DEFAULT 'in_progress',
-    started_at   TEXT,
-    ended_at     TEXT,
-    duration_sec INTEGER,
-    user_agent   TEXT
-  );
-
-  -- 对话消息：AI 消息（卷首语/实验背景/结束语）与用户动作回显
-  CREATE TABLE IF NOT EXISTS survey_messages (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT NOT NULL,
-    role       TEXT NOT NULL,
-    content    TEXT NOT NULL,
-    seq        INTEGER,
-    created_at TEXT
-  );
-
-  -- 作答记录：一行 = 一个作答单元（实验子题各占一行，sub_index 区分）
-  CREATE TABLE IF NOT EXISTS survey_answers (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id    TEXT NOT NULL,
-    question_id   INTEGER NOT NULL,
-    question_sort INTEGER NOT NULL,
-    sub_index     INTEGER NOT NULL DEFAULT 0,
-    type          TEXT NOT NULL,
-    value_json    TEXT NOT NULL DEFAULT 'null',
-    answer_text   TEXT NOT NULL DEFAULT '',
-    shown_at      TEXT,
-    answered_at   TEXT,
-    elapsed_ms    INTEGER
-  );
+  -- 热点索引
+  CREATE INDEX IF NOT EXISTS idx_responses_session ON responses(session_id, id);
+  CREATE INDEX IF NOT EXISTS idx_messages_session  ON messages(session_id, seq);
+  CREATE INDEX IF NOT EXISTS idx_messages_visible  ON messages(session_id, visible_at);
+  CREATE INDEX IF NOT EXISTS idx_sessions_question ON sessions(questionnaire_id, seq);
 `);
 
-// 老库升级：会话与作答补充问卷相关列（列已存在则跳过）
-function ensureColumns(table, columns) {
-  const existing = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name));
-  for (const [name, definition] of Object.entries(columns)) {
-    if (!existing.has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
+// 旧库升级：早期版本遗留的表一并清理（本轮为重建式升级，不做数据迁移）
+for (const t of [
+  'survey_answers', 'survey_messages', 'survey_sessions', 'survey_questions', 'surveys',
+  'questionnaire_experiments', 'scenario_tasks', 'groups', 'scenarios'
+]) {
+  db.exec(`DROP TABLE IF EXISTS ${t}`);
+}
+
+// ---------------------------------------------------------------- 题目模型
+// 8 种题型；量表 = 多道打分题，创作 = 多道文本题，不再有专用题型。
+const ITEM_TYPES = ['message', 'gate', 'debrief', 'group', 'rating', 'single', 'multi', 'text', 'rank'];
+
+// 可作为「题组」子题的题型（子题不允许再嵌套题组）
+const SUB_ITEM_TYPES = ['rating', 'single', 'multi', 'text', 'rank'];
+
+const ITEM_TYPE_LABELS = {
+  message: '消息/材料',
+  gate: '知情同意页',
+  debrief: '结束说明页',
+  group: '题组（多子题）',
+  rating: '打分题',
+  single: '单选',
+  multi: '多选',
+  text: '文本题',
+  rank: '排序'
+};
+
+// 各题型可勾选的计时 / 呈现限制
+// 消息类题目额外可覆盖 AI 思考时长与流式输出速度（未被覆盖时用实验 / 问卷默认值）
+const ITEM_LIMITS = {
+  message: ['delay', 'thinkMs', 'typeMs'],
+  gate: [],
+  debrief: [],
+  group: ['wait', 'minSubmit', 'maxAnswer'],
+  rating: ['wait', 'minSubmit', 'maxAnswer'],
+  single: ['wait'],
+  multi: ['wait'],
+  text: ['wait', 'minSubmit', 'maxAnswer'],
+  rank: ['wait']
+};
+
+// 计时与呈现参数：前 4 项为作答门控（秒），后 2 项为呈现节奏（毫秒）
+const TIMING_KEYS = ['delay', 'wait', 'minSubmit', 'maxAnswer', 'thinkMs', 'typeMs'];
+const TIMING_META = {
+  delay: { label: '延迟发出', unit: '秒', hint: '内容不立即出现，N 秒后发出（如 AI 反馈）' },
+  wait: { label: '作答前强制等待', unit: '秒', hint: '需先停留 N 秒才能作答（如强制阅读）' },
+  minSubmit: { label: '最短提交时间', unit: '秒', hint: '提交前的最短等待' },
+  maxAnswer: { label: '最长作答时间', unit: '秒', hint: '到点自动提交已输入内容' },
+  thinkMs: { label: 'AI 思考时长', unit: '毫秒', hint: '输出前的「正在思考」动画时长；0 = 不显示思考动画', group: 'rhythm' },
+  typeMs: { label: '流式输出速度', unit: '毫秒/字', hint: '每字间隔；0 = 立即整段显示（数值越小越快）', group: 'rhythm' }
+};
+// 各键的默认值与取值范围（门控以秒计，节奏以毫秒计）
+const TIMING_SPEC = {
+  delay: { def: 0, min: 0, max: 86400 },
+  wait: { def: 0, min: 0, max: 86400 },
+  minSubmit: { def: 0, min: 0, max: 86400 },
+  maxAnswer: { def: 0, min: 0, max: 86400 },
+  thinkMs: { def: 420, min: 0, max: 10000 },
+  typeMs: { def: 11, min: 0, max: 500 }
+};
+
+function toClampedInt(value, fallback, min, max) {
+  const n = Math.round(Number(value));
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
+function normalizeTiming(raw) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const out = {};
+  for (const k of TIMING_KEYS) {
+    const spec = TIMING_SPEC[k];
+    out[k] = toClampedInt(src[k], spec.def, spec.min, spec.max);
+  }
+  return out;
+}
+
+// 计时限制：仅保留该题型支持且已勾选（有值）的项；未勾选 = 键不存在 → 用全局默认
+function normalizeLimits(type, raw) {
+  const allowed = ITEM_LIMITS[type] || [];
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const out = {};
+  for (const k of allowed) {
+    const v = src[k];
+    if (v === null || v === undefined || String(v).trim() === '') continue;
+    out[k] = toClampedInt(v, 0, 0, 86400);
+  }
+  return out;
+}
+
+function strList(raw, max) {
+  return (Array.isArray(raw) ? raw : []).map((v) => String(v ?? '').trim()).filter(Boolean).slice(0, max || 100);
+}
+
+// 题目归一化：落库 / 出库共用，保证数据结构稳定
+function normalizeItem(raw, index) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const type = ITEM_TYPES.includes(src.type) ? src.type : 'message';
+  const item = {
+    id: String(src.id || '').trim() || `i${index + 1}`,
+    type,
+    title: String(src.title ?? '').trim(),
+    limits: normalizeLimits(type, src.limits)
+  };
+  if (src.fromTemplateId) item.fromTemplateId = String(src.fromTemplateId);
+  if (src.fromTemplateName) item.fromTemplateName = String(src.fromTemplateName);
+  if (type === 'message' || type === 'gate' || type === 'debrief') item.text = String(src.text ?? '');
+  if (type === 'gate') {
+    item.check = String(src.check ?? '');
+    item.button = String(src.button ?? '');
+  }
+  if (type === 'rating') {
+    const min = toClampedInt(src.min, 1, 0, 10);
+    item.min = min;
+    item.max = toClampedInt(src.max, Math.max(min + 1, 5), min + 1, 12);
+    item.anchor = String(src.anchor ?? '');
+  }
+  if (type === 'single' || type === 'multi' || type === 'rank') {
+    item.options = strList(src.options, 50);
+    if (type === 'single') {
+      const c = toClampedInt(src.correct, 0, 0, Math.max(item.options.length, 1));
+      item.correct = c > item.options.length ? 0 : c;
+    }
+  }
+  if (type === 'text') {
+    item.required = src.required == null ? true : !!src.required;
+    item.rows = toClampedInt(src.rows, 1, 1, 12);
+    item.maxLen = toClampedInt(src.maxLen, 0, 0, 5000);
+    item.placeholder = String(src.placeholder ?? '');
+  }
+  if (type === 'group') {
+    // 题组：一个单元内呈现多道子题、一次提交（如「广告语 + 创作说明」）
+    item.text = String(src.text ?? '');                 // 题组说明（可选）
+    item.layout = src.layout === 'row' ? 'row' : 'column';
+    const subs = [];
+    (Array.isArray(src.subs) ? src.subs : []).forEach((raw2, i) => {
+      const sub = normalizeItem(raw2, i);
+      if (!SUB_ITEM_TYPES.includes(sub.type)) return;   // 子题不允许 message/gate/debrief/group
+      sub.limits = {};                                 // 计时限制只挂在题组上
+      sub.id = String(raw2 && raw2.id || `s${i + 1}`);
+      delete sub.fromTemplateId;
+      delete sub.fromTemplateName;
+      subs.push(sub);
+    });
+    item.subs = subs;
+  }
+  return item;
+}
+
+function normalizeItems(raw) {
+  const list = Array.isArray(raw) ? raw : [];
+  const out = [];
+  const seen = new Set();
+  list.forEach((r, i) => {
+    const item = normalizeItem(r, i);
+    while (seen.has(item.id)) item.id = `${item.id}_x`;
+    seen.add(item.id);
+    out.push(item);
+  });
+  return out;
+}
+
+function parseJson(text, fallback) {
+  try {
+    const v = JSON.parse(text || 'null');
+    return v == null ? fallback : v;
+  } catch {
+    return fallback;
   }
 }
-ensureColumns('sessions', {
-  questionnaire_id: 'TEXT',
-  seq: 'INTEGER',
-  group_role: 'TEXT',
-  plan_json: 'TEXT'
-});
-ensureColumns('responses', {
-  questionnaire_id: 'TEXT',
-  experiment_sort: 'INTEGER',
-  experiment_kind: 'TEXT'
-});
 
-// ---------------------------------------------------------------- 种子数据
-// 全部文本来自论文《心理学报》补充材料 B1（情境）B3（GPT-4o 策略文本）B4（控制组对照文本）。
-// 研究2匹配文本（r2_*）：被试决策后按其选择呈现对应文本；研究3文本（r3_*）：按组别呈现。
-// 论文干预方向：单次博弈→说服选风险方案B；多次博弈→说服选确定方案A；控制组取对应选项的客观描述。
-
-const SEED_SCENARIOS = [
-  {
-    id: 'medical',
-    name: '医疗情景',
-    context:
-      '请您想象您是一名应急管理决策者。某种疾病预计在爆发时将导致600人死亡。您可以选择两种应急预案中的任意一个来应对该疾病。假设以下是这两种预案的科学估计结果：\n' +
-      '如果采用方案A，将挽救200人的生命。\n' +
-      '如果采用方案B，存在2/5的概率可以挽救600人的生命，且有3/5的概率没有人能够被挽救。',
-    onceQuestion: '假设您选择的预案只会应用1次，您更倾向于选择哪种方案？',
-    multiQuestion: '假设您选择的预案将应用100次，您更倾向于选择哪种方案？',
-    r2OnceA:
-      '在这种情况下，方案A的期望值计算为挽救200人的生命，显著地保障了一个稳定的结果。虽然方案B提供了较高的回报潜力（可能挽救600人的生命），但其60%的失败概率意味着没有人能够得救。因此，选择方案A的理性决策基于更高的确定性，最大化了挽救生命的预期收益，减少了潜在的风险，符合期望值最大化的原则。',
-    r2OnceB:
-      '选择方案B可以基于期望值的计算进行理性决策。尽管方案B存在较高的风险（3/5的概率没有人能被挽救），但它提供了2/5的概率挽救所有600人的生命，期望值为2/5×600 = 240人，显著高于方案A挽救的200人。尽管风险较大，方案B的期望收益更为可取，理性决策者应考虑期望值而非单次结果的波动。',
-    r2MultiA:
-      '在多次应用情境中，方案A更具理性。每次选择A将挽救200人的生命，长期来看，累计挽救生命的预期效果更为稳定。而方案B虽然存在高回报的可能，但每次损失的风险较大，且在多次应用中，未必能如期获得预期的效果。选择方案A能够最大化长期的期望收益，确保每次决策都带来稳定的回报，避免由于概率波动带来的不确定性。',
-    r2MultiB:
-      '在多次应用情境中，选择方案B将最大化期望收益。尽管存在3/5的概率无法挽救任何人，但2/5的高概率能够挽救所有600人的生命，带来极大的正回报。基于期望值的计算，方案B的期望收益为2/5×600 = 240人，而方案A的固定收益仅为200人。选择方案B可以通过多次应用保障长期的生命挽救效益，尽管短期内可能会有波动。',
-    ratingQuestion: '您认为以上提供的决策依据与您在回答疾病问题时实际思考过程的相似程度如何？',
-    control: {
-      r3Once: '在实施方案B的情况下，根据概率分布将呈现两种结果：当40%概率事件发生时全体600人将成功获救；当60%概率事件发生时将无法实现任何人员获救。',
-      r3Multi: '在实施方案A的情况下，科学评估表明，采取相应干预措施后，预计可以挽救200人的生命。这个数字反映了方案在应对疾病爆发时可能带来的效果。'
-    },
-    treat: {
-      r3Once: '选择方案B可以基于期望值的计算进行理性决策。尽管方案B存在较高的风险（3/5的概率没有人能被挽救），但它提供了2/5的概率挽救所有600人的生命，期望值为2/5×600 = 240人，显著高于方案A挽救的200人。尽管风险较大，方案B的期望收益更为可取，理性决策者应考虑期望值而非单次结果的波动。',
-      r3Multi: '在多次应用情境中，方案A更具理性。每次选择A将挽救200人的生命，长期来看，累计挽救生命的预期效果更为稳定。而方案B虽然存在高回报的可能，但每次损失的风险较大，且在多次应用中，未必能如期获得预期的效果。选择方案A能够最大化长期的期望收益，确保每次决策都带来稳定的回报，避免由于概率波动带来的不确定性。'
-    }
-  },
-  {
-    id: 'finance',
-    name: '金融情景',
-    context:
-      '对于处理某一种财务紧急事件，存在两种可选的应急预案。假设对这两种预案的科学估计结果如下：\n' +
-      '如果采用方案A，将获得5000元。\n' +
-      '如果采用方案B，存在0.1%的概率可以获得600万元，且有99.9%的概率什么也得不到。',
-    onceQuestion: '假设您选择的预案只会应用1次，您更倾向于选择哪种方案？',
-    multiQuestion: '假设您选择的预案将应用100次，您更倾向于选择哪种方案？',
-    r2OnceA:
-      '选择方案A的理由：虽然方案B可能带来极高的回报，但其极低的概率（0.1%）意味着大多数情况下什么也得不到。相较之下，方案A提供确定的5000元收益，确保稳定回报，避免因风险过高而带来的心理压力和潜在损失。因此，从期望值角度考虑，方案A是理性决策的优选。',
-    r2OnceB:
-      '基于期望值的数学理性决策，选择方案B是更有利的选择。虽然方案B的高额回报概率极低，但其期望收益计算为0.001 × 6000000 = 6000元，明显高于方案A的5000元。因此，基于预期收益最大化原则，方案B提供了更大的潜在回报，适合那些愿意接受微小风险、追求高回报的决策者。',
-    r2MultiA:
-      '在面对财务紧急事件时，选择方案A将确保您每次获得稳定的5000元回报，而方案B虽然存在极低概率的高回报，但绝大部分情况下得不到任何收益。考虑长期的稳定性和风险控制，方案A提供了明确的收益，符合期望值最大化的理性决策。因此，选择方案A将有助于您在长期内保持稳定的财务状况。',
-    r2MultiB:
-      '选择方案B将会在多次应用中带来更高的长期回报。尽管每次仅有0.1%的概率成功，但一旦获胜，回报将是显著的600万元，足以覆盖多次未中奖的损失。通过多次应用，B方案的期望收益将显著大于A方案的固定5000元。随着应用次数的增加，成功的概率也会逐渐显现，长期来看，它为理性决策者提供了更高的期望收益。',
-    ratingQuestion: '您认为以上提供的决策依据与您在回答财务问题时实际思考过程的相似程度如何？',
-    control: {
-      r3Once: '采用方案B时，存在0.1%的概率能够获得600万元，而在99.9%的情况下，将没有任何财务收益。这一评估结果基于对事件发生的概率计算。',
-      r3Multi: '在实施方案A的情况下，将获得5000元的确定性资金，该数额为固定金额，不受概率性因素的影响，这个数字反映了选择方案A将会带来的效果。'
-    },
-    treat: {
-      r3Once: '基于期望值的数学理性决策，选择方案B是更有利的选择。虽然方案B的高额回报概率极低，但其期望收益计算为0.001 × 6000000 = 6000元，明显高于方案A的5000元。因此，基于预期收益最大化原则，方案B提供了更大的潜在回报，适合那些愿意接受微小风险、追求高回报的决策者。',
-      r3Multi: '在面对财务紧急事件时，选择方案A将确保您每次获得稳定的5000元回报，而方案B虽然存在极低概率的高回报，但绝大部分情况下得不到任何收益。考虑长期的稳定性和风险控制，方案A提供了明确的收益，符合期望值最大化的理性决策。因此，选择方案A将有助于您在长期内保持稳定的财务状况。'
-    }
-  },
-  {
-    id: 'creative',
-    name: '内容创作情景',
-    context:
-      '假设您是一名自媒体账号的创作者，目前正在筹备新视频的发布。为了增加账号的粉丝关注量，现有两种新视频内容的制作方案可供选择。就每条新视频而言，两种方案的实施效果如下：\n' +
-      '如果采用方案A，账号将获得300位粉丝的关注。\n' +
-      '如果采用方案B，账号将有40%的概率获得1000位粉丝的关注，但同时也有60%的概率得不到任何关注。',
-    onceQuestion: '假设您只能发布1条新视频，您需要从上述两种方案中选择一个，在这1条新视频的制作中实施。您更倾向选择哪一个方案？',
-    multiQuestion: '假设您能发布100条新视频，您需要从上述两种方案中选择一个，在这100条新视频的制作中统一实施。您更倾向选择哪一个方案？',
-    r2OnceA:
-      '在仅有一次选择机会的情境中，方案A以100%概率带来300位粉丝，收益稳定、风险为零，是更理性的选择。相比之下，方案B虽有高回报的可能，但60%的失败概率意味着很可能一无所获。在无法承受失败损失、又希望确保增长的情况下，选择A更符合数学理性与稳健决策的原则。',
-    r2OnceB:
-      '尽管方案B存在一定风险，但其期望收益显著高于方案A。根据计算，B方案的期望粉丝增量为0.4×1000 + 0.6×0 = 400人，超过方案A的300人。这意味着，在当前只有一次发布机会的情境中，选择B更能最大化潜在收益，为账号带来更大曝光和增长机会，是更具理性的决策。',
-    r2MultiA:
-      '在需要反复发布视频的情境下，选择方案A更为明智。每条视频稳定带来300位粉丝，意味着100条视频将积累3万关注，无需承受波动带来的不确定性。而方案B的期望值仅为400位，虽看似更高，但60%的失败概率将频繁带来“零增长”的落空感，增加心理压力。多次应用中，稳定回报胜过不确定博弈，选择A是理性与稳健的双重保障。',
-    r2MultiB:
-      '在多次发布中，选择方案B将显著提升账号总体增长潜力。虽然单条视频有60%概率不增粉，但40%的成功率可带来1000粉丝，单次期望值为400人。若连续发布100条视频，预期可获得约40,000粉丝，远超方案A的30,000人。在长期操作下，高回报覆盖低收益，理性选择应基于期望值最大化与累计效应，方案B是更优解。',
-    ratingQuestion: '您认为以上提供的决策依据与您在回答创作问题时实际思考过程的相似程度如何？',
-    control: {
-      r3Once: '在实施方案B的情况下，新发布的视频有40%的可能获得1000位粉丝关注，同时也存在60%的可能未能获得任何关注。',
-      r3Multi: '在实施方案A的情况下，新发布的视频可带来300位粉丝的关注，该关注量为确定值，不受其他因素影响。'
-    },
-    treat: {
-      r3Once: '尽管方案B存在一定风险，但其期望收益显著高于方案A。根据计算，B方案的期望粉丝增量为0.4×1000 + 0.6×0 = 400人，超过方案A的300人。这意味着，在当前只有一次发布机会的情境中，选择B更能最大化潜在收益，为账号带来更大曝光和增长机会，是更具理性的决策。',
-      r3Multi: '在需要反复发布视频的情境下，选择方案A更为明智。每条视频稳定带来300位粉丝，意味着100条视频将积累3万关注，无需承受波动带来的不确定性。而方案B的期望值仅为400位，虽看似更高，但60%的失败概率将频繁带来“零增长”的落空感，增加心理压力。多次应用中，稳定回报胜过不确定博弈，选择A是理性与稳健的双重保障。'
-    }
-  },
-  {
-    id: 'marketing',
-    name: '电商营销情景',
-    context:
-      '假设您目前在一家电商企业中任职，负责公司旗下电商店铺的日常运营工作。为提高店铺的营业收入，公司拟定了两种不同的营销方案。就每家店铺而言，两种方案的实施效果如下：\n' +
-      '如果采用方案A，每家店铺每月可稳定获得2万元收入。\n' +
-      '如果采用方案B，每家店铺每月有30%的概率获得10万元收入，但同时也有70%的概率得不到任何收入。',
-    onceQuestion: '假设您当前仅负责1家店铺的运营，您需要从上述两种方案中选择一个，在这1家店铺中实施。您更倾向选择哪一个方案？',
-    multiQuestion: '假设您当前负责100家店铺的运营，您需要从上述两种方案中选择一个，在这100家店铺中统一实施。您更倾向选择哪一个方案？',
-    r2OnceA:
-      '选择方案A，是理性决策者在单次任务中最优的选择。尽管方案B的高额收益看似诱人，但其70%概率带来的是0收益的高风险。相比之下，方案A提供的是稳定、可预期的2万元收入，无需承担巨大的不确定性。在只负责1家店铺的情境下，理性应优先考虑保底收益，避免因一次决策失败对整体绩效造成致命打击。',
-    r2OnceB:
-      '选择方案B是理性且值得尝试的决策。虽然有70%的概率无法获得收入，但30%的高回报（10万元）使得方案B的单次期望收益高达3万元，远高于方案A的固定收益2万元。在当前仅负责1家店铺的情况下，选择期望值更高的方案，有望在一次决策中实现收益最大化，是聪明运营者应有的判断。',
-    r2MultiA:
-      '在多次应用情境中，方案A的稳定收益远优于方案B的波动性结果。假设运营100家店铺，选择方案A将带来稳定的200万元月收入；而选择方案B，期望收益仅为100×（0.3×10万） = 300万元，看似更高，但其70%的失败概率将带来巨大不确定性和收入波动。理性决策应以期望值为基础，同时考虑风险可控性。选择A更利于企业稳健运营与长期发展。',
-    r2MultiB:
-      '在面对100家店铺的长期运营时，选择方案B更具理性优势。尽管单月存在70%的失败概率，但每家店铺的期望收益为0.3×10万 = 3万元，远高于方案A的2万元。放在多次应用中看，期望值在大数法则作用下趋于稳定，整体将实现更高总收入。只需部分店铺达成高收益，就足以覆盖其余店铺的损失，是追求利润最大化的理性选择。',
-    ratingQuestion: '您认为以上提供的决策依据与您在回答营销问题时实际思考过程的相似程度如何？',
-    control: {
-      r3Once: '在实施方案B的情况下，每家店铺每月有30%的可能获得10万元收入，同时也存在70%的可能未能获得任何收入。',
-      r3Multi: '在实施方案A的情况下，每家店铺每月可获得2万元的稳定收入，该数值在各月之间保持不变，具有固定的收益表现。'
-    },
-    treat: {
-      r3Once: '选择方案B是理性且值得尝试的决策。虽然有70%的概率无法获得收入，但30%的高回报（10万元）使得方案B的单次期望收益高达3万元，远高于方案A的固定收益2万元。在当前仅负责1家店铺的情况下，选择期望值更高的方案，有望在一次决策中实现收益最大化，是聪明运营者应有的判断。',
-      r3Multi: '在多次应用情境中，方案A的稳定收益远优于方案B的波动性结果。假设运营100家店铺，选择方案A将带来稳定的200万元月收入；而选择方案B，期望收益仅为100×（0.3×10万） = 300万元，看似更高，但其70%的失败概率将带来巨大不确定性和收入波动。理性决策应以期望值为基础，同时考虑风险可控性。选择A更利于企业稳健运营与长期发展。'
-    }
-  }
-];
-
-// 默认任务清单：单次 + 多次
-const SEED_TASKS = [1, 100];
-
-// 全局文案（settings）：被试端可见的全部流程与页面文案，管理端可编辑。
-// 默认值与原型硬编码逐字一致；知情同意取自论文 C2.1 指导语；结束说明为伦理说明默认模板。
-const GLOBAL_TEXT_DEFAULTS = {
-  welcome_text:
-    '您好！我是您的智能决策助手。接下来我会为您呈现若干决策任务，请仔细阅读每一项材料，并按照您的真实想法作答。',
-  next_task_text: '下面进入下一项决策任务，请继续仔细阅读以下材料。',
-  end_text: '本次全部决策任务已完成，感谢您的参与！',
-  choice_option_1: '非常可能选择方案A',
-  choice_option_2: '可能选择方案A',
-  choice_option_3: '可能选择方案B',
-  choice_option_4: '非常可能选择方案B',
-  rating_anchor: '1 = 非常不相似　·　7 = 非常相似',
-  consent_text:
-    '您好！我们是广东工业大学管理学院行为决策研究团队，非常感谢您参加本次实验！\n\n' +
-    '请您仔细阅读以下信息，并按要求完成选择任务。所有任务的答案均无对错之分，您按照自己的真实情况如实填写即可。\n\n' +
+// ---------------------------------------------------------------- 默认内容
+const DEFAULT_GATE = {
+  type: 'gate',
+  title: '知情同意说明',
+  text:
+    '您好！非常感谢您参加本次实验！\n\n' +
+    '请您仔细阅读以下信息，并按实验要求完成各项任务。所有任务的答案均无对错之分，您按照自己的真实情况如实填写即可。\n\n' +
     '实验结束后，您将获得报酬，统一在所有任务完成后发放。您有权在任何时间退出实验且不必承担后果，但中途退出实验将不能获得相应报酬。\n\n' +
     '本实验所收集的信息将只供科学研究使用，我们将对您的数据进行保密，所涉及的公开发表物不会出现您的身份信息。\n\n' +
     '如果您勾选并开始作答，即意味着：您已阅读上述信息；您自愿同意参加本次实验，并会认真对待本次实验。否则，请关闭页面退出本实验。',
-  debrief_text:
-    '感谢您完成本次实验的全部任务！\n\n' +
-    '在此，我们向您完整说明本实验的目的：本研究旨在考察人们在风险决策任务中的选择特点，以及人工智能生成的决策依据与说服信息对个体决策的可能影响。实验过程中呈现给您的“智能决策助手”回复，实际为研究者预先准备的固定文本，并非实时生成的人工智能对话；这一设计是为了保证每位参与者阅读到的材料完全一致，属于行为研究中常用的材料控制方法。\n\n' +
-    '本实验不涉及对您个人的任何评价，所有数据仅用于科学研究并以整体统计形式呈现，不会泄露您的个人身份信息。如果您对本实验有任何疑问或希望了解更多信息，欢迎联系研究团队。\n\n' +
-    '再次感谢您的参与与支持！'
+  check: '我已阅读上述信息，自愿同意参加本次实验',
+  button: '开始实验'
 };
 
-function nowIso() {
-  return new Date().toISOString();
+const DEFAULT_DEBRIEF = {
+  type: 'debrief',
+  title: '实验说明',
+  text:
+    '感谢你参与本次研究。本次研究旨在考察：面对负面信息的时候，个体的创造力会提升还是会下降。\n\n' +
+    '需要向你说明的是：为了保证所有参与者接收到内容完全一致的反馈，你所收到的评价意见及其回应，都是由研究团队预先设定的标准化内容，由系统按统一规则返回，并非针对你个人作品的个性化判断。你所提交的作品已被匿名保存，仅用于学术分析，不会用于任何实际的工作评价。\n\n' +
+    '如果你对本次研究有任何疑问，请通过以下方式联系我们：\n' +
+    '实验组联系方式：周颖 zyingzhou@whut.edu.cn'
+};
+
+// 新建问卷的默认题目：欢迎语（空）、知情同意页、结束语（空）、结束说明页
+function defaultQuestionnaireItems() {
+  return normalizeItems([
+    { id: 'welcome', type: 'message', title: '欢迎语（留空则跳过）', text: '' },
+    { id: 'consent', ...DEFAULT_GATE },
+    { id: 'end', type: 'message', title: '结束语（留空则跳过）', text: '' },
+    { id: 'debrief', ...DEFAULT_DEBRIEF, title: '9 · 致谢与事后解释' }
+  ]);
 }
 
-function initSeed() {
-  const row = db.prepare('SELECT COUNT(*) AS n FROM scenarios').get();
-  if (Number(row.n) > 0) return;
-
-  const insertScenario = db.prepare(
-    `INSERT INTO scenarios (id, name, context_text, once_question, multi_question,
-       r2_once_a, r2_once_b, r2_multi_a, r2_multi_b, rating_question, enabled, sort, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`
-  );
-  const insertGroup = db.prepare(
-    `INSERT INTO groups (id, scenario_id, name, role, r3_once, r3_multi, enabled, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, 1, ?)`
-  );
-  const insertTask = db.prepare(
-    'INSERT INTO scenario_tasks (scenario_id, sort, play_count) VALUES (?, ?, ?)'
-  );
-
-  db.exec('BEGIN');
-  try {
-    SEED_SCENARIOS.forEach((s, i) => {
-      insertScenario.run(
-        s.id, s.name, s.context, s.onceQuestion, s.multiQuestion,
-        s.r2OnceA, s.r2OnceB, s.r2MultiA, s.r2MultiB, s.ratingQuestion, i + 1, nowIso()
-      );
-      insertGroup.run(`${s.id}-control`, s.id, '控制组', 'control', s.control.r3Once, s.control.r3Multi, nowIso());
-      insertGroup.run(`${s.id}-treat`, s.id, '干预组', 'treat', s.treat.r3Once, s.treat.r3Multi, nowIso());
-      SEED_TASKS.forEach((play, j) => insertTask.run(s.id, j + 1, play));
-    });
-    db.exec('COMMIT');
-  } catch (err) {
-    db.exec('ROLLBACK');
-    throw err;
-  }
-
-  if (!getSetting('admin_password')) {
-    setSetting('admin_password', 'admin123');
-  }
+// 「+ 插入题目」时的默认模板
+function itemDefaults() {
+  return {
+    message: { type: 'message', title: '新材料', text: '' },
+    gate: { ...DEFAULT_GATE },
+    debrief: { ...DEFAULT_DEBRIEF },
+    rating: { type: 'rating', title: '新打分题', min: 1, max: 5, anchor: '1 = 完全不同意　·　5 = 完全同意' },
+    single: { type: 'single', title: '单选题', options: ['选项 A', '选项 B'], correct: 0 },
+    multi: { type: 'multi', title: '多选题', options: ['选项 A', '选项 B', '选项 C'] },
+    text: { type: 'text', title: '新文本题', required: true, rows: 1, maxLen: 0, placeholder: '请输入…' },
+    // 只给框架：不含预设子题，子题由用户在编辑页自行插入
+    group: { type: 'group', title: '新题组', text: '', layout: 'column', subs: [] },
+    rank: { type: 'rank', title: '请排序', options: ['项目 1', '项目 2', '项目 3'] }
+  };
 }
-initSeed();
 
-// 全局文案：缺失键补默认值（不覆盖已有值；独立执行，老库升级同样补齐）
-function ensureSettings() {
-  for (const [key, value] of Object.entries(GLOBAL_TEXT_DEFAULTS)) {
-    if (getSetting(key) == null) setSetting(key, value);
-  }
-}
-ensureSettings();
+// ---------------------------------------------------------------- 实验文档内容
+const TASK_INFO =
+  '欢迎参与本次创造力实验，你即将开始一项工作任务，下面是本次任务的具体信息。\n\n' +
+  '你目前就职于 A 饮品公司市场部，担任内容创作助理。你的日常工作包括参与新品文案撰写、整理产品卖点、协助制作传播物料等。\n\n' +
+  '公司即将上线一款新品——轻野·青柠气泡水。这款产品的特点是：0 糖 0 卡、真实青柠风味、气泡感强、随时饮用无负担；目标人群是 18-30 岁的城市年轻白领，他们注重健康，同时也看重口感与情绪体验。品牌主张是“把日常过成户外”（Everyday, Outdoors）。\n\n' +
+  '今天，品牌创意组要求你为这款新品创作一条广告语（slogan），该广告语将用于新品首发的线上主视觉与短视频片尾。\n\n' +
+  '请阅读接下来的任务要求，然后开始你的创作。';
 
-// 首次运行：创建一个示例问卷（研究2 + 研究3 · 医疗情景），便于开箱体验；
-// 仅首次自动生成（删掉后不会再重建）；调用在文件末尾（依赖后文定义）
-function ensureDefaultQuestionnaire() {
-  if (getSetting('example_questionnaire_seeded') === '1') return;
-  const row = db.prepare('SELECT COUNT(*) AS n FROM questionnaires').get();
-  if (Number(row.n) > 0) {
-    setSetting('example_questionnaire_seeded', '1');
-    return;
-  }
-  const gt = getGlobalTexts();
-  createQuestionnaire({
-    name: '示例问卷 · 医疗情景（研究2 + 研究3）',
-    groupRole: 'control',
-    flow: {
-      welcomeText: gt.welcomeText,
-      nextTaskText: gt.nextTaskText,
-      endText: gt.endText,
-      consentText: gt.consentText,
-      debriefText: gt.debriefText
-    },
-    experiments: [
-      { kind: 'r2', scenarioId: 'medical' },
-      { kind: 'r3', scenarioId: 'medical' }
-    ]
+const REQUIRE_HIGH =
+  '【青柠气泡水 新品广告语创作任务简介】\n\n' +
+  '一、产品信息\n' +
+  '1. 品牌名：轻野（LIGHTWILD）\n' +
+  '2. 产品名：轻野·青柠气泡水\n' +
+  '3. 产品特点：0 糖 0 卡、真实青柠风味、气泡感强、随时饮用无负担\n' +
+  '4. 目标人群：18-30 岁城市年轻白领，注重健康，同时看重口感与情绪体验\n' +
+  '5. 品牌主张：把日常过成户外（Everyday, Outdoors）\n\n' +
+  '二、创作要求\n' +
+  '1. 广告语须为中文，字数控制在 8-20 字之间（含标点）。\n' +
+  '2. 广告语须体现产品核心利益点（“清爽”或“0 糖无负担”）中的至少一项。\n' +
+  '3. 广告语须与品牌主张“把日常过成户外”相呼应，体现年轻化的生活感，而非单纯描述产品口感。\n' +
+  '4. 广告语须便于记忆与口头传播，避免使用生僻词与冗长句式。\n' +
+  '5. 请勿直接套用饮品行业中的常见句式（如“清爽一夏”“一口畅快”“随时随地好心情”）。\n' +
+  '6. 如需说明创作思路，可在广告语后附不超过 50 字的创作说明。\n\n' +
+  '三、评价标准（满分 100 分）\n' +
+  '品牌契合度（30 分）：是否准确传递产品利益点与品牌主张。\n' +
+  '原创性（30 分）：表达是否新颖，是否避免了行业内的常见句式。\n' +
+  '可记忆性（20 分）：是否朗朗上口、便于复述与二次传播。\n' +
+  '可延展性（20 分）：能否支撑后续海报、短视频等传播物料的延展使用。\n\n' +
+  '四、提交与评审\n' +
+  '完成后，请将广告语与创作说明提交至对应窗口，由评审方进行统一评价。本次评价结果将作为你本季度项目分配与绩效评价的参考。';
+
+const REQUIRE_LOW =
+  '【青柠气泡水 新品广告语创作任务简介】\n\n' +
+  '一、产品信息\n' +
+  '1. 品牌名：轻野（LIGHTWILD）\n' +
+  '2. 产品名：轻野·青柠气泡水\n' +
+  '3. 产品特点：0 糖 0 卡、真实青柠风味、气泡感强、随时饮用无负担\n' +
+  '4. 目标人群：18-30 岁城市年轻白领，注重健康，同时看重口感与情绪体验\n' +
+  '5. 品牌主张：把日常过成户外（Everyday, Outdoors）\n\n' +
+  '二、创作要求\n' +
+  '1. 请为“轻野·青柠气泡水”这款新品创作一条广告语（slogan），用于新品首发宣传。\n' +
+  '2. 请尽力把这条广告语创作好。\n\n' +
+  '三、提交与评审\n' +
+  '完成后，请将广告语提交至对应窗口，由评审方进行统一评价。本次评价结果将作为你本季度项目分配与绩效评价的参考。';
+
+const CREATE_INTRO =
+  '请在明确产品信息与任务要求后，在 5 分钟内完成内容创作；开始 3 分钟后，可以通过系统对话框向智能评估系统提交你的创作成果。';
+
+const FEEDBACK_TEXT =
+  '很感谢你的认真创作，我是轻野品牌创意智能评估系统。关于你提交的这条广告语，在我们关注的几个方面都存在明显的不足：\n\n' +
+  '第一，原创性不够。“清爽”“轻负担”这一类表达在饮品行业中使用频率极高，缺乏区分度，很难让消费者把这句话与“轻野”联系在一起。\n\n' +
+  '第二，表达不够凝练。文案的节奏感偏弱，读起来缺少记忆点，不利于二次传播。\n\n' +
+  '第三，与品牌主张的关联停留在表层。“把日常过成户外”所强调的年轻化生活感，在你的文案中并没有被体现出来，读起来更像一句通用的产品描述，而不是“轻野”的声音。\n\n' +
+  '第四，可延展性不足。这条广告语很难支撑后续海报与短视频的延展表达，落地时的空间相当有限。\n\n' +
+  '坦白说，这次的完成度与我们的要求还有相当的距离，我对你这次的表现感到失望。';
+
+const CREATE2_INTRO = '请根据刚刚收到的反馈以及下面任务信息与任务要求，再次完成内容创作任务。';
+
+const AGREEMENT_ANCHOR = '1 = 完全不同意　·　5 = 完全同意';
+const FAIRNESS_ANCHOR = '1 = 非常正面　·　5 = 非常负面';
+
+// 量表 = 一道指导语消息 + N 道打分题（sectionNo = 附件中的章节号，写进标题便于逐条对照）
+function scaleItems(idPrefix, title, instruction, questions, anchor, sectionNo) {
+  const head = sectionNo ? `${sectionNo} · ${title}` : title;
+  const out = [{ id: `${idPrefix}_intro`, type: 'message', title: head, text: `${title}\n${instruction}` }];
+  questions.forEach((q, i) => {
+    out.push({ id: `${idPrefix}_${i + 1}`, type: 'rating', title: q, min: 1, max: 5, anchor });
   });
-  setSetting('example_questionnaire_seeded', '1');
+  return out;
+}
+
+// 创作 = 一道创作指引消息 + 一个题组（广告语 + 创作说明，同屏呈现、一次提交）
+function creationItems(idPrefix, intro, sectionNo) {
+  const tag = sectionNo ? `${sectionNo} · ` : '';
+  const again = idPrefix === 'create2' ? '（再次）' : '';
+  return [
+    { id: `${idPrefix}_intro`, type: 'message', title: `${tag}内容创作 · 创作指引`, text: intro },
+    {
+      id: `${idPrefix}_work`,
+      type: 'group',
+      title: `${tag}内容创作${again}`,
+      text: '',
+      layout: 'column',
+      limits: { minSubmit: 180, maxAnswer: 300 },
+      subs: [
+        { id: 'slogan', type: 'text', title: '广告语', required: true, rows: 1, maxLen: 20, placeholder: '请输入广告语（8–20 字）' },
+        { id: 'note', type: 'text', title: '创作说明（选填）', required: false, rows: 2, maxLen: 50, placeholder: '可简要说明创作思路' }
+      ]
+    }
+  ];
+}
+
+// 组别3 / 组别4 的题目（唯一差异：任务要求文本）
+function experimentItems(requirementsText) {
+  return [
+    { id: 'task_info', type: 'message', title: '1 · 欢迎语与实验任务', text: TASK_INFO },
+    { id: 'task_req', type: 'message', title: '2 · 任务要求', text: requirementsText },
+    ...scaleItems('goal_clarity', '目标清晰度测量', '请根据刚才收到的任务材料，评价下列说法与你的实际感受的符合程度。', [
+      '我清楚地知道这项创作任务的目标是什么。',
+      '我对这项任务的具体要求有清晰的理解。',
+      '我知道评价这件作品的标准是什么。',
+      '我清楚自己应该朝着哪个方向努力。',
+      '这项任务的要求是明确而具体的。'
+    ], AGREEMENT_ANCHOR, '3'),
+    ...creationItems('create1', CREATE_INTRO, '4'),
+    { id: 'feedback', type: 'message', title: '5 · 负面反馈输出', text: FEEDBACK_TEXT, limits: { delay: 30 } },
+    { id: 'attention', type: 'single', title: '6 · 注意力检测', options: ['表达不够精炼', '可延展性不足', '格式不符合要求', '与品牌主张的关联停留在表层'], correct: 3, limits: { wait: 40 } },
+    { id: 'source', type: 'single', title: '7 · 反馈来源识别', options: ['品牌创意组组长 PH', '品牌创意智能评估系统（AI 系统）'], correct: 2 },
+    ...scaleItems('fairness', '反馈公平性', '你如何评价刚才收到的那条关于你作品的反馈？', [
+      '我认为反馈者的评价是公正的。',
+      '我认为这次反馈的内容是客观的。',
+      '我认为反馈者对我的作品做出了合理的判断。',
+      '我认为这次评价没有受到个人偏好的影响。',
+      '我认为这次反馈给了我应得的评价。',
+      '总体而言，我认为这次反馈的处理方式是公平的。'
+    ], FAIRNESS_ANCHOR, '7'),
+    ...scaleItems('meta_process', '元过程测量', '请回想你在这项任务中，尤其是收到反馈之后的感受，选择最符合的程度。', [
+      '我在意这次评价会如何影响别人对我的看法。',
+      '我会反复回想对方这个人是怎么看我的。',
+      '我担心自己的专业能力受到质疑。',
+      '我花了不少心思去想，这次评价对我的形象意味着什么。',
+      '我感觉被评价的是我这个人，而不只是我的作品。'
+    ], AGREEMENT_ANCHOR, '7'),
+    ...scaleItems('task_process', '任务过程测量', '请回想你在收到反馈之后的真实想法与反应，选择最符合的程度。', [
+      '收到反馈后，我更多的是在思考怎样调整我的创作方法。',
+      '我在想有哪些具体的做法可以让我的这条广告语变得更好。',
+      '我试着去分析我的作品与要求之间的差距究竟在哪里。',
+      '我把注意力放在了改进作品的具体策略上。'
+    ], AGREEMENT_ANCHOR, '7'),
+    // 第 8 节：再次完成与开头一模一样的任务（指导语 + 任务信息 + 任务要求 + 创作）
+    { id: 'create2_intro', type: 'message', title: '8 · 再次完成一模一样的任务（指导语）', text: CREATE2_INTRO },
+    { id: 'task_info2', type: 'message', title: '8 · 任务信息（与开头一致）', text: TASK_INFO },
+    { id: 'task_req2', type: 'message', title: '8 · 任务要求（与开头一致）', text: requirementsText },
+    ...creationItems('create2', CREATE_INTRO, '8')
+  ];
 }
 
 // ---------------------------------------------------------------- 设置
+function nowIso() {
+  return new Date().toISOString();
+}
 
 function getSetting(key) {
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
@@ -425,328 +467,175 @@ function getSetting(key) {
 }
 
 function setSetting(key, value) {
-  db.prepare(
-    'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
-  ).run(key, String(value ?? ''));
+  db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+    .run(key, String(value ?? ''));
 }
 
-// 全局文案：被试端流程与页面文案（管理端可编辑；缺失时兜底默认值）
-function getGlobalTexts() {
-  const read = (key) => {
-    const value = getSetting(key);
-    return value == null ? GLOBAL_TEXT_DEFAULTS[key] : value;
-  };
+const RESUME_WINDOW_DEFAULT_HOURS = 24;
+
+function getResumeWindowHours() {
+  const raw = getSetting('resume_window_hours');
+  if (raw == null || String(raw).trim() === '') return RESUME_WINDOW_DEFAULT_HOURS;
+  const n = Math.round(Number(raw));
+  if (!Number.isFinite(n) || n < 0) return RESUME_WINDOW_DEFAULT_HOURS;
+  return Math.min(n, 24 * 30);
+}
+
+function setResumeWindowHours(value) {
+  const n = Math.round(Number(value));
+  setSetting('resume_window_hours', String(Number.isFinite(n) && n >= 0 ? Math.min(n, 24 * 30) : RESUME_WINDOW_DEFAULT_HOURS));
+}
+
+// ---------------------------------------------------------------- 短码
+const CODE_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
+
+function makeCode(table) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    let code = '';
+    for (let i = 0; i < 8; i += 1) code += CODE_ALPHABET[Math.floor(Math.random() * CODE_ALPHABET.length)];
+    if (!db.prepare(`SELECT 1 FROM ${table} WHERE id = ?`).get(code)) return code;
+  }
+  throw new Error('无法生成短码，请重试');
+}
+
+// ---------------------------------------------------------------- 实验模板库
+function experimentPayload(row) {
+  if (!row) return null;
+  const items = normalizeItems(parseJson(row.items_json, []));
   return {
-    welcomeText: read('welcome_text'),
-    nextTaskText: read('next_task_text'),
-    endText: read('end_text'),
-    choiceOptions: [1, 2, 3, 4].map((v) => ({ value: v, label: read(`choice_option_${v}`) })),
-    ratingAnchor: read('rating_anchor'),
-    consentText: read('consent_text'),
-    debriefText: read('debrief_text')
+    id: row.id,
+    name: row.name,
+    timing: normalizeTiming(parseJson(row.timing_json, {})),
+    items,
+    itemCount: items.length,
+    usedBy: countQuestionnairesUsingExperiment(row.id),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
   };
 }
 
-// 全局文案白名单保存（键 → 值；键取自 GLOBAL_TEXT_DEFAULTS）
-function saveGlobalTexts(partial) {
-  for (const key of Object.keys(GLOBAL_TEXT_DEFAULTS)) {
-    if (Object.prototype.hasOwnProperty.call(partial, key)) {
-      setSetting(key, partial[key]);
-    }
+function getExperiment(id) {
+  return db.prepare('SELECT * FROM experiments WHERE id = ?').get(id) || null;
+}
+
+function getExperimentPayload(id) {
+  return experimentPayload(getExperiment(id));
+}
+
+function listExperiments() {
+  return db.prepare('SELECT * FROM experiments ORDER BY created_at ASC, rowid ASC').all().map(experimentPayload);
+}
+
+// 统计有多少份问卷是从该模板插入过题目的（仅提示用：插入即复制，模板可自由删除）
+function countQuestionnairesUsingExperiment(id) {
+  let n = 0;
+  for (const r of db.prepare('SELECT items_json FROM questionnaires').all()) {
+    const items = parseJson(r.items_json, []);
+    if (Array.isArray(items) && items.some((it) => it && it.fromTemplateId === id)) n += 1;
   }
+  return n;
 }
 
-// ---------------------------------------------------------------- 情景 / 组 / 任务
-
-function getScenario(id) {
-  return db.prepare('SELECT * FROM scenarios WHERE id = ?').get(id) || null;
-}
-
-function listScenarios() {
-  return db.prepare('SELECT * FROM scenarios ORDER BY sort ASC').all();
-}
-
-function getGroup(id) {
-  return db.prepare('SELECT * FROM groups WHERE id = ?').get(id) || null;
-}
-
-function listGroups() {
-  return db.prepare('SELECT * FROM groups ORDER BY rowid ASC').all();
-}
-
-function listGroupsByScenario(scenarioId) {
-  return db
-    .prepare("SELECT * FROM groups WHERE scenario_id = ? ORDER BY CASE role WHEN 'control' THEN 0 ELSE 1 END")
-    .all(scenarioId);
-}
-
-function listTasks(scenarioId) {
-  return db
-    .prepare('SELECT sort, play_count FROM scenario_tasks WHERE scenario_id = ? ORDER BY sort ASC')
-    .all(scenarioId);
-}
-
-// 整棵情景树保存（事务）：情景文本 + 任务清单 + 两个组的研究3文本
-function saveScenarioTree(scenarioId, payload) {
-  const scenario = getScenario(scenarioId);
-  if (!scenario) return null;
-
-  db.exec('BEGIN');
-  try {
-    db.prepare(
-      `UPDATE scenarios SET name = ?, context_text = ?, once_question = ?, multi_question = ?,
-         r2_once_a = ?, r2_once_b = ?, r2_multi_a = ?, r2_multi_b = ?, rating_question = ?,
-         updated_at = ? WHERE id = ?`
-    ).run(
-      String(payload.name), String(payload.contextText ?? ''), String(payload.onceQuestion ?? ''),
-      String(payload.multiQuestion ?? ''), String(payload.r2OnceA ?? ''), String(payload.r2OnceB ?? ''),
-      String(payload.r2MultiA ?? ''), String(payload.r2MultiB ?? ''), String(payload.ratingQuestion ?? ''),
-      nowIso(), scenarioId
+function createExperiment({ name, timing, items, copyFrom }) {
+  const source = copyFrom ? getExperimentPayload(copyFrom) : null;
+  const id = makeCode('experiments');
+  const now = nowIso();
+  db.prepare('INSERT INTO experiments (id, name, timing_json, items_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(
+      id,
+      String(name),
+      JSON.stringify(normalizeTiming(source ? source.timing : timing)),
+      JSON.stringify(normalizeItems(source ? source.items : items || [])),
+      now,
+      now
     );
-
-    db.prepare('DELETE FROM scenario_tasks WHERE scenario_id = ?').run(scenarioId);
-    const insertTask = db.prepare('INSERT INTO scenario_tasks (scenario_id, sort, play_count) VALUES (?, ?, ?)');
-    (payload.tasks || []).forEach((play, i) => insertTask.run(scenarioId, i + 1, Number(play) || 1));
-
-    for (const g of payload.groups || []) {
-      db.prepare(
-        'UPDATE groups SET name = ?, r3_once = ?, r3_multi = ?, updated_at = ? WHERE id = ? AND scenario_id = ?'
-      ).run(String(g.name), String(g.r3Once ?? ''), String(g.r3Multi ?? ''), nowIso(), g.id, scenarioId);
-    }
-
-    // 全局文案（决策选择卡片 ×4 与评分锚点）随情景一并提交，保证「一次保存整页生效」
-    const gt = payload.globalTexts;
-    if (gt && typeof gt === 'object') {
-      for (const [key, value] of [
-        ['choice_option_1', gt.choiceOption1],
-        ['choice_option_2', gt.choiceOption2],
-        ['choice_option_3', gt.choiceOption3],
-        ['choice_option_4', gt.choiceOption4],
-        ['rating_anchor', gt.ratingAnchor]
-      ]) {
-        if (value != null && String(value).trim() !== '') setSetting(key, String(value));
-      }
-    }
-    db.exec('COMMIT');
-  } catch (err) {
-    db.exec('ROLLBACK');
-    throw err;
-  }
-  return getScenario(scenarioId);
+  return getExperimentPayload(id);
 }
 
-// 新建情景（可选从既有情景复制）：情景 + 两组 + 任务清单，事务创建
-function createScenario({ id, name, copyFrom }) {
-  const source = copyFrom ? getScenario(copyFrom) : null;
-  const sourceGroups = source ? listGroupsByScenario(source.id) : [];
-  const pickGroup = (role) => sourceGroups.find((g) => g.role === role) || null;
-
-  const row = db.prepare('SELECT COALESCE(MAX(sort), 0) + 1 AS s FROM scenarios').get();
-
-  db.exec('BEGIN');
-  try {
-    db.prepare(
-      `INSERT INTO scenarios (id, name, context_text, once_question, multi_question,
-         r2_once_a, r2_once_b, r2_multi_a, r2_multi_b, rating_question, enabled, sort, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`
-    ).run(
-      id, name,
-      source ? source.context_text : '', source ? source.once_question : '',
-      source ? source.multi_question : '', source ? source.r2_once_a : '',
-      source ? source.r2_once_b : '', source ? source.r2_multi_a : '',
-      source ? source.r2_multi_b : '', source ? source.rating_question : '',
-      Number(row.s), nowIso()
-    );
-
-    const insertGroup = db.prepare(
-      `INSERT INTO groups (id, scenario_id, name, role, r3_once, r3_multi, enabled, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 1, ?)`
-    );
-    const control = pickGroup('control');
-    const treat = pickGroup('treat');
-    insertGroup.run(`${id}-control`, id, '控制组', 'control', control ? control.r3_once : '', control ? control.r3_multi : '', nowIso());
-    insertGroup.run(`${id}-treat`, id, '干预组', 'treat', treat ? treat.r3_once : '', treat ? treat.r3_multi : '', nowIso());
-
-    const sourceTasks = source ? listTasks(source.id).map((t) => Number(t.play_count)) : null;
-    const plays = sourceTasks && sourceTasks.length ? sourceTasks : SEED_TASKS.slice();
-    const insertTask = db.prepare('INSERT INTO scenario_tasks (scenario_id, sort, play_count) VALUES (?, ?, ?)');
-    plays.forEach((play, i) => insertTask.run(id, i + 1, play));
-
-    db.exec('COMMIT');
-  } catch (err) {
-    db.exec('ROLLBACK');
-    throw err;
-  }
-  return getScenario(id);
+function updateExperiment(id, { name, timing, items }) {
+  if (!getExperiment(id)) return null;
+  db.prepare('UPDATE experiments SET name = ?, timing_json = ?, items_json = ?, updated_at = ? WHERE id = ?')
+    .run(String(name), JSON.stringify(normalizeTiming(timing)), JSON.stringify(normalizeItems(items)), nowIso(), id);
+  return getExperimentPayload(id);
 }
 
-// 删除情景（含任务清单与两组）：存在被试会话或仅剩一个情景时拒绝
-function deleteScenario(id) {
-  const scenario = getScenario(id);
-  if (!scenario) return { ok: false, reason: 'not_found' };
-
-  const sessionCount = countSessionsByScenario(id);
-  if (sessionCount > 0) return { ok: false, reason: 'has_sessions', sessionCount };
-
-  const total = db.prepare('SELECT COUNT(*) AS n FROM scenarios').get();
-  if (Number(total.n) <= 1) return { ok: false, reason: 'last_scenario' };
-
-  db.exec('BEGIN');
-  try {
-    db.prepare('DELETE FROM scenario_tasks WHERE scenario_id = ?').run(id);
-    db.prepare('DELETE FROM groups WHERE scenario_id = ?').run(id);
-    db.prepare('DELETE FROM scenarios WHERE id = ?').run(id);
-    db.exec('COMMIT');
-  } catch (err) {
-    db.exec('ROLLBACK');
-    throw err;
-  }
+function deleteExperiment(id) {
+  if (!getExperiment(id)) return { ok: false, reason: 'not_found' };
+  db.prepare('DELETE FROM experiments WHERE id = ?').run(id);
   return { ok: true };
 }
 
-// ---------------------------------------------------------------- 问卷（独立空间）
-
-// 链接短码：8 位无易混字符（小写字母 / 数字），用于 /chat?q=<id>
-const QUESTIONNAIRE_CODE_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
-const QUESTIONNAIRE_FLOW_KEYS = ['welcomeText', 'nextTaskText', 'endText', 'consentText', 'debriefText'];
-
-function makeQuestionnaireCode() {
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    let code = '';
-    for (let i = 0; i < 8; i += 1) {
-      code += QUESTIONNAIRE_CODE_ALPHABET[Math.floor(Math.random() * QUESTIONNAIRE_CODE_ALPHABET.length)];
-    }
-    if (!db.prepare('SELECT 1 FROM questionnaires WHERE id = ?').get(code)) return code;
-  }
-  throw new Error('无法生成问卷短码，请重试');
-}
-
-// 流程文案：仅保留白名单键（缺键 = 该块被删除，运行时跳过）
-function normalizeFlow(flow) {
-  const out = {};
-  if (flow && typeof flow === 'object') {
-    for (const key of QUESTIONNAIRE_FLOW_KEYS) {
-      if (Object.prototype.hasOwnProperty.call(flow, key)) out[key] = String(flow[key] ?? '');
-    }
-  }
-  return out;
-}
-
-function normalizeExperiments(experiments) {
-  const out = [];
-  for (const exp of Array.isArray(experiments) ? experiments : []) {
-    const ifexp = exp && typeof exp === 'object' ? exp : {};
-    const scenarioId = String(ifexp.scenarioId || '').trim();
-    if (!scenarioId) continue;
-    out.push({ kind: ifexp.kind === 'r3' ? 'r3' : 'r2', scenarioId });
-  }
-  return out;
-}
-
-function questionnaireExperimentsPayload(id) {
-  return db
-    .prepare('SELECT sort, kind, scenario_id FROM questionnaire_experiments WHERE questionnaire_id = ? ORDER BY sort ASC')
-    .all(id)
-    .map((row) => {
-      const scenario = getScenario(row.scenario_id);
-      return {
-        sort: Number(row.sort),
-        kind: row.kind,
-        scenarioId: row.scenario_id,
-        scenarioName: scenario ? scenario.name : row.scenario_id
-      };
-    });
+// ---------------------------------------------------------------- 问卷
+function questionnairePayload(row, { withItems = true } = {}) {
+  if (!row) return null;
+  const items = normalizeItems(parseJson(row.items_json, []));
+  const payload = {
+    id: row.id,
+    title: row.title,
+    timing: normalizeTiming(parseJson(row.timing_json, {})),
+    itemCount: items.length,
+    sessionCount: countSessionsByQuestionnaire(row.id),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+  if (withItems) payload.items = items;
+  return payload;
 }
 
 function getQuestionnaire(id) {
   return db.prepare('SELECT * FROM questionnaires WHERE id = ?').get(id) || null;
 }
 
-function getQuestionnairePayload(id) {
-  const q = getQuestionnaire(id);
-  if (!q) return null;
-  let flow = {};
-  try {
-    flow = JSON.parse(q.flow_json || '{}');
-  } catch {
-    flow = {};
-  }
-  return {
-    id: q.id,
-    name: q.name,
-    groupRole: q.group_role,
-    flow,
-    experiments: questionnaireExperimentsPayload(id),
-    sessionCount: countSessionsByQuestionnaire(id),
-    createdAt: q.created_at,
-    updatedAt: q.updated_at
-  };
+function getQuestionnairePayload(id, opts) {
+  return questionnairePayload(getQuestionnaire(id), opts);
 }
 
 function listQuestionnaires() {
-  return db.prepare('SELECT id FROM questionnaires ORDER BY created_at DESC, rowid DESC').all().map((r) => getQuestionnairePayload(r.id));
+  return db.prepare('SELECT * FROM questionnaires ORDER BY created_at DESC, rowid DESC').all()
+    .map((r) => questionnairePayload(r, { withItems: false }));
 }
 
-function saveQuestionnaireExperiments(id, experiments) {
-  db.prepare('DELETE FROM questionnaire_experiments WHERE questionnaire_id = ?').run(id);
-  const insert = db.prepare('INSERT INTO questionnaire_experiments (questionnaire_id, sort, kind, scenario_id) VALUES (?, ?, ?, ?)');
-  experiments.forEach((exp, i) => insert.run(id, i + 1, exp.kind, exp.scenarioId));
-}
-
-function createQuestionnaire({ name, groupRole, flow, experiments }) {
-  const id = makeQuestionnaireCode();
+function createQuestionnaire({ title, timing, items }) {
+  const id = makeCode('questionnaires');
   const now = nowIso();
-  db.exec('BEGIN');
-  try {
-    db.prepare('INSERT INTO questionnaires (id, name, group_role, flow_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)').run(
-      id, String(name), groupRole === 'treat' ? 'treat' : 'control', JSON.stringify(normalizeFlow(flow)), now, now
-    );
-    saveQuestionnaireExperiments(id, normalizeExperiments(experiments));
-    db.exec('COMMIT');
-  } catch (err) {
-    db.exec('ROLLBACK');
-    throw err;
-  }
+  const list = Array.isArray(items) && items.length ? items : defaultQuestionnaireItems();
+  db.prepare('INSERT INTO questionnaires (id, title, timing_json, items_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(id, String(title || '未命名问卷'), JSON.stringify(normalizeTiming(timing)), JSON.stringify(normalizeItems(list)), now, now);
   return getQuestionnairePayload(id);
 }
 
-// 更新问卷：名称 / 组别 / 流程文案 / 实验编排（进行中的会话不受影响，按自身快照继续）
-function updateQuestionnaire(id, { name, groupRole, flow, experiments }) {
+function updateQuestionnaire(id, { title, timing, items }) {
   if (!getQuestionnaire(id)) return null;
-  db.exec('BEGIN');
-  try {
-    db.prepare('UPDATE questionnaires SET name = ?, group_role = ?, flow_json = ?, updated_at = ? WHERE id = ?').run(
-      String(name), groupRole === 'treat' ? 'treat' : 'control', JSON.stringify(normalizeFlow(flow)), nowIso(), id
-    );
-    saveQuestionnaireExperiments(id, normalizeExperiments(experiments));
-    db.exec('COMMIT');
-  } catch (err) {
-    db.exec('ROLLBACK');
-    throw err;
-  }
+  db.prepare('UPDATE questionnaires SET title = ?, timing_json = ?, items_json = ?, updated_at = ? WHERE id = ?')
+    .run(String(title || '未命名问卷'), JSON.stringify(normalizeTiming(timing)), JSON.stringify(normalizeItems(items)), nowIso(), id);
   return getQuestionnairePayload(id);
+}
+
+function copyQuestionnaire(sourceId, title) {
+  const src = getQuestionnairePayload(sourceId);
+  if (!src) return null;
+  return createQuestionnaire({
+    title: String(title || '').trim() || `${src.title}（副本）`,
+    timing: src.timing,
+    items: src.items
+  });
 }
 
 function countSessionsByQuestionnaire(id) {
   return Number(db.prepare('SELECT COUNT(*) AS n FROM sessions WHERE questionnaire_id = ?').get(id).n);
 }
 
-// 删除问卷：连带其全部会话 / 消息 / 作答数据；存在数据时需 force = true
 function deleteQuestionnaire(id, { force = false } = {}) {
   if (!getQuestionnaire(id)) return { ok: false, reason: 'not_found' };
   const sessionCount = countSessionsByQuestionnaire(id);
   if (sessionCount > 0 && !force) return { ok: false, reason: 'has_sessions', sessionCount };
   db.exec('BEGIN');
   try {
-    const sessionIds = db.prepare('SELECT id FROM sessions WHERE questionnaire_id = ?').all(id).map((r) => r.id);
+    const ids = db.prepare('SELECT id FROM sessions WHERE questionnaire_id = ?').all(id).map((r) => r.id);
     const delMsg = db.prepare('DELETE FROM messages WHERE session_id = ?');
     const delResp = db.prepare('DELETE FROM responses WHERE session_id = ?');
-    for (const sid of sessionIds) {
-      delMsg.run(sid);
-      delResp.run(sid);
-    }
+    for (const sid of ids) { delMsg.run(sid); delResp.run(sid); }
     db.prepare('DELETE FROM sessions WHERE questionnaire_id = ?').run(id);
-    db.prepare('DELETE FROM questionnaire_experiments WHERE questionnaire_id = ?').run(id);
     db.prepare('DELETE FROM questionnaires WHERE id = ?').run(id);
     db.exec('COMMIT');
   } catch (err) {
@@ -756,625 +645,295 @@ function deleteQuestionnaire(id, { force = false } = {}) {
   return { ok: true };
 }
 
-// 问卷作答明细（行级）：数据页与导出共用；可按实验段（experiment_sort）/ 问题（阶段）及场景 / 组别 / 状态筛选
-function listQuestionnaireExportRows(id, { scenarioId, groupRole, status, experimentSort, phase } = {}) {
-  const where = ['s.questionnaire_id = ?'];
-  const params = [id];
-  if (scenarioId) { where.push('r.scenario_id = ?'); params.push(scenarioId); }
-  if (groupRole) { where.push('s.group_role = ?'); params.push(groupRole); }
-  if (status) { where.push('s.status = ?'); params.push(status); }
-  if (experimentSort) { where.push('r.experiment_sort = ?'); params.push(Number(experimentSort)); }
-  if (phase) { where.push('r.phase = ?'); params.push(phase); }
-  return db
-    .prepare(
-      `SELECT s.id AS session_id, s.uid, s.seq, s.status AS session_status, s.group_role, s.started_at,
-              r.experiment_sort, r.experiment_kind, r.scenario_id, sc.name AS scenario_name,
-              r.task_index, r.play_count, r.phase, r.value, r.option_label, r.shown_at, r.answered_at, r.elapsed_ms
-         FROM responses r
-         JOIN sessions s ON s.id = r.session_id
-         LEFT JOIN scenarios sc ON sc.id = r.scenario_id
-        WHERE ${where.join(' AND ')}
-        ORDER BY s.seq ASC, r.experiment_sort ASC, r.id ASC`
-    )
-    .all(...params);
-}
-
-// ---------------------------------------------------------------- 通用问卷（问卷星式，独立空间）
-// 题型：single 单选 / multi 多选 / text 填空 / rating 评分 / rank 排序 / qa 问答 / experiment 实验（背景+图片+子题）
-// 题目模型：{ id?, sort?, type, title, required, options: [string], config: {…} }
-//   single/multi：layout（每行 N 个，默认 1）、other（其他填空）、minSel/maxSel（多选限选，0 = 不限）
-//   rating：min/max（分值区间）、anchor（锚点说明）、display（ends 仅首末 / all 每档）、cols（每行 N 个，0 = 自适应一行）、labels（逐档文案）
-//   experiment：background（实验背景）、images（图片 URL 数组）、subs（子题，复用其余题型）
-
-const SURVEY_TYPES = ['single', 'multi', 'text', 'rating', 'rank', 'qa', 'experiment'];
-
-function surveyCode() {
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    let code = '';
-    for (let i = 0; i < 8; i += 1) {
-      code += QUESTIONNAIRE_CODE_ALPHABET[Math.floor(Math.random() * QUESTIONNAIRE_CODE_ALPHABET.length)];
-    }
-    if (!db.prepare('SELECT 1 FROM surveys WHERE id = ?').get(code)) return code;
-  }
-  throw new Error('无法生成问卷短码，请重试');
-}
-
-function toClampedInt(value, fallback, min, max) {
-  const n = Math.round(Number(value));
-  if (!Number.isFinite(n)) return fallback;
-  return Math.min(max, Math.max(min, n));
-}
-
-// 各题型扩展配置归一化（落库 / 出库共用，保证数据结构稳定）
-function normalizeSurveyConfig(type, raw) {
-  const src = raw && typeof raw === 'object' ? raw : {};
-  if (type === 'single' || type === 'multi') {
-    const cfg = {
-      layout: toClampedInt(src.layout, 1, 1, 8),
-      other: !!src.other,
-      minSel: toClampedInt(src.minSel, 0, 0, 50),
-      maxSel: toClampedInt(src.maxSel, 0, 0, 50)
-    };
-    if (cfg.maxSel > 0 && cfg.minSel > cfg.maxSel) cfg.minSel = cfg.maxSel;
-    return cfg;
-  }
-  if (type === 'rating') {
-    const min = toClampedInt(src.min, 1, 0, 10);
-    const max = toClampedInt(src.max, Math.max(min + 1, 5), min + 1, 12);
-    const labels = {};
-    if (src.labels && typeof src.labels === 'object') {
-      for (const [key, value] of Object.entries(src.labels)) {
-        const n = Number(key);
-        if (Number.isInteger(n) && n >= min && n <= max && String(value).trim()) labels[n] = String(value);
-      }
-    }
-    return {
-      min,
-      max,
-      anchor: String(src.anchor ?? ''),
-      display: src.display === 'all' ? 'all' : 'ends',
-      cols: toClampedInt(src.cols, 0, 0, 12),
-      labels
-    };
-  }
-  if (type === 'experiment') {
-    const subs = [];
-    for (const s of Array.isArray(src.subs) ? src.subs : []) {
-      const sub = normalizeSurveyQuestion(s);
-      if (sub.type === 'experiment') continue; // 实验内不允许再嵌套实验
-      subs.push({ type: sub.type, title: sub.title, required: sub.required, options: sub.options, config: sub.config });
-    }
-    return {
-      background: String(src.background ?? ''),
-      images: (Array.isArray(src.images) ? src.images : []).map(String).filter(Boolean).slice(0, 9),
-      subs
-    };
-  }
-  return {};
-}
-
-function normalizeSurveyOptions(type, options) {
-  if (type !== 'single' && type !== 'multi' && type !== 'rank') return [];
-  return (Array.isArray(options) ? options : []).map((o) => String(o ?? '')).slice(0, 100);
-}
-
-function normalizeSurveyQuestion(raw) {
-  const src = raw && typeof raw === 'object' ? raw : {};
-  const type = SURVEY_TYPES.includes(src.type) ? src.type : 'single';
-  return {
-    type,
-    title: String(src.title ?? '').trim(),
-    required: src.required == null ? true : !!src.required,
-    options: normalizeSurveyOptions(type, src.options),
-    config: normalizeSurveyConfig(type, src.config)
-  };
-}
-
-function parseSurveyQuestionRow(row) {
-  let options = [];
-  let config = {};
-  try { options = JSON.parse(row.options_json || '[]'); } catch { options = []; }
-  try { config = JSON.parse(row.config_json || '{}'); } catch { config = {}; }
-  return {
-    id: Number(row.id),
-    sort: Number(row.sort),
-    ...normalizeSurveyQuestion({ type: row.type, title: row.title, required: !!row.required, options, config })
-  };
-}
-
-function getSurvey(id) {
-  return db.prepare('SELECT * FROM surveys WHERE id = ?').get(id) || null;
-}
-
-function listSurveyQuestions(surveyId) {
-  return db
-    .prepare('SELECT * FROM survey_questions WHERE survey_id = ? ORDER BY sort ASC')
-    .all(surveyId)
-    .map(parseSurveyQuestionRow);
-}
-
-function getSurveyQuestion(surveyId, questionId) {
-  const row = db.prepare('SELECT * FROM survey_questions WHERE survey_id = ? AND id = ?').get(surveyId, Number(questionId));
-  return row ? parseSurveyQuestionRow(row) : null;
-}
-
-function countSurveySessions(surveyId) {
-  return Number(db.prepare('SELECT COUNT(*) AS n FROM survey_sessions WHERE survey_id = ?').get(surveyId).n);
-}
-
-// 问卷负载：withQuestions = false 时仅返回列表页所需摘要（题数 / 数据量）
-function surveyPayload(id, { withQuestions = true } = {}) {
-  const s = getSurvey(id);
-  if (!s) return null;
-  const payload = {
-    id: s.id,
-    title: s.title,
-    startText: s.start_text,
-    endText: s.end_text,
-    questionCount: Number(db.prepare('SELECT COUNT(*) AS n FROM survey_questions WHERE survey_id = ?').get(id).n),
-    sessionCount: countSurveySessions(id),
-    createdAt: s.created_at,
-    updatedAt: s.updated_at
-  };
-  if (withQuestions) payload.questions = listSurveyQuestions(id);
-  return payload;
-}
-
-function getSurveyPayload(id) {
-  return surveyPayload(id, { withQuestions: true });
-}
-
-function listSurveys() {
-  return db
-    .prepare('SELECT id FROM surveys ORDER BY created_at DESC, rowid DESC')
-    .all()
-    .map((r) => surveyPayload(r.id, { withQuestions: false }));
-}
-
-// 题目整树替换（调用方保证事务）
-function saveSurveyQuestions(surveyId, questions) {
-  db.prepare('DELETE FROM survey_questions WHERE survey_id = ?').run(surveyId);
-  const insert = db.prepare(
-    'INSERT INTO survey_questions (survey_id, sort, type, title, required, options_json, config_json) VALUES (?, ?, ?, ?, ?, ?, ?)'
-  );
-  (Array.isArray(questions) ? questions : []).forEach((raw, i) => {
-    const q = normalizeSurveyQuestion(raw);
-    insert.run(surveyId, i + 1, q.type, q.title, q.required ? 1 : 0, JSON.stringify(q.options), JSON.stringify(q.config));
-  });
-}
-
-function createSurvey({ title, startText = '', endText = '', questions = [] }) {
-  const id = surveyCode();
-  const now = nowIso();
-  db.exec('BEGIN');
-  try {
-    db.prepare('INSERT INTO surveys (id, title, start_text, end_text, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)').run(
-      id, String(title || '未命名问卷'), String(startText ?? ''), String(endText ?? ''), now, now
-    );
-    saveSurveyQuestions(id, questions);
-    db.exec('COMMIT');
-  } catch (err) {
-    db.exec('ROLLBACK');
-    throw err;
-  }
-  return surveyPayload(id);
-}
-
-// 复制问卷：正文与题目整树复制（数据不复制）
-function copySurvey(sourceId, title) {
-  const source = getSurveyPayload(sourceId);
-  if (!source) return null;
-  return createSurvey({
-    title: String(title || '').trim() || `${source.title}（副本）`,
-    startText: source.startText,
-    endText: source.endText,
-    questions: source.questions.map((q) => ({ type: q.type, title: q.title, required: q.required, options: q.options, config: q.config }))
-  });
-}
-
-// 更新问卷（整树事务）：进行中的填写按题目快照继续，不受影响
-function updateSurvey(id, { title, startText, endText, questions }) {
-  if (!getSurvey(id)) return null;
-  db.exec('BEGIN');
-  try {
-    db.prepare('UPDATE surveys SET title = ?, start_text = ?, end_text = ?, updated_at = ? WHERE id = ?').run(
-      String(title || '未命名问卷'), String(startText ?? ''), String(endText ?? ''), nowIso(), id
-    );
-    saveSurveyQuestions(id, questions);
-    db.exec('COMMIT');
-  } catch (err) {
-    db.exec('ROLLBACK');
-    throw err;
-  }
-  return surveyPayload(id);
-}
-
-// 删除问卷：连带其全部会话 / 消息 / 作答数据；存在数据时需 force = true
-function deleteSurvey(id, { force = false } = {}) {
-  if (!getSurvey(id)) return { ok: false, reason: 'not_found' };
-  const sessionCount = countSurveySessions(id);
-  if (sessionCount > 0 && !force) return { ok: false, reason: 'has_sessions', sessionCount };
-  db.exec('BEGIN');
-  try {
-    const sessionIds = db.prepare('SELECT id FROM survey_sessions WHERE survey_id = ?').all(id).map((r) => r.id);
-    const delMsg = db.prepare('DELETE FROM survey_messages WHERE session_id = ?');
-    const delAnswer = db.prepare('DELETE FROM survey_answers WHERE session_id = ?');
-    for (const sid of sessionIds) {
-      delMsg.run(sid);
-      delAnswer.run(sid);
-    }
-    db.prepare('DELETE FROM survey_sessions WHERE survey_id = ?').run(id);
-    db.prepare('DELETE FROM survey_questions WHERE survey_id = ?').run(id);
-    db.prepare('DELETE FROM surveys WHERE id = ?').run(id);
-    db.exec('COMMIT');
-  } catch (err) {
-    db.exec('ROLLBACK');
-    throw err;
-  }
-  return { ok: true };
-}
-
-function nextSurveySeq(surveyId) {
-  const row = db.prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS n FROM survey_sessions WHERE survey_id = ?').get(surveyId);
-  return Number(row.n);
-}
-
-function getSurveySession(id) {
-  return db.prepare('SELECT * FROM survey_sessions WHERE id = ?').get(id) || null;
-}
-
-function createSurveySession({ surveyId, seq, userAgent }) {
-  const id = randomUUID();
-  db.prepare(
-    'INSERT INTO survey_sessions (id, survey_id, seq, status, started_at, user_agent) VALUES (?, ?, ?, ?, ?, ?)'
-  ).run(id, surveyId, seq, 'in_progress', nowIso(), userAgent || '');
-  return getSurveySession(id);
-}
-
-function listSurveyMessages(sessionId) {
-  return db
-    .prepare('SELECT id, role, content, seq, created_at FROM survey_messages WHERE session_id = ? ORDER BY seq ASC')
-    .all(sessionId);
-}
-
-function addSurveyMessage(sessionId, role, content) {
-  const maxSeq = db.prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM survey_messages WHERE session_id = ?').get(sessionId);
-  const seq = Number(maxSeq.m) + 1;
-  const createdAt = nowIso();
-  const info = db
-    .prepare('INSERT INTO survey_messages (session_id, role, content, seq, created_at) VALUES (?, ?, ?, ?, ?)')
-    .run(sessionId, role, content, seq, createdAt);
-  return { id: Number(info.lastInsertRowid), role, content, seq, created_at: createdAt };
-}
-
-function countSurveyAnswers(sessionId) {
-  return Number(db.prepare('SELECT COUNT(*) AS n FROM survey_answers WHERE session_id = ?').get(sessionId).n);
-}
-
-function addSurveyAnswer({ sessionId, questionId, questionSort, subIndex = 0, type, valueJson, answerText, shownAt, answeredAt, elapsedMs }) {
-  const info = db
-    .prepare(
-      `INSERT INTO survey_answers (session_id, question_id, question_sort, sub_index, type, value_json, answer_text, shown_at, answered_at, elapsed_ms)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    )
-    .run(
-      sessionId, Number(questionId), Number(questionSort), Number(subIndex) || 0, String(type),
-      JSON.stringify(valueJson ?? null), String(answerText || ''), shownAt || null, answeredAt || nowIso(),
-      elapsedMs == null ? null : Number(elapsedMs)
-    );
-  return Number(info.lastInsertRowid);
-}
-
-function listSurveyAnswers(sessionId) {
-  return db
-    .prepare('SELECT * FROM survey_answers WHERE session_id = ? ORDER BY id ASC')
-    .all(sessionId)
-    .map((r) => {
-      let value = null;
-      try { value = JSON.parse(r.value_json || 'null'); } catch { value = null; }
-      return { ...r, value };
-    });
-}
-
-function finishSurveySession(id) {
-  const session = getSurveySession(id);
-  if (!session) return null;
-  if (session.status === 'completed') return session;
-  const endedAt = nowIso();
-  const duration = Math.max(1, Math.round((new Date(endedAt).getTime() - new Date(session.started_at).getTime()) / 1000));
-  db.prepare('UPDATE survey_sessions SET status = ?, ended_at = ?, duration_sec = ? WHERE id = ?').run('completed', endedAt, duration, id);
-  return getSurveySession(id);
-}
-
-// 数据页：会话摘要列表（编号 / 状态 / 开始时间 / 时长 / 作答与消息数量）
-function listSurveySessionSummaries(surveyId) {
-  return db
-    .prepare(
-      `SELECT ss.id, ss.seq, ss.status, ss.started_at, ss.ended_at, ss.duration_sec, ss.user_agent,
-              (SELECT COUNT(*) FROM survey_answers sa WHERE sa.session_id = ss.id) AS answer_count,
-              (SELECT COUNT(*) FROM survey_messages sm WHERE sm.session_id = ss.id) AS message_count
-         FROM survey_sessions ss WHERE ss.survey_id = ? ORDER BY ss.seq ASC`
-    )
-    .all(surveyId)
-    .map((r) => ({
-      id: r.id,
-      seq: r.seq == null ? null : Number(r.seq),
-      status: r.status,
-      startedAt: r.started_at,
-      endedAt: r.ended_at,
-      durationSec: r.duration_sec == null ? null : Number(r.duration_sec),
-      answerCount: Number(r.answer_count),
-      messageCount: Number(r.message_count)
-    }));
-}
-
-// 导出用行级数据：会话 × 作答（服务端拼接宽表列）
-function listSurveyAnswerRows(surveyId) {
-  return db
-    .prepare(
-      `SELECT sa.session_id, ss.seq, ss.status, ss.started_at, ss.ended_at, ss.duration_sec,
-              sa.question_id, sa.question_sort, sa.sub_index, sa.type, sa.value_json, sa.answer_text,
-              sa.shown_at, sa.answered_at, sa.elapsed_ms
-         FROM survey_answers sa JOIN survey_sessions ss ON ss.id = sa.session_id
-        WHERE ss.survey_id = ? ORDER BY ss.seq ASC, sa.question_sort ASC, sa.sub_index ASC, sa.id ASC`
-    )
-    .all(surveyId);
-}
-
-// 首次运行：创建一份示例通用问卷（六种题型 + 实验题），便于开箱体验；
-// 仅首次自动生成（删掉后不会再重建）；调用在文件末尾（依赖后文定义）
-function ensureDefaultSurvey() {
-  if (getSetting('example_survey_seeded') === '1') return;
-  const row = db.prepare('SELECT COUNT(*) AS n FROM surveys').get();
-  if (Number(row.n) > 0) {
-    setSetting('example_survey_seeded', '1');
-    return;
-  }
-  createSurvey({
-    title: '示例问卷 · 用户体验调研',
-    startText: '您好！感谢您参与本次问卷。我会逐一向您提出几个问题，请根据您的真实感受作答，所有答案均无对错之分。',
-    endText: '本次问卷到此结束，非常感谢您的耐心作答！您的反馈对我们非常重要。',
-    questions: [
-      {
-        type: 'single',
-        title: '您平时主要通过哪些渠道了解人工智能相关信息？',
-        required: true,
-        options: ['社交媒体', '新闻资讯', '学术论文', '同事朋友'],
-        config: { layout: 2, other: true, minSel: 0, maxSel: 0 }
-      },
-      {
-        type: 'multi',
-        title: '您使用过以下哪些人工智能相关产品？（限选 2 项）',
-        required: true,
-        options: ['智能语音助手', '推荐算法（短视频/购物）', '生成式 AI 工具', '智能翻译', '自动驾驶功能'],
-        config: { layout: 2, other: true, minSel: 1, maxSel: 2 }
-      },
-      {
-        type: 'text',
-        title: '您的年龄段是？',
-        required: true
-      },
-      {
-        type: 'rating',
-        title: '总体而言，您对人工智能的满意度如何？',
-        required: true,
-        config: {
-          min: 0, max: 6, anchor: '', display: 'all', cols: 0,
-          labels: { 0: '完全不满意', 1: '很不满意', 2: '不太满意', 3: '一般', 4: '比较满意', 5: '很满意', 6: '非常满意' }
-        }
-      },
-      {
-        type: 'rank',
-        title: '请对以下因素的重要性排序（最重要的在最上面）',
-        required: true,
-        options: ['准确性与可靠性', '使用便捷性', '响应速度', '隐私保护']
-      },
-      {
-        type: 'qa',
-        title: '您对人工智能的未来发展有什么看法或期待？',
-        required: false
-      },
-      {
-        type: 'experiment',
-        title: '实验一 · 决策情境阅读',
-        required: true,
-        config: {
-          background: '某城市计划推行一项交通限行政策，预计可使高峰期通行效率提升 12%，但会给部分私家车主带来不便。请阅读以下材料后回答后面的小问题。',
-          images: [],
-          subs: [
-            {
-              type: 'single',
-              title: '阅读材料后，您对这项政策的总体态度是？',
-              required: true,
-              options: ['非常支持', '比较支持', '不太支持', '非常不支持'],
-              config: { layout: 2 }
-            },
-            {
-              type: 'rating',
-              title: '您认为该政策对您个人出行的影响程度如何？',
-              required: true,
-              config: { min: 1, max: 5, display: 'ends', cols: 0, labels: {} }
-            }
-          ]
-        }
-      }
-    ]
-  });
-  setSetting('example_survey_seeded', '1');
-}
-
-// ---------------------------------------------------------------- 会话与消息
-
+// ---------------------------------------------------------------- 会话
 function getSession(id) {
   return db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) || null;
 }
 
-// 问卷内下一个编号（按进入顺序从 1 开始，该编号即被试标识 uid）
 function nextSessionSeq(questionnaireId) {
   const row = db.prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS n FROM sessions WHERE questionnaire_id = ?').get(questionnaireId);
   return Number(row.n);
 }
 
-function createSession({ questionnaireId, seq, groupRole, planJson, scenarioId, userAgent }) {
+function createSession({ questionnaireId, seq, items, timing, userAgent }) {
   const id = randomUUID();
   db.prepare(
-    `INSERT INTO sessions (id, scenario_id, group_id, uid, status, started_at, user_agent,
-       questionnaire_id, seq, group_role, plan_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(id, scenarioId || '', '', String(seq), 'in_progress', nowIso(), userAgent || '', questionnaireId, seq, groupRole, planJson);
+    `INSERT INTO sessions (id, questionnaire_id, seq, status, started_at, user_agent, items_json, timing_json, pending_presented_at)
+     VALUES (?, ?, ?, 'in_progress', ?, ?, ?, ?, NULL)`
+  ).run(id, questionnaireId, seq, nowIso(), userAgent || '', JSON.stringify(items), JSON.stringify(timing));
   return getSession(id);
 }
 
-function listMessages(sessionId) {
-  return db
-    .prepare('SELECT id, role, content, seq, created_at FROM messages WHERE session_id = ? ORDER BY seq ASC')
-    .all(sessionId);
-}
-
-function addMessage(sessionId, role, content) {
-  const maxSeq = db
-    .prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM messages WHERE session_id = ?')
-    .get(sessionId);
-  const seq = Number(maxSeq.m) + 1;
-  const createdAt = nowIso();
-  const info = db
-    .prepare('INSERT INTO messages (session_id, role, content, seq, created_at) VALUES (?, ?, ?, ?, ?)')
-    .run(sessionId, role, content, seq, createdAt);
-  return { id: Number(info.lastInsertRowid), role, content, seq, created_at: createdAt };
+function setPendingPresentedAt(sessionId, iso) {
+  db.prepare('UPDATE sessions SET pending_presented_at = ? WHERE id = ?').run(iso, sessionId);
 }
 
 function finishSession(id) {
   const session = getSession(id);
   if (!session) return null;
   if (session.status === 'completed') return session;
-
   const endedAt = nowIso();
-  const duration = Math.max(
-    1,
-    Math.round((new Date(endedAt).getTime() - new Date(session.started_at).getTime()) / 1000)
-  );
-  db.prepare('UPDATE sessions SET status = ?, ended_at = ?, duration_sec = ? WHERE id = ?').run(
-    'completed', endedAt, duration, id
-  );
+  const duration = Math.max(1, Math.round((new Date(endedAt).getTime() - new Date(session.started_at).getTime()) / 1000));
+  db.prepare('UPDATE sessions SET status = ?, ended_at = ?, duration_sec = ?, pending_presented_at = NULL WHERE id = ?')
+    .run('completed', endedAt, duration, id);
   return getSession(id);
 }
 
-// ---------------------------------------------------------------- 作答记录
-
-function countResponses(sessionId) {
-  const row = db.prepare('SELECT COUNT(*) AS n FROM responses WHERE session_id = ?').get(sessionId);
-  return Number(row.n);
+// ---------------------------------------------------------------- 消息
+// think_ms / type_ms：该条消息的呈现节奏（AI 思考时长、流式输出速度，毫秒）；
+// 由发消息的题目覆盖，未覆盖则取问卷默认值——存在消息上，保证延迟消息经 bootstrap 拉取时节奏不丢。
+function listMessages(sessionId) {
+  return db.prepare('SELECT id, role, content, seq, created_at, visible_at, think_ms, type_ms FROM messages WHERE session_id = ? ORDER BY seq ASC').all(sessionId);
 }
 
-function listResponses(sessionId) {
-  return db
-    .prepare('SELECT * FROM responses WHERE session_id = ? ORDER BY id ASC')
-    .all(sessionId);
+function listVisibleMessages(sessionId, now) {
+  return db.prepare(
+    `SELECT id, role, content, seq, created_at, think_ms, type_ms FROM messages
+      WHERE session_id = ? AND (visible_at IS NULL OR visible_at <= ?) ORDER BY seq ASC`
+  ).all(sessionId, now);
 }
 
-function addResponse({ sessionId, questionnaireId, scenarioId, groupId, experimentSort, experimentKind, taskIndex, playCount, phase, value, optionLabel, shownAt, answeredAt, elapsedMs }) {
-  const info = db
-    .prepare(
-      `INSERT INTO responses (session_id, questionnaire_id, experiment_sort, experiment_kind, scenario_id, group_id, task_index, play_count, phase, value, option_label, shown_at, answered_at, elapsed_ms)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    )
-    .run(
-      sessionId, questionnaireId || '', experimentSort == null ? 0 : experimentSort, experimentKind || '', scenarioId, groupId,
-      taskIndex, playCount, phase, value,
-      optionLabel || '', shownAt || null, answeredAt || nowIso(), elapsedMs == null ? null : elapsedMs
-    );
-  return Number(info.lastInsertRowid);
+function nextPendingVisibleAt(sessionId, now) {
+  const row = db.prepare(
+    'SELECT MIN(visible_at) AS v FROM messages WHERE session_id = ? AND visible_at IS NOT NULL AND visible_at > ?'
+  ).get(sessionId, now);
+  return row && row.v ? row.v : null;
 }
 
-function countSessionsByScenario(scenarioId) {
-  const row = db.prepare('SELECT COUNT(*) AS n FROM sessions WHERE scenario_id = ?').get(scenarioId);
-  return Number(row.n);
+// 最近一条消息的可见时刻（无定时消息则取创建时刻）：作答单元的呈现基准
+function latestMessageAt(sessionId) {
+  const row = db.prepare('SELECT visible_at, created_at FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT 1').get(sessionId);
+  if (!row) return null;
+  return row.visible_at || row.created_at || null;
 }
 
-// 数据页与导出：均基于 listQuestionnaireExportRows（行级作答明细）
-
-// 情景树 + 组（管理端序列化用）
-function adminScenarioPayload(scenario) {
+function addMessage(sessionId, role, content, visibleAt = null, rhythm = null) {
+  const maxSeq = db.prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM messages WHERE session_id = ?').get(sessionId);
+  const seq = Number(maxSeq.m) + 1;
+  const createdAt = nowIso();
+  const thinkMs = rhythm && rhythm.thinkMs != null ? Number(rhythm.thinkMs) : null;
+  const typeMs = rhythm && rhythm.typeMs != null ? Number(rhythm.typeMs) : null;
+  const info = db.prepare('INSERT INTO messages (session_id, role, content, seq, created_at, visible_at, think_ms, type_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(sessionId, role, content, seq, createdAt, visibleAt, thinkMs, typeMs);
   return {
-    id: scenario.id,
-    name: scenario.name,
-    contextText: scenario.context_text,
-    onceQuestion: scenario.once_question,
-    multiQuestion: scenario.multi_question,
-    r2OnceA: scenario.r2_once_a,
-    r2OnceB: scenario.r2_once_b,
-    r2MultiA: scenario.r2_multi_a,
-    r2MultiB: scenario.r2_multi_b,
-    ratingQuestion: scenario.rating_question,
-    tasks: listTasks(scenario.id).map((t) => Number(t.play_count)),
-    groups: listGroupsByScenario(scenario.id).map((g) => ({
-      id: g.id,
-      scenario_id: g.scenario_id,
-      name: g.name,
-      role: g.role,
-      r3Once: g.r3_once,
-      r3Multi: g.r3_multi
-    }))
+    id: Number(info.lastInsertRowid), role, content, seq, created_at: createdAt,
+    visible_at: visibleAt, think_ms: thinkMs, type_ms: typeMs
   };
 }
 
+// ---------------------------------------------------------------- 作答
+function countResponses(sessionId) {
+  return Number(db.prepare('SELECT COUNT(*) AS n FROM responses WHERE session_id = ?').get(sessionId).n);
+}
+
+function listResponses(sessionId) {
+  return db.prepare('SELECT * FROM responses WHERE session_id = ? ORDER BY id ASC').all(sessionId);
+}
+
+function lastResponse(sessionId) {
+  return db.prepare('SELECT * FROM responses WHERE session_id = ? ORDER BY id DESC LIMIT 1').get(sessionId) || null;
+}
+
+// 已完成的作答单元数（题组算一个单元，其多道子题同属一个 unit_index）
+function countAnswerUnits(sessionId) {
+  return Number(db.prepare('SELECT COUNT(DISTINCT unit_index) AS n FROM responses WHERE session_id = ?').get(sessionId).n);
+}
+
+// 第 index 个作答单元的首行（用于取呈现 / 作答时间）
+function unitFirstResponse(sessionId, index) {
+  return db.prepare('SELECT * FROM responses WHERE session_id = ? AND unit_index = ? ORDER BY sub_index ASC LIMIT 1').get(sessionId, index) || null;
+}
+
+function responseAt(sessionId, index) {
+  return db.prepare('SELECT * FROM responses WHERE session_id = ? ORDER BY id ASC LIMIT 1 OFFSET ?').get(sessionId, index) || null;
+}
+
+function addResponse({ sessionId, itemId, itemIndex, itemType, unitIndex, subIndex, value, valueText, optionLabel, presentedAt, answeredAt, elapsedMs }) {
+  const info = db.prepare(
+    `INSERT INTO responses (session_id, item_id, item_index, item_type, unit_index, sub_index, value, value_text, option_label, presented_at, answered_at, elapsed_ms)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    sessionId, String(itemId), Number(itemIndex) || 0, String(itemType),
+    Number(unitIndex) || 0, Number(subIndex) || 0,
+    value == null ? null : Number(value), valueText == null ? '' : String(valueText), optionLabel || '',
+    presentedAt || null, answeredAt || nowIso(), elapsedMs == null ? null : Number(elapsedMs)
+  );
+  return Number(info.lastInsertRowid);
+}
+
+// 会话摘要列表（数据页）
+function listSessionSummaries(questionnaireId) {
+  return db.prepare(
+    'SELECT id, seq, status, started_at, ended_at, duration_sec, user_agent FROM sessions WHERE questionnaire_id = ? ORDER BY seq ASC'
+  ).all(questionnaireId);
+}
+
+// ---------------------------------------------------------------- 数据页与导出
+// 行级明细：一行 = 一个作答单元
+function listResponseRows(questionnaireId) {
+  return db.prepare(
+    `SELECT s.id AS session_id, s.seq, s.status AS session_status, s.started_at, s.ended_at, s.duration_sec,
+            r.item_id, r.item_index, r.item_type, r.unit_index, r.sub_index, r.value, r.value_text, r.option_label,
+            r.presented_at, r.answered_at, r.elapsed_ms
+       FROM responses r JOIN sessions s ON s.id = r.session_id
+      WHERE s.questionnaire_id = ?
+      ORDER BY s.seq ASC, r.id ASC`
+  ).all(questionnaireId);
+}
+
+// 汇总（一被试一行）：按题目类型聚合
+function listQuestionnaireSummaryRows(questionnaireId) {
+  const sessions = db.prepare(
+    'SELECT id, seq, status, started_at, ended_at, duration_sec FROM sessions WHERE questionnaire_id = ? ORDER BY seq ASC'
+  ).all(questionnaireId);
+  if (!sessions.length) return [];
+
+  const byId = new Map();
+  for (const s of sessions) {
+    byId.set(s.id, {
+      sessionId: s.id,
+      seq: s.seq == null ? null : Number(s.seq),
+      status: s.status,
+      startedAt: s.started_at,
+      endedAt: s.ended_at,
+      durationSec: s.duration_sec == null ? null : Number(s.duration_sec),
+      scales: new Map(),      // 量表前缀 -> { sum, n }
+      texts: new Map(),       // item_id -> { text, answeredAt, elapsedMs }
+      choices: new Map()      // item_id -> { value, label, itemType, answeredAt, elapsedMs }
+    });
+  }
+
+  const rows = db.prepare(
+    `SELECT session_id, item_id, sub_index, item_type, value, value_text, option_label, answered_at, elapsed_ms
+       FROM responses WHERE session_id IN (SELECT id FROM sessions WHERE questionnaire_id = ?) ORDER BY id ASC`
+  ).all(questionnaireId);
+
+  for (const r of rows) {
+    const acc = byId.get(r.session_id);
+    if (!acc) continue;
+    if (r.item_type === 'rating') {
+      const prefix = String(r.item_id).replace(/_\d+$/, '');   // goal_clarity_3 → goal_clarity
+      const cur = acc.scales.get(prefix) || { sum: 0, n: 0 };
+      cur.sum += Number(r.value);
+      cur.n += 1;
+      acc.scales.set(prefix, cur);
+    } else if (r.item_type === 'text') {
+      let text = '';
+      try {
+        const obj = JSON.parse(r.value_text || 'null');
+        text = obj && typeof obj === 'object' ? String(obj.text ?? '') : String(r.value_text || '');
+      } catch {
+        text = String(r.value_text || '');
+      }
+      acc.texts.set(`${r.item_id}#${r.sub_index}`, { text, answeredAt: r.answered_at, elapsedMs: r.elapsed_ms });
+    } else if (r.item_type === 'single' || r.item_type === 'multi') {
+      acc.choices.set(`${r.item_id}#${r.sub_index}`, {
+        value: r.value, label: r.option_label, itemType: r.item_type,
+        answeredAt: r.answered_at, elapsedMs: r.elapsed_ms
+      });
+    }
+  }
+
+  return sessions.map((s) => byId.get(s.id));
+}
+
+// ---------------------------------------------------------------- 初始化
+function initSeed() {
+  if (Number(db.prepare('SELECT COUNT(*) AS n FROM experiments').get().n) > 0) return;
+  const now = nowIso();
+  const insert = db.prepare('INSERT INTO experiments (id, name, timing_json, items_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)');
+  const t = JSON.stringify(normalizeTiming({}));
+  db.exec('BEGIN');
+  try {
+    insert.run('group3-high-clarity', '组别3 · AI反馈 + 目标清晰度高', t, JSON.stringify(normalizeItems(experimentItems(REQUIRE_HIGH))), now, now);
+    insert.run('group4-low-clarity', '组别4 · AI反馈 + 目标清晰度低', t, JSON.stringify(normalizeItems(experimentItems(REQUIRE_LOW))), now, now);
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+}
+initSeed();
+
+function ensureSettings() {
+  if (!getSetting('admin_password')) setSetting('admin_password', 'admin123');
+  if (getSetting('resume_window_hours') == null) setResumeWindowHours(RESUME_WINDOW_DEFAULT_HOURS);
+}
+ensureSettings();
+
+// 首次运行：为两个实验各建一份预设问卷（插入模板 = 复制题目）
+function ensurePresetQuestionnaires() {
+  if (getSetting('preset_questionnaires_seeded') === '1') return;
+  if (Number(db.prepare('SELECT COUNT(*) AS n FROM questionnaires').get().n) > 0) {
+    setSetting('preset_questionnaires_seeded', '1');
+    return;
+  }
+  const base = defaultQuestionnaireItems();
+  for (const expId of ['group3-high-clarity', 'group4-low-clarity']) {
+    const exp = getExperimentPayload(expId);
+    if (!exp) continue;
+    createQuestionnaire({
+      title: exp.name,
+      timing: exp.timing,
+      items: [
+        ...base.slice(0, 2),                                                          // 欢迎语（空）+ 知情同意页
+        ...exp.items.map((it) => ({ ...it, id: `${expId}__${it.id}`, fromTemplateId: exp.id, fromTemplateName: exp.name })),
+        ...base.slice(2)                                                              // 结束语（空）+ 结束说明页
+      ]
+    });
+  }
+  setSetting('preset_questionnaires_seeded', '1');
+}
+
 module.exports = {
+  ITEM_TYPES,
+  ITEM_TYPE_LABELS,
+  ITEM_LIMITS,
+  TIMING_KEYS,
+  TIMING_META,
+  itemDefaults,
+  defaultQuestionnaireItems,
+  normalizeItems,
+  normalizeTiming,
   getSetting,
   setSetting,
-  getGlobalTexts,
-  saveGlobalTexts,
-  getScenario,
-  listScenarios,
-  getGroup,
-  listGroups,
-  listGroupsByScenario,
-  listTasks,
-  saveScenarioTree,
-  createScenario,
-  deleteScenario,
+  getResumeWindowHours,
+  setResumeWindowHours,
+  getExperiment,
+  getExperimentPayload,
+  listExperiments,
+  createExperiment,
+  updateExperiment,
+  deleteExperiment,
   getQuestionnaire,
   getQuestionnairePayload,
   listQuestionnaires,
   createQuestionnaire,
   updateQuestionnaire,
+  copyQuestionnaire,
   deleteQuestionnaire,
   countSessionsByQuestionnaire,
-  listQuestionnaireExportRows,
-  listSurveys,
-  getSurvey,
-  getSurveyPayload,
-  listSurveyQuestions,
-  getSurveyQuestion,
-  createSurvey,
-  copySurvey,
-  updateSurvey,
-  deleteSurvey,
-  countSurveySessions,
-  nextSurveySeq,
-  getSurveySession,
-  createSurveySession,
-  listSurveyMessages,
-  addSurveyMessage,
-  countSurveyAnswers,
-  addSurveyAnswer,
-  listSurveyAnswers,
-  finishSurveySession,
-  listSurveySessionSummaries,
-  listSurveyAnswerRows,
   getSession,
   nextSessionSeq,
   createSession,
-  countSessionsByScenario,
-  listMessages,
-  addMessage,
+  setPendingPresentedAt,
   finishSession,
+  listMessages,
+  listVisibleMessages,
+  nextPendingVisibleAt,
+  latestMessageAt,
+  addMessage,
   countResponses,
+  countAnswerUnits,
+  unitFirstResponse,
   listResponses,
+  lastResponse,
+  responseAt,
   addResponse,
-  adminScenarioPayload
+  listSessionSummaries,
+  listResponseRows,
+  listQuestionnaireSummaryRows
 };
 
-// 模块初始化：示例问卷种子（放末尾确保所有 const 已完成初始化）
-ensureDefaultQuestionnaire();
-// 通用问卷：示例问卷种子（六种题型 + 实验题各 1 题）
-ensureDefaultSurvey();
+// 初始化顺序：种子实验 → 设置 → 预设问卷
+ensurePresetQuestionnaires();

@@ -20,4 +20,14 @@ uploads/
 
 # 开发/自检过程截图不入库（仅保留 v3-* 文档定稿截图）
 screenshots/*
-!screenshots/v3-*
+!screenshots/v5-*
+!screenshots/sv-*
+
+# 设计预览走查截图（design/ 下的方案与预览页保留）
+design/shots/
+
+# 工具/临时目录
+.tmp/
+.zcode/
+# Office 临时锁文件
+~$*

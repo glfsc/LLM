@@ -1,13 +1,14 @@
 {
   "name": "experiment-chat",
-  "version": "2.0.0",
+  "version": "4.0.0",
   "private": true,
-  "description": "实验平台（论文复刻）：研究2+研究3 固定流程 —— 服务端状态机驱动，零第三方依赖",
+  "description": "实验平台（统一题目模型）：一切皆题目 — 实验是可复用的题目模板，问卷是一条链接 + 一列题目 + 计时默认值",
   "scripts": {
     "start": "node server.js",
     "check": "node scripts/consistency-check.js",
-    "check:survey": "node scripts/survey-check.js",
     "shots": "node scripts/capture-shots.js",
+    "probe": "node scripts/load-probe.js",
+    "presets": "node scripts/seed-presets.js",
     "reset-db": "node scripts/reset-db.js"
   },
   "engines": {
