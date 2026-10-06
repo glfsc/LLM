@@ -40,6 +40,11 @@
           <span class="sidebar-item-sub">创建链接 · 数据与导出</span>
           <span class="sidebar-item-mini">问卷</span>
         </a>
+        <a class="sidebar-item" data-nav="sv" href="#/sv">
+          <span class="sidebar-item-title">通用问卷</span>
+          <span class="sidebar-item-sub">问卷星式 · 自定义题目</span>
+          <span class="sidebar-item-mini">通用</span>
+        </a>
         <a class="sidebar-item" data-nav="flow" href="#/flow">
           <span class="sidebar-item-title">流程页面</span>
           <span class="sidebar-item-sub">新建问卷的默认文案</span>
@@ -165,6 +170,73 @@
           <span id="r3-editor-hint" class="editor-foot-hint"></span>
           <button id="r3-editor-save" class="primary-btn" type="button">保存该情景</button>
         </div>
+      </section>
+
+      <!-- 通用问卷 · 列表 -->
+      <section id="view-sv-list" class="view hidden">
+        <div class="panel-head">
+          <div>
+            <h2>通用问卷</h2>
+            <p class="panel-sub">
+              问卷星式通用问卷：标题 + 卷首语 / 结束语（均可留空）+ 七种题型（单选 / 多选 / 填空 / 评分 / 排序 / 问答 / 实验）；
+              被试端以对话式逐题填写，每份问卷一条独立链接与数据空间。
+            </p>
+          </div>
+          <button id="btn-new-survey" class="primary-btn" type="button">+ 新建问卷</button>
+        </div>
+        <div id="sv-list" class="q-list"></div>
+      </section>
+
+      <!-- 通用问卷 · 编辑器（左独立滚动 + 右侧手机实时预览常驻） -->
+      <section id="view-sv-editor" class="view hidden">
+        <div class="sv-editor-main">
+          <div class="editor-head">
+            <button id="sv-editor-back" class="ghost-btn" type="button">← 返回通用问卷</button>
+            <h2 id="sv-editor-title">新建问卷</h2>
+            <div id="sv-editor-link" class="sv-link-box hidden"></div>
+          </div>
+          <div class="sv-editor-cols">
+            <div id="sv-editor-scroll" class="sv-editor-scroll">
+              <div id="sv-editor" class="editor-body"></div>
+              <div class="editor-foot">
+                <span id="sv-editor-hint" class="editor-foot-hint"></span>
+                <button id="sv-editor-save" class="primary-btn" type="button">保存问卷</button>
+              </div>
+            </div>
+            <aside class="sv-preview-col">
+              <div class="sv-pv-bar">
+                <span id="sv-pv-tag" class="sv-pv-tag on">实时预览 · 跟随编辑</span>
+                <button id="sv-pv-trial" class="sv-pv-btn" type="button">▶ 从头试填</button>
+              </div>
+              <p class="sv-pv-note">编辑左侧内容，此处<b>实时</b>更新；点题卡任意处即选中该题并跟随预览。</p>
+              <div class="sv-phone">
+                <div class="sv-screen"><iframe id="sv-preview" class="sv-iframe" title="填写端实时预览"></iframe></div>
+              </div>
+              <p class="sv-pv-note">试填走完整流程，<b>不保存</b>任何数据；再次点击可退出试填。</p>
+            </aside>
+          </div>
+        </div>
+      </section>
+
+      <!-- 通用问卷 · 数据页 -->
+      <section id="view-sv-data" class="view hidden">
+        <div class="editor-head">
+          <button id="sv-data-back" class="ghost-btn" type="button">← 返回通用问卷列表</button>
+          <h2 id="sv-data-title">问卷数据</h2>
+        </div>
+        <div id="sv-data-head" class="q-detail-head"></div>
+        <div id="sv-data-toolbar" class="data-toolbar"></div>
+        <p id="sv-data-summary" class="data-summary"></p>
+        <div id="sv-data-list" class="data-table-wrap"></div>
+      </section>
+
+      <!-- 通用问卷 · 个案详情 -->
+      <section id="view-sv-session" class="view hidden">
+        <div class="editor-head">
+          <button id="sv-session-back" class="ghost-btn" type="button">← 返回问卷数据</button>
+          <h2 id="sv-session-title">填写详情</h2>
+        </div>
+        <div id="sv-session" class="editor-body"></div>
       </section>
 
       <!-- 流程页面：全局文案与伦理说明（新建问卷的默认内容） -->

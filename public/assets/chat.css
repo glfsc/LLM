@@ -273,12 +273,66 @@ body {
   animation: rise-in 0.34s var(--ease-out) both;
 }
 
+/* 题头行：题干 + 折叠/展开按钮（按钮仅手机端显示；折叠态仅保留题条一行） */
+.action-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
 .action-question {
-  margin: 0 0 12px;
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
   font-size: 14.5px;
   font-weight: 600;
   line-height: 1.7;
   color: var(--fg);
+}
+
+.action-collapse {
+  display: none;
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: #fff;
+  color: var(--muted);
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: border-color 0.16s ease;
+}
+
+.action-collapse svg {
+  width: 15px;
+  height: 15px;
+  transition: transform 0.22s var(--ease-out);
+}
+
+.action-collapse:hover {
+  border-color: var(--border-strong);
+}
+
+.action-area.collapsed .action-collapse svg {
+  transform: rotate(180deg);
+}
+
+.action-area.collapsed .action-head {
+  margin-bottom: 0;
+}
+
+.action-area.collapsed .action-question {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.action-area.collapsed .action-options,
+.action-area.collapsed .action-footer {
+  display: none;
 }
 
 .action-options {
@@ -710,19 +764,43 @@ a.primary-btn {
     padding: 14px 14px 12px;
   }
 
-  /* 触控优化：加大点按区域与字号 */
+  /* 触控优化：题面稍大；选项 2 列紧凑（同新填写页参数） */
   .action-question {
     font-size: 15px;
   }
 
-  .option-btn {
-    font-size: 14.5px;
-    padding: 13px 14px;
-    border-radius: 14px;
+  .action-collapse {
+    display: flex;
+  }
+
+  /* 选项区：限高内部滚动，避免长选项撑满屏幕 */
+  .action-options {
+    gap: 7px;
+    max-height: 22vh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+    padding: 1px;
+  }
+
+  .action-options::-webkit-scrollbar {
+    width: 4px;
+  }
+
+  .action-options::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 2px;
   }
 
   .action-options.type-choice {
-    grid-template-columns: 1fr;
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .option-btn {
+    font-size: 13.5px;
+    padding: 9px 11px;
+    border-radius: 12px;
   }
 
   .action-options.type-rating {
@@ -785,7 +863,8 @@ a.primary-btn {
 /* 触屏设备：消除点击后残留的 hover 高亮 */
 @media (hover: none) {
   .option-btn:hover:not(:disabled),
-  .rating-btn:hover:not(:disabled) {
+  .rating-btn:hover:not(:disabled),
+  .action-collapse:hover {
     border-color: var(--border);
   }
 }

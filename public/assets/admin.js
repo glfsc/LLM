@@ -50,6 +50,26 @@ const $modalBody = $('modal-body');
 const $modalError = $('modal-error');
 const $modalCancel = $('modal-cancel');
 const $modalConfirm = $('modal-confirm');
+// 通用问卷（sv）
+const $adminMain = document.querySelector('.admin-main');
+const $svList = $('sv-list');
+const $btnNewSurvey = $('btn-new-survey');
+const $svEditor = $('sv-editor');
+const $svEditorTitle = $('sv-editor-title');
+const $svEditorLink = $('sv-editor-link');
+const $svEditorHint = $('sv-editor-hint');
+const $svEditorSave = $('sv-editor-save');
+const $svEditorScroll = $('sv-editor-scroll');
+const $svPreview = $('sv-preview');
+const $svPvTag = $('sv-pv-tag');
+const $svPvTrial = $('sv-pv-trial');
+const $svDataHead = $('sv-data-head');
+const $svDataTitle = $('sv-data-title');
+const $svDataToolbar = $('sv-data-toolbar');
+const $svDataSummary = $('sv-data-summary');
+const $svDataList = $('sv-data-list');
+const $svSession = $('sv-session');
+const $svSessionTitle = $('sv-session-title');
 
 const TOKEN_KEY = 'expchat_admin_token';
 const SIDEBAR_KEY = 'expchat_admin_sidebar_collapsed';
@@ -258,6 +278,7 @@ function findScenario(id) {
 
 // #/q、#/q/new、#/q/:id、#/q/:id/edit、#/q/:id/s/:sid
 // #/r2、#/r2/:id、#/r3、#/r3/:id、#/flow
+// #/sv、#/sv/:id（编辑）、#/sv/:id/data（数据）、#/sv/:id/s/:sid（个案）
 function parseHash() {
   const raw = location.hash.replace(/^#\/?/, '');
   const [section, a, b, c] = raw.split('/');
@@ -268,6 +289,12 @@ function parseHash() {
     if (b === 'edit') return { section, view: 'editor', id: a, sid: '' };
     if (b === 's' && c) return { section, view: 'session', id: a, sid: c };
     return { section, view: 'detail', id: a, sid: '' };
+  }
+  if (section === 'sv') {
+    if (!a || a === 'new') return { section, view: 'list', id: '', sid: '' };
+    if (b === 'data') return { section, view: 'data', id: a, sid: '' };
+    if (b === 's' && c) return { section, view: 'session', id: a, sid: c };
+    return { section, view: 'editor', id: a, sid: '' };
   }
   if (section === 'r2' || section === 'r3') return { section, view: a ? 'editor' : 'list', id: a || '', sid: '' };
   if (section === 'flow') return { section, view: 'flow', id: '', sid: '' };
@@ -281,7 +308,10 @@ function animForTransition(prevViewId, nextViewId) {
     ['view-q-list', 'view-q-detail'],
     ['view-q-detail', 'view-q-session'],
     ['view-r2-list', 'view-r2-editor'],
-    ['view-r3-list', 'view-r3-editor']
+    ['view-r3-list', 'view-r3-editor'],
+    ['view-sv-list', 'view-sv-editor'],
+    ['view-sv-list', 'view-sv-data'],
+    ['view-sv-data', 'view-sv-session']
   ];
   const backward = forward.map(([a, b]) => [b, a]);
   if (forward.some(([a, b]) => a === prevViewId && b === nextViewId)) return 'anim-right';
@@ -318,9 +348,17 @@ function handleRoute() {
     else if (route.view === 'detail') viewId = 'view-q-detail';
     else if (route.view === 'session') viewId = 'view-q-session';
     else viewId = 'view-q-list';
+  } else if (route.section === 'sv') {
+    if (route.view === 'editor') viewId = 'view-sv-editor';
+    else if (route.view === 'data') viewId = 'view-sv-data';
+    else if (route.view === 'session') viewId = 'view-sv-session';
+    else viewId = 'view-sv-list';
   } else if (route.section === 'r2') viewId = route.id ? 'view-r2-editor' : 'view-r2-list';
   else if (route.section === 'r3') viewId = route.id ? 'view-r3-editor' : 'view-r3-list';
   else if (route.section === 'flow') viewId = 'view-flow';
+
+  // 通用问卷编辑器：加宽主区并让两栏撑满视口（左独立滚动 + 右手机常驻）
+  $adminMain.classList.toggle('sv-editing', viewId === 'view-sv-editor');
 
   document.querySelectorAll('.view').forEach((view) => {
     view.classList.toggle('hidden', view.id !== viewId);
@@ -342,6 +380,10 @@ function handleRoute() {
   else if (viewId === 'view-r3-list') renderR3List();
   else if (viewId === 'view-r3-editor') renderR3Editor(findScenario(route.id));
   else if (viewId === 'view-flow') renderFlowForm();
+  else if (viewId === 'view-sv-list') renderSvList();
+  else if (viewId === 'view-sv-editor') renderSvEditor(route.id);
+  else if (viewId === 'view-sv-data') renderSvData(route.id);
+  else if (viewId === 'view-sv-session') renderSvSession(route.id, route.sid);
 
   window.scrollTo(0, 0);
 }
@@ -363,6 +405,16 @@ $('q-detail-back').addEventListener('click', () => {
 $('q-session-back').addEventListener('click', () => {
   const parts = location.hash.replace(/^#\/?/, '').split('/');
   location.hash = parts[1] ? `#/q/${parts[1]}` : '#/q';
+});
+$('sv-editor-back').addEventListener('click', () => {
+  location.hash = '#/sv';
+});
+$('sv-data-back').addEventListener('click', () => {
+  location.hash = '#/sv';
+});
+$('sv-session-back').addEventListener('click', () => {
+  const parts = location.hash.replace(/^#\/?/, '').split('/');
+  location.hash = parts[1] ? `#/sv/${parts[1]}/data` : '#/sv';
 });
 
 /* ---------------------------------------------------------------- 数据加载 */
@@ -1662,6 +1714,1258 @@ async function renderQSession(qid, sid) {
   }
 
   $qSession.append(secMeta, secResp, secMsg);
+}
+
+/* ---------------------------------------------------------------- 通用问卷（sv） */
+
+// 题型与展示文案；主问卷支持七种（含实验），实验子题复用前六种
+const SV_TYPE_LABELS = { single: '单选', multi: '多选', text: '填空', rating: '评分', rank: '排序', qa: '问答', experiment: '实验' };
+const SV_TYPE_ICONS = { single: '◉', multi: '☑', text: '▭', rating: '★', rank: '↕', qa: '≡', experiment: '🧪' };
+const SV_MAIN_TYPES = ['single', 'multi', 'text', 'rating', 'rank', 'qa', 'experiment'];
+const SV_SUB_TYPES = ['single', 'multi', 'text', 'rating', 'rank', 'qa'];
+
+// 编辑器状态：标题 / 正文 / 题目整树均在本地编辑，保存时整树提交
+const svState = {
+  surveys: [],
+  id: '',
+  title: '',
+  startText: '',
+  endText: '',
+  questions: [],
+  selected: -1,
+  uid: 0,
+  previewReady: false,
+  trial: false,
+  previewTimer: null
+};
+
+let svTypeMenuNode = null; // 当前展开的类型菜单（点击空白处收起）
+
+document.addEventListener('click', (e) => {
+  if (svTypeMenuNode && !svTypeMenuNode.classList.contains('hidden') && !e.target.closest('.sv-add-question')) {
+    svTypeMenuNode.classList.add('hidden');
+  }
+});
+
+function svMakeQuestion(type) {
+  const q = { _uid: ++svState.uid, _collapsed: false, type, title: '', required: true, options: [], config: {} };
+  if (type === 'single' || type === 'multi') {
+    q.options = ['选项 1', '选项 2'];
+    q.config = { layout: 1, other: false, minSel: 0, maxSel: 0 };
+  } else if (type === 'rank') {
+    q.options = ['项目 1', '项目 2', '项目 3'];
+  } else if (type === 'rating') {
+    q.config = { min: 1, max: 5, anchor: '', display: 'ends', cols: 0, labels: {} };
+  } else if (type === 'experiment') {
+    q.title = '新实验';
+    q.config = { background: '', images: [], subs: [] };
+  }
+  return q;
+}
+
+function svMakeSub(type) {
+  const s = { type, title: '', required: true, options: [], config: {}, _open: true };
+  if (type === 'single' || type === 'multi') {
+    s.options = ['选项 1', '选项 2'];
+    s.config = { layout: 1, other: false, minSel: 0, maxSel: 0 };
+  } else if (type === 'rank') {
+    s.options = ['项目 1', '项目 2'];
+  } else if (type === 'rating') {
+    s.config = { min: 1, max: 5, anchor: '', display: 'ends', cols: 0, labels: {} };
+  }
+  return s;
+}
+
+// 收集当前编辑器内容（保存 / 发送给预览 iframe 共用）
+function collectSvSurvey() {
+  return {
+    title: svState.title,
+    startText: svState.startText,
+    endText: svState.endText,
+    questions: svState.questions.map(svCleanQuestion)
+  };
+}
+
+// 编辑器内部对象 → 服务端契约结构（丢弃本地字段；选项去空白）
+function svCleanQuestion(q) {
+  const type = q.type;
+  const cfg = q.config || {};
+  const out = {
+    type,
+    title: String(q.title || ''),
+    required: q.required !== false,
+    options: (q.options || []).map((o) => String(o)).filter((o) => o.trim()),
+    config: {}
+  };
+  if (type === 'single' || type === 'multi') {
+    out.config = {
+      layout: Number(cfg.layout) || 1,
+      other: !!cfg.other,
+      minSel: Number(cfg.minSel) || 0,
+      maxSel: Number(cfg.maxSel) || 0
+    };
+  } else if (type === 'rating') {
+    out.config = {
+      min: Number(cfg.min) || 0,
+      max: Number(cfg.max) || 5,
+      anchor: String(cfg.anchor || ''),
+      display: cfg.display === 'all' ? 'all' : 'ends',
+      cols: Number(cfg.cols) || 0,
+      labels: JSON.parse(JSON.stringify(cfg.labels || {}))
+    };
+  } else if (type === 'experiment') {
+    out.required = true;
+    out.options = [];
+    out.config = {
+      background: String(cfg.background || ''),
+      images: (cfg.images || []).map(String),
+      subs: (cfg.subs || []).map(svCleanQuestion)
+    };
+  }
+  return out;
+}
+
+/* ------------------------------------------------ 题卡与编辑控件 */
+
+// 题干输入（输入即更新题卡头部标题 + 右侧预览）
+function svTitleField(q, labelText, titleEl) {
+  const field = makeField(labelText, q.title, 2);
+  field.input.addEventListener('input', () => {
+    q.title = field.input.value;
+    if (titleEl) titleEl.textContent = q.title || '（未填写题目）';
+    scheduleSvPreview();
+  });
+  return field.wrap;
+}
+
+// 选项编辑块（单选 / 多选 / 排序共用）
+function svOptionsBlock(q, rebuild) {
+  const wrap = el('div');
+  wrap.style.display = 'grid';
+  wrap.style.gap = '8px';
+  q.options.forEach((opt, oi) => {
+    const row = el('div', 'sv-opt-row');
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.value = opt;
+    input.addEventListener('input', () => {
+      q.options[oi] = input.value;
+      scheduleSvPreview();
+    });
+    const del = el('button', 'del', '✕');
+    del.type = 'button';
+    del.title = '删除选项';
+    del.addEventListener('click', () => {
+      q.options.splice(oi, 1);
+      rebuild();
+    });
+    row.append(el('span', 'drag', '⠿'), input, del);
+    wrap.appendChild(row);
+  });
+  const add = el('button', 'sv-add-opt', '+ 添加选项');
+  add.type = 'button';
+  add.addEventListener('click', () => {
+    q.options.push(`选项 ${q.options.length + 1}`);
+    rebuild();
+  });
+  wrap.appendChild(add);
+  return wrap;
+}
+
+// 选项布局：每行 N 个（1–8，默认 1；填写端不显示设置项）
+function svLayoutRow(q) {
+  const row = el('div', 'sv-row');
+  row.appendChild(el('span', 'sv-inline-hint', '选项布局：每行'));
+  const input = document.createElement('input');
+  input.type = 'number';
+  input.className = 'sv-num';
+  input.min = '1';
+  input.max = '8';
+  input.value = String(q.config.layout || 1);
+  input.addEventListener('input', () => {
+    q.config.layout = Math.min(8, Math.max(1, Math.round(Number(input.value)) || 1));
+    scheduleSvPreview();
+  });
+  input.addEventListener('change', () => {
+    input.value = String(q.config.layout || 1);
+  });
+  row.append(input, el('span', 'sv-inline-hint', '个（默认 1；右侧预览实时生效）'));
+  return row;
+}
+
+// 多选限选：最少 / 最多（0 = 不限）
+function svLimitRow(q) {
+  const row = el('div', 'sv-row');
+  row.appendChild(el('span', 'sv-inline-hint', '限选：最少'));
+  const minInp = document.createElement('input');
+  minInp.type = 'number';
+  minInp.className = 'sv-num';
+  minInp.min = '0';
+  minInp.value = String(q.config.minSel || 0);
+  const maxInp = document.createElement('input');
+  maxInp.type = 'number';
+  maxInp.className = 'sv-num';
+  maxInp.min = '0';
+  maxInp.value = String(q.config.maxSel || 0);
+  minInp.addEventListener('change', () => {
+    q.config.minSel = Math.max(0, Math.round(Number(minInp.value)) || 0);
+    if (q.config.maxSel > 0 && q.config.minSel > q.config.maxSel) {
+      q.config.minSel = q.config.maxSel;
+      minInp.value = String(q.config.minSel);
+    }
+    scheduleSvPreview();
+  });
+  maxInp.addEventListener('change', () => {
+    q.config.maxSel = Math.max(0, Math.round(Number(maxInp.value)) || 0);
+    scheduleSvPreview();
+  });
+  row.append(minInp, el('span', 'sv-inline-hint', '最多'), maxInp, el('span', 'sv-inline-hint', '项（0 = 不限）'));
+  return row;
+}
+
+// 开关行（必答 / 其他选项）
+function svToggleRow(labelText, on, onChange) {
+  const label = el('label', 'sv-toggle-label');
+  const sw = el('span', 'sv-switch' + (on ? ' on' : ''));
+  label.append(sw, el('span', '', labelText));
+  label.addEventListener('click', (e) => {
+    e.preventDefault();
+    onChange();
+  });
+  return label;
+}
+
+// 评分题：分值范围 / 预设法 / 注释显示 / 按钮布局 / 逐档文案 / 锚点
+function svRatingBlock(q, rebuild) {
+  const wrap = el('div');
+  wrap.style.display = 'grid';
+  wrap.style.gap = '10px';
+
+  const range = el('div', 'sv-row');
+  range.appendChild(el('span', 'sv-inline-hint', '分值范围'));
+  const minInp = document.createElement('input');
+  minInp.type = 'number';
+  minInp.className = 'sv-num';
+  minInp.value = String(q.config.min);
+  const maxInp = document.createElement('input');
+  maxInp.type = 'number';
+  maxInp.className = 'sv-num';
+  maxInp.value = String(q.config.max);
+  minInp.addEventListener('change', () => {
+    q.config.min = Math.min(10, Math.max(0, Math.round(Number(minInp.value)) || 0));
+    if (q.config.max <= q.config.min) q.config.max = q.config.min + 1;
+    rebuild();
+  });
+  maxInp.addEventListener('change', () => {
+    q.config.max = Math.min(12, Math.max(q.config.min + 1, Math.round(Number(maxInp.value)) || q.config.min + 1));
+    rebuild();
+  });
+  range.append(minInp, el('span', 'sv-inline-hint', '至'), maxInp, el('span', 'sv-inline-hint', '（0 或 1 ~ 12 分）'));
+  const spacer = el('span');
+  spacer.style.flex = '1';
+  range.appendChild(spacer);
+  range.appendChild(el('span', 'sv-inline-hint', '快捷预设'));
+  const preset = el('div', 'sv-seg');
+  for (const [key, label] of [['num', '纯数字'], ['sat', '满意度'], ['app', '认可度']]) {
+    const b = el('button', '', label);
+    b.type = 'button';
+    b.addEventListener('click', () => {
+      if (key === 'num') q.config.labels = {};
+      if (key === 'sat') {
+        q.config.min = 1;
+        q.config.max = 5;
+        q.config.labels = { 1: '非常不满意', 2: '不满意', 3: '一般', 4: '满意', 5: '非常满意' };
+      }
+      if (key === 'app') {
+        q.config.min = 1;
+        q.config.max = 5;
+        q.config.labels = { 1: '非常不认可', 2: '不认可', 3: '一般', 4: '认可', 5: '非常认可' };
+      }
+      rebuild();
+    });
+    preset.appendChild(b);
+  }
+  range.appendChild(preset);
+  wrap.appendChild(range);
+
+  const disp = el('div', 'sv-row');
+  disp.appendChild(el('span', 'sv-inline-hint', '注释显示'));
+  const dispSeg = el('div', 'sv-seg');
+  for (const [d, label] of [['ends', '仅显示首末'], ['all', '每档都显示']]) {
+    const b = el('button', (q.config.display || 'ends') === d ? 'on' : '', label);
+    b.type = 'button';
+    b.addEventListener('click', () => {
+      q.config.display = d;
+      rebuild();
+    });
+    dispSeg.appendChild(b);
+  }
+  disp.append(dispSeg, el('span', 'sv-inline-hint', '（右侧预览实时可见）'));
+  wrap.appendChild(disp);
+
+  const layoutRow = el('div', 'sv-row');
+  layoutRow.appendChild(el('span', 'sv-inline-hint', '按钮布局：每行'));
+  const colsInp = document.createElement('input');
+  colsInp.type = 'number';
+  colsInp.className = 'sv-num';
+  colsInp.min = '0';
+  colsInp.max = '12';
+  colsInp.value = String(q.config.cols || 0);
+  colsInp.addEventListener('input', () => {
+    q.config.cols = Math.max(0, Math.min(12, Math.round(Number(colsInp.value)) || 0));
+    scheduleSvPreview();
+  });
+  colsInp.addEventListener('change', () => {
+    colsInp.value = String(q.config.cols || 0);
+  });
+  layoutRow.append(colsInp, el('span', 'sv-inline-hint', '个（默认 0 = 一行全部自适应，按钮大小自动调整）'));
+  wrap.appendChild(layoutRow);
+
+  wrap.appendChild(el('div', 'sv-inline-hint', '每一档的文案（可逐个自定义，留空只显示数字）'));
+  const grid = el('div', 'sv-score-labels');
+  for (let v = q.config.min; v <= q.config.max; v += 1) {
+    const cell = el('div', 'cell');
+    cell.appendChild(el('span', 'n', String(v)));
+    const inp = document.createElement('input');
+    inp.type = 'text';
+    inp.placeholder = '纯数字';
+    inp.value = (q.config.labels && q.config.labels[v]) || '';
+    inp.addEventListener('input', () => {
+      if (!q.config.labels) q.config.labels = {};
+      if (inp.value.trim()) q.config.labels[v] = inp.value;
+      else delete q.config.labels[v];
+      scheduleSvPreview();
+    });
+    cell.appendChild(inp);
+    grid.appendChild(cell);
+  }
+  wrap.appendChild(grid);
+
+  const af = makeField('锚点文案（可选；留空时自动使用首档 / 末档文案）', q.config.anchor || '', 1);
+  af.input.addEventListener('input', () => {
+    q.config.anchor = af.input.value;
+    scheduleSvPreview();
+  });
+  wrap.appendChild(af.wrap);
+  return wrap;
+}
+
+/* ------------------------------------------------ 实验题（背景 + 图片 + 子题） */
+
+function svExperimentBlock(body, q, qi, rebuild) {
+  const bgField = makeField('实验背景材料（填写端先展示这段文字，可含图片）', q.config.background || '', 3);
+  bgField.input.addEventListener('input', () => {
+    q.config.background = bgField.input.value;
+    scheduleSvPreview();
+  });
+  body.appendChild(bgField.wrap);
+
+  const strip = el('div', 'sv-img-strip');
+  (q.config.images || []).forEach((url, ii) => {
+    const thumb = el('div', 'sv-img-thumb');
+    const img = document.createElement('img');
+    img.src = url;
+    img.alt = `配图 ${ii + 1}`;
+    const x = el('button', 'x', '✕');
+    x.type = 'button';
+    x.title = '移除该图';
+    x.addEventListener('click', () => {
+      q.config.images.splice(ii, 1);
+      rebuild();
+    });
+    thumb.append(img, x);
+    strip.appendChild(thumb);
+  });
+  const upBtn = el('button', 'sv-upload-btn');
+  upBtn.type = 'button';
+  upBtn.innerHTML = '<span style="font-size:16px">＋</span><span>上传图片</span>';
+  upBtn.title = '选择本地图片（大图自动压缩后上传）';
+  const fileInput = document.createElement('input');
+  fileInput.type = 'file';
+  fileInput.accept = 'image/*';
+  fileInput.style.display = 'none';
+  fileInput.addEventListener('change', async () => {
+    const file = fileInput.files && fileInput.files[0];
+    fileInput.value = '';
+    if (!file) return;
+    if ((q.config.images || []).length >= 9) return toast('最多上传 9 张图片');
+    upBtn.disabled = true;
+    upBtn.querySelector('span:last-child').textContent = '上传中…';
+    try {
+      const url = await svUploadImage(file);
+      if (url) {
+        q.config.images.push(url);
+        rebuild();
+      }
+    } catch (err) {
+      toast(err.message || '图片上传失败');
+    } finally {
+      upBtn.disabled = false;
+      upBtn.querySelector('span:last-child').textContent = '上传图片';
+    }
+  });
+  upBtn.addEventListener('click', () => fileInput.click());
+  strip.append(upBtn, fileInput);
+  body.appendChild(strip);
+
+  body.appendChild(el('div', 'sv-inline-hint', '内部题目（复用全部题型，填写端逐个作答）'));
+  const list = el('div', 'sv-sub-list');
+  (q.config.subs || []).forEach((s, si) => list.appendChild(buildSvSubcard(s, qi, si, q, rebuild)));
+  body.appendChild(list);
+
+  const addRow = el('div', 'sv-row');
+  addRow.appendChild(el('span', 'sv-inline-hint', '＋ 添加子题：'));
+  for (const t of SV_SUB_TYPES) {
+    const b = el('button', 'ghost-btn', SV_TYPE_LABELS[t]);
+    b.type = 'button';
+    b.style.padding = '5px 11px';
+    b.style.fontSize = '12px';
+    b.addEventListener('click', () => {
+      q.config.subs.push(svMakeSub(t));
+      rebuild();
+    });
+    addRow.appendChild(b);
+  }
+  body.appendChild(addRow);
+}
+
+function buildSvSubcard(s, qi, si, q, rebuild) {
+  const card = el('div', 'sv-subcard');
+  const head = el('div', 'sv-subcard-head');
+  const title = el('span', 'stitle', s.title || '（未填写）');
+  const del = el('button', 'del', '✕');
+  del.type = 'button';
+  del.title = '删除子题';
+  del.addEventListener('click', (e) => {
+    e.stopPropagation();
+    q.config.subs.splice(si, 1);
+    rebuild();
+  });
+  head.append(
+    el('span', 'snum', `${qi + 1}.${si + 1}`),
+    el('span', 'sv-qbadge', SV_TYPE_LABELS[s.type] || s.type),
+    title,
+    del
+  );
+
+  const bodyEl = el('div', 'sv-subcard-body');
+  if (s._open === false) bodyEl.style.display = 'none';
+  bodyEl.appendChild(svTitleField(s, '子题题干', title));
+  if (s.type === 'single' || s.type === 'multi' || s.type === 'rank') bodyEl.appendChild(svOptionsBlock(s, rebuild));
+  if (s.type === 'single' || s.type === 'multi') {
+    bodyEl.appendChild(svLayoutRow(s));
+    if (s.type === 'multi') bodyEl.appendChild(svLimitRow(s));
+    bodyEl.appendChild(
+      svToggleRow('提供「其他」选项（可自行填写）', !!s.config.other, () => {
+        s.config.other = !s.config.other;
+        rebuild();
+      })
+    );
+  }
+  if (s.type === 'rating') bodyEl.appendChild(svRatingBlock(s, rebuild));
+  bodyEl.appendChild(
+    svToggleRow('必答（关闭后填写端显示「跳过」）', s.required !== false, () => {
+      s.required = s.required === false;
+      rebuild();
+    })
+  );
+
+  head.addEventListener('click', (e) => {
+    if (e.target.closest('.del')) return;
+    s._open = s._open === false;
+    bodyEl.style.display = s._open === false ? 'none' : '';
+  });
+  card.append(head, bodyEl);
+  return card;
+}
+
+/* ------------------------------------------------ 题卡列表 */
+
+function renderSvQuestions(opts = {}) {
+  const list = $('sv-qlist');
+  if (!list) return;
+  list.innerHTML = '';
+  svState.questions.forEach((q, i) => list.appendChild(buildSvQuestionCard(q, i)));
+  const countTag = $svEditor.querySelector('.sv-qcount');
+  if (countTag) countTag.textContent = `共 ${svState.questions.length} 题`;
+  const cards = [...list.children];
+  cards.forEach((c, ci) => c.classList.toggle('editing', ci === svState.selected));
+  if (opts.scroll && cards[svState.selected]) cards[svState.selected].scrollIntoView({ block: 'nearest' });
+}
+
+function buildSvQuestionCard(q, i) {
+  const rebuild = () => renderSvQuestions();
+  const card = el('div', 'sv-qcard' + (q._collapsed ? ' collapsed' : ''));
+  const head = el('div', 'sv-qhead');
+  const title = el('span', 'sv-qtitle', q.title || '（未填写题目）');
+
+  const ops = el('div', 'sv-qops');
+  const btnUp = el('button', '', '↑');
+  btnUp.type = 'button';
+  btnUp.title = '上移';
+  btnUp.disabled = i === 0;
+  const btnDown = el('button', '', '↓');
+  btnDown.type = 'button';
+  btnDown.title = '下移';
+  btnDown.disabled = i === svState.questions.length - 1;
+  const btnCopy = el('button', '', '⧉');
+  btnCopy.type = 'button';
+  btnCopy.title = '复制该题';
+  const btnDel = el('button', 'danger', '✕');
+  btnDel.type = 'button';
+  btnDel.title = '删除该题';
+  ops.append(btnUp, btnDown, btnCopy, btnDel);
+
+  const btnCollapse = el('button', 'sv-qcollapse');
+  btnCollapse.type = 'button';
+  btnCollapse.title = '折叠 / 展开';
+  btnCollapse.innerHTML =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>';
+
+  head.append(
+    el('span', 'sv-qnum', String(i + 1)),
+    el('span', 'sv-qbadge' + (q.type === 'experiment' ? ' exp' : ''), SV_TYPE_LABELS[q.type] || q.type),
+    title,
+    el(
+      'span',
+      'sv-qreq' + (q.type !== 'experiment' && q.required === false ? ' off' : ''),
+      q.type === 'experiment' ? `${(q.config.subs || []).length} 个小题` : q.required === false ? '选答' : '必答'
+    ),
+    ops,
+    btnCollapse
+  );
+
+  const body = el('div', 'sv-qbody');
+  buildSvQuestionBody(body, q, i, title);
+  card.append(head, body);
+
+  btnUp.addEventListener('click', () => {
+    if (i > 0) svMoveQuestion(i, i - 1);
+  });
+  btnDown.addEventListener('click', () => {
+    if (i < svState.questions.length - 1) svMoveQuestion(i, i + 1);
+  });
+  btnCopy.addEventListener('click', () => {
+    const copy = svMakeQuestion(q.type);
+    Object.assign(copy, JSON.parse(JSON.stringify(svCleanQuestion(q))), { _uid: ++svState.uid, _collapsed: false });
+    if (copy.type === 'experiment') copy.config.subs = (copy.config.subs || []).map((s) => ({ ...s, _open: true }));
+    svState.questions.splice(i + 1, 0, copy);
+    selectSvCard(i + 1, { force: true, scroll: true });
+  });
+  btnDel.addEventListener('click', () => {
+    svState.questions.splice(i, 1);
+    if (svState.selected > svState.questions.length - 1) svState.selected = svState.questions.length - 1;
+    renderSvQuestions();
+    selectSvCard(svState.selected, { force: true });
+  });
+  btnCollapse.addEventListener('click', () => {
+    q._collapsed = !q._collapsed;
+    card.classList.toggle('collapsed', q._collapsed);
+  });
+
+  // 点击题卡任意处即选中该题：上下边界高亮 + 右侧手机实时显示该题
+  card.addEventListener('click', () => selectSvCard(i));
+  card.addEventListener('focusin', () => selectSvCard(i));
+  return card;
+}
+
+function svMoveQuestion(from, to) {
+  const [q] = svState.questions.splice(from, 1);
+  svState.questions.splice(to, 0, q);
+  if (svState.selected === from) svState.selected = to;
+  else if (from < svState.selected && to >= svState.selected) svState.selected -= 1;
+  else if (from > svState.selected && to <= svState.selected) svState.selected += 1;
+  renderSvQuestions();
+  selectSvCard(svState.selected, { force: true });
+}
+
+function buildSvQuestionBody(body, q, i, title) {
+  const rebuild = () => renderSvQuestions();
+  body.appendChild(
+    svTitleField(q, q.type === 'experiment' ? '实验名称（填写端显示为「实验 N · 名称」）' : '题干', title)
+  );
+  if (q.type === 'single' || q.type === 'multi' || q.type === 'rank') body.appendChild(svOptionsBlock(q, rebuild));
+  if (q.type === 'single' || q.type === 'multi') {
+    body.appendChild(svLayoutRow(q));
+    if (q.type === 'multi') body.appendChild(svLimitRow(q));
+    body.appendChild(
+      svToggleRow('提供「其他」选项（可自行填写）', !!q.config.other, () => {
+        q.config.other = !q.config.other;
+        rebuild();
+      })
+    );
+  }
+  if (q.type === 'rating') body.appendChild(svRatingBlock(q, rebuild));
+  if (q.type === 'experiment') {
+    svExperimentBlock(body, q, i, rebuild);
+    return;
+  }
+  body.appendChild(
+    svToggleRow('必答（关闭后填写端显示「跳过」）', q.required !== false, () => {
+      q.required = q.required === false;
+      rebuild();
+    })
+  );
+}
+
+/* ------------------------------------------------ 选中与右侧预览（postMessage 桥） */
+
+// 选中第 i 题：上下边界高亮，右侧手机实时显示该题
+function selectSvCard(i, opts = {}) {
+  const list = $('sv-qlist');
+  const cards = list ? [...list.children] : [];
+  const valid = i >= 0 && i < svState.questions.length;
+  cards.forEach((c, ci) => c.classList.toggle('editing', valid && ci === i));
+  const prev = svState.selected;
+  svState.selected = valid ? i : -1;
+  if (opts.scroll && valid) cards[i].scrollIntoView({ block: 'nearest' });
+  if (svState.selected !== prev || opts.force) svSyncPreview();
+}
+
+// 编辑输入时的防抖实时预览
+function scheduleSvPreview(delay = 160) {
+  clearTimeout(svState.previewTimer);
+  svState.previewTimer = setTimeout(() => svSyncPreview(), delay);
+}
+
+function svSyncPreview() {
+  if (!svState.previewReady || !svState.id) return;
+  if (svState.trial) return; // 试填中不打断（退出试填后自动恢复跟随）
+  svPostToPreview({ type: 'survey-follow', questionIndex: Math.max(0, svState.selected), survey: collectSvSurvey() });
+}
+
+function svPostToPreview(message) {
+  try {
+    $svPreview.contentWindow.postMessage(message, location.origin);
+  } catch {
+    /* 忽略 */
+  }
+}
+
+function setSvTrialButton(on) {
+  svState.trial = on;
+  $svPvTrial.textContent = on ? '■ 退出试填' : '▶ 从头试填';
+  $svPvTrial.classList.toggle('stop', on);
+  $svPvTag.textContent = on ? '试填中 · 未保存' : '实时预览 · 跟随编辑';
+  $svPvTag.classList.toggle('trial', on);
+  $svPvTag.classList.toggle('on', !on);
+}
+
+// 预览 iframe 就绪上报（survey.html 加载完成后发送 survey-ready）
+window.addEventListener('message', (e) => {
+  if (e.origin !== location.origin) return;
+  if ((e.data || {}).type !== 'survey-ready') return;
+  if (e.source !== $svPreview.contentWindow) return;
+  svState.previewReady = true;
+  if (!svState.trial) svSyncPreview();
+});
+
+$svPvTrial.addEventListener('click', () => {
+  if (!svState.previewReady || !svState.id) {
+    toast('预览尚未就绪，请稍候');
+    return;
+  }
+  if (svState.trial) {
+    setSvTrialButton(false);
+    svPostToPreview({ type: 'survey-exit-trial', survey: collectSvSurvey() });
+    svSyncPreview();
+  } else {
+    setSvTrialButton(true);
+    svPostToPreview({ type: 'survey-trial', survey: collectSvSurvey() });
+  }
+});
+
+/* ------------------------------------------------ 图片上传（大图自动压缩） */
+
+function svCompressImage(file) {
+  return new Promise((resolve) => {
+    if (!/^image\//.test(file.type) || file.type === 'image/gif' || file.size <= 600 * 1024) return resolve(file);
+    const img = new Image();
+    const objectUrl = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      try {
+        const maxSide = 1600;
+        const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+        if (scale >= 1) return resolve(file);
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, Math.round(img.width * scale));
+        canvas.height = Math.max(1, Math.round(img.height * scale));
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        canvas.toBlob((blob) => resolve(blob && blob.size < file.size ? blob : file), 'image/jpeg', 0.85);
+      } catch {
+        resolve(file);
+      }
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      resolve(file);
+    };
+    img.src = objectUrl;
+  });
+}
+
+async function svUploadImage(file) {
+  let blob = file;
+  try {
+    blob = await svCompressImage(file);
+  } catch {
+    blob = file;
+  }
+  if (blob.size > 8 * 1024 * 1024) throw new Error('单张图片不能超过 8MB，请先压缩');
+  const dataUrl = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('读取图片失败'));
+    reader.readAsDataURL(blob);
+  });
+  if (!/^data:image\//.test(dataUrl)) throw new Error('仅支持 PNG / JPG / GIF / WebP 图片');
+  const res = await api('/api/admin/survey/upload', { method: 'POST', body: { dataUrl } });
+  return res.url;
+}
+
+/* ------------------------------------------------ 列表页 */
+
+async function renderSvList() {
+  $svList.innerHTML = '';
+
+  let surveys;
+  try {
+    const res = await api('/api/admin/surveys');
+    surveys = res.surveys;
+    svState.surveys = surveys;
+  } catch (err) {
+    if (maybeSessionExpired(err)) return;
+    $svList.appendChild(el('p', 'data-empty', err.message || '问卷列表加载失败'));
+    return;
+  }
+
+  if (!surveys.length) {
+    $svList.appendChild(
+      el(
+        'p',
+        'data-empty',
+        '还没有通用问卷。点击右上角「+ 新建问卷」：命名后添加题目（支持单选 / 多选 / 填空 / 评分 / 排序 / 问答 / 实验），右侧手机实时预览。'
+      )
+    );
+    return;
+  }
+
+  const wrap = el('div', 'data-table-wrap');
+  const table = el('table', 'data-table q-table');
+  const thead = el('thead');
+  const headRow = el('tr');
+  for (const title of ['问卷名称', '填写链接', '题目', '数据量', '更新时间', '操作']) {
+    headRow.appendChild(el('th', '', title));
+  }
+  thead.appendChild(headRow);
+
+  const tbody = el('tbody');
+  for (const s of surveys) {
+    const row = el('tr', 'q-row');
+    row.title = '双击进入编辑';
+
+    const nameTd = el('td');
+    nameTd.append(el('div', 'cell-strong', s.title), el('code', 'cell-code', s.id));
+    row.appendChild(nameTd);
+
+    const linkTd = el('td', 'q-link-cell');
+    linkTd.addEventListener('dblclick', (e) => e.stopPropagation());
+    const linkRow = el('div', 'link-row');
+    const linkInput = document.createElement('input');
+    linkInput.type = 'text';
+    linkInput.readOnly = true;
+    linkInput.value = `${location.origin}/survey?c=${s.id}`;
+    linkInput.addEventListener('click', () => linkInput.select());
+    const btnCopy = el('button', 'ghost-btn', '复制');
+    btnCopy.type = 'button';
+    btnCopy.title = '复制填写链接';
+    btnCopy.addEventListener('click', () => copyText(linkInput.value, '填写链接已复制'));
+    linkRow.append(linkInput, btnCopy);
+    linkTd.appendChild(linkRow);
+    row.appendChild(linkTd);
+
+    row.appendChild(el('td', '', `${s.questionCount} 题`));
+    row.appendChild(el('td', '', `${s.sessionCount} 份`));
+    row.appendChild(el('td', '', formatTime(s.updatedAt)));
+
+    const actTd = el('td');
+    actTd.addEventListener('dblclick', (e) => e.stopPropagation());
+    const actRow = el('div', 'row-actions');
+    const btnEdit = el('button', 'ghost-btn', '编辑');
+    btnEdit.type = 'button';
+    btnEdit.addEventListener('click', () => {
+      location.hash = `#/sv/${s.id}`;
+    });
+    const btnData = el('button', 'ghost-btn', '数据');
+    btnData.type = 'button';
+    btnData.addEventListener('click', () => {
+      location.hash = `#/sv/${s.id}/data`;
+    });
+    const btnDup = el('button', 'ghost-btn', '复制');
+    btnDup.type = 'button';
+    btnDup.title = '复制为新问卷（含题目）';
+    btnDup.addEventListener('click', () => openSvCreateModal({ mode: 'copy', source: s }));
+    const btnDel = el('button', 'ghost-btn danger', '删除');
+    btnDel.type = 'button';
+    btnDel.addEventListener('click', () => removeSv(s));
+    actRow.append(btnEdit, btnData, btnDup, btnDel);
+    actTd.appendChild(actRow);
+    row.appendChild(actTd);
+
+    row.addEventListener('dblclick', () => {
+      location.hash = `#/sv/${s.id}`;
+    });
+    tbody.appendChild(row);
+  }
+
+  table.append(thead, tbody);
+  wrap.appendChild(table);
+  $svList.appendChild(wrap);
+}
+
+// 新建 / 复制：填标题后创建，随即进入编辑页
+function openSvCreateModal({ mode, source }) {
+  const isCopy = mode === 'copy';
+  const titleField = makeField('问卷标题', isCopy && source ? `${source.title} 副本` : '', 1);
+  const body = el('div', 'modal-fields');
+  if (isCopy) body.appendChild(el('p', 'modal-note', `将完整复制「${source.title}」的题目与卷首语 / 结束语（填写数据不复制）。`));
+  body.appendChild(titleField.wrap);
+
+  openModal({
+    title: isCopy ? '复制问卷' : '新建问卷',
+    body,
+    confirmLabel: isCopy ? '复制并进入编辑' : '创建并进入编辑',
+    onConfirm: async () => {
+      const title = titleField.input.value.trim();
+      if (!title) return showModalError('问卷标题不能为空');
+      let created;
+      try {
+        const res = await api('/api/admin/survey/create', {
+          method: 'POST',
+          body: { title, copyFrom: isCopy ? source.id : '' }
+        });
+        created = res.survey;
+      } catch (err) {
+        return showModalError(err.message || '创建失败，请重试');
+      }
+      closeModal();
+      toast(isCopy ? '已复制问卷' : '已创建问卷，请添加题目');
+      location.hash = `#/sv/${created.id}`;
+    }
+  });
+}
+
+// 删除：有数据时弹窗中明确告知，确认后连同数据一并清空
+function removeSv(survey) {
+  let force = survey.sessionCount > 0;
+  openModal({
+    title: '删除问卷',
+    body: el(
+      'p',
+      'modal-note',
+      force
+        ? `「${survey.title}」已有 ${survey.sessionCount} 份填写数据，删除将连同全部作答与对话记录一并清空，且不可恢复。`
+        : `确定删除问卷「${survey.title}」？该题目与填写链接将一并失效，且不可恢复。`
+    ),
+    confirmLabel: '确认删除',
+    danger: true,
+    onConfirm: async () => {
+      try {
+        await api('/api/admin/survey/delete', { method: 'POST', body: { id: survey.id, force } });
+      } catch (err) {
+        if (err.code === 'has_sessions') force = true;
+        return showModalError(err.message || '删除失败，请重试');
+      }
+      closeModal();
+      toast('已删除问卷');
+      renderSvList();
+    }
+  });
+}
+
+$btnNewSurvey.addEventListener('click', () => openSvCreateModal({ mode: 'new' }));
+
+/* ------------------------------------------------ 编辑器 */
+
+async function renderSvEditor(id) {
+  setHint($svEditorHint, '');
+  $svEditorSave.disabled = true;
+  $svEditorSave.onclick = null;
+  svState.id = id;
+  svState.selected = -1;
+  setSvTrialButton(false);
+  clearTimeout(svState.previewTimer);
+
+  let survey;
+  try {
+    const res = await api(`/api/admin/survey?id=${encodeURIComponent(id)}`);
+    survey = res.survey;
+  } catch (err) {
+    if (maybeSessionExpired(err)) return;
+    $svEditorTitle.textContent = '编辑问卷';
+    $svEditor.innerHTML = '';
+    $svEditor.appendChild(el('p', 'data-empty', err.message || '问卷不存在或已被删除'));
+    $svEditorLink.classList.add('hidden');
+    svState.previewReady = false;
+    $svPreview.removeAttribute('src');
+    return;
+  }
+
+  svState.title = survey.title;
+  svState.startText = survey.startText || '';
+  svState.endText = survey.endText || '';
+  svState.questions = (survey.questions || []).map((q) => ({ ...q, _uid: ++svState.uid, _collapsed: false }));
+
+  $svEditorTitle.textContent = `编辑问卷 · ${survey.title}`;
+  $svEditorSave.textContent = '保存问卷';
+  $svEditorSave.disabled = false;
+
+  // 填写链接芯片（标题行右侧）
+  $svEditorLink.innerHTML = '';
+  const linkInput = document.createElement('input');
+  linkInput.type = 'text';
+  linkInput.readOnly = true;
+  linkInput.value = `${location.origin}/survey?c=${survey.id}`;
+  linkInput.title = '点击全选';
+  linkInput.addEventListener('click', () => linkInput.select());
+  const btnCopy = el('button', 'ghost-btn', '复制填写链接');
+  btnCopy.type = 'button';
+  btnCopy.addEventListener('click', () => copyText(linkInput.value, '填写链接已复制'));
+  const btnOpen = el('button', 'ghost-btn', '打开');
+  btnOpen.type = 'button';
+  btnOpen.title = '在新标签页打开正式填写页';
+  btnOpen.addEventListener('click', () => window.open(linkInput.value, '_blank', 'noopener'));
+  $svEditorLink.append(linkInput, btnCopy, btnOpen);
+  $svEditorLink.classList.remove('hidden');
+
+  renderSvEditorShell();
+
+  // 右侧手机预览：同问卷复用已加载的 iframe，否则重新加载
+  const wantSrc = `/survey?c=${encodeURIComponent(survey.id)}&preview=1`;
+  if ($svPreview.getAttribute('src') !== wantSrc) {
+    svState.previewReady = false;
+    $svPreview.setAttribute('src', wantSrc);
+  }
+  if (svState.previewReady) svSyncPreview();
+
+  // 默认选中第一题（无题时清空右侧题卡）
+  selectSvCard(svState.questions.length ? 0 : -1, { force: true });
+  $svEditorScroll.scrollTop = 0;
+
+  $svEditorSave.onclick = async () => {
+    const title = svState.title.trim();
+    if (!title) return setHint($svEditorHint, '请填写问卷标题', true);
+    if (!svState.questions.length) return setHint($svEditorHint, '请至少添加一道题目', true);
+
+    for (let i = 0; i < svState.questions.length; i += 1) {
+      const q = svState.questions[i];
+      if (!String(q.title || '').trim()) return svHintAndFocus(i, `第 ${i + 1} 题尚未填写题干`);
+      if (q.type === 'single' || q.type === 'multi' || q.type === 'rank') {
+        if (!(q.options || []).some((o) => String(o).trim())) return svHintAndFocus(i, `第 ${i + 1} 题至少需要一个选项`);
+      }
+      if (q.type === 'rating' && q.config.max <= q.config.min) return svHintAndFocus(i, `第 ${i + 1} 题的分值范围不正确`);
+      if (q.type === 'experiment' && !(q.config.subs || []).length) return svHintAndFocus(i, `第 ${i + 1} 题（实验）尚未添加子题`);
+    }
+
+    setHint($svEditorHint, '保存中…');
+    $svEditorSave.disabled = true;
+    try {
+      const res = await api('/api/admin/survey/update', {
+        method: 'POST',
+        body: {
+          id: svState.id,
+          title,
+          startText: svState.startText,
+          endText: svState.endText,
+          questions: svState.questions.map(svCleanQuestion)
+        }
+      });
+      svState.title = res.survey.title;
+      $svEditorTitle.textContent = `编辑问卷 · ${res.survey.title}`;
+      toast('已保存问卷，修改即时生效');
+      setHint($svEditorHint, '已保存 · 进行中的填写不受影响');
+      if (svState.trial) {
+        setSvTrialButton(false);
+        svPostToPreview({ type: 'survey-exit-trial', survey: collectSvSurvey() });
+      }
+      svSyncPreview();
+    } catch (err) {
+      setHint($svEditorHint, err.message || '保存失败，请重试', true);
+    } finally {
+      $svEditorSave.disabled = false;
+    }
+  };
+}
+
+// 保存前的定位提示：滚动到对应题卡并高亮选中
+function svHintAndFocus(index, message) {
+  setHint($svEditorHint, message, true);
+  selectSvCard(index, { force: true, scroll: true });
+}
+
+function renderSvEditorShell() {
+  $svEditor.innerHTML = '';
+
+  // 1 基础信息
+  const secBasic = sectionHead('基础信息', { hint: '问卷标题即填写端顶部名称与导出文件名；保存后即时生效。' });
+  const titleField = makeField('问卷标题', svState.title, 1);
+  titleField.input.addEventListener('input', () => {
+    svState.title = titleField.input.value;
+    $svEditorTitle.textContent = svState.title ? `编辑问卷 · ${svState.title}` : '编辑问卷';
+    scheduleSvPreview(260);
+  });
+  secBasic.appendChild(titleField.wrap);
+
+  // 2 卷首语
+  const secStart = sectionHead('卷首语', { hint: '填写端的第一条消息；留空则直接进入第一题。' });
+  const startField = makeField('卷首语内容（可留空）', svState.startText, 3);
+  startField.input.addEventListener('input', () => {
+    svState.startText = startField.input.value;
+    scheduleSvPreview();
+  });
+  secStart.appendChild(startField.wrap);
+
+  // 3 题目
+  const secQs = sectionHead('题目', {
+    hint: '题目卡片默认全部展开；点题卡任意处即选中该题（上下边界高亮，右侧手机实时显示），点右上角按钮可折叠为一行。'
+  });
+  secQs.querySelector('.editor-section-head').appendChild(el('span', 'sv-qcount', `共 ${svState.questions.length} 题`));
+  const qlist = el('div');
+  qlist.id = 'sv-qlist';
+  secQs.appendChild(qlist);
+
+  const addRow = el('div', 'sv-add-question');
+  const btnAdd = el('button', 'primary-btn', '+ 添加题目');
+  btnAdd.type = 'button';
+  const typeMenu = el('div', 'sv-type-menu hidden');
+  for (const t of SV_MAIN_TYPES) {
+    const b = el('button');
+    b.type = 'button';
+    b.append(el('span', 'ic', SV_TYPE_ICONS[t]), el('span', '', SV_TYPE_LABELS[t]));
+    b.addEventListener('click', () => {
+      svState.questions.push(svMakeQuestion(t));
+      typeMenu.classList.add('hidden');
+      renderSvQuestions();
+      selectSvCard(svState.questions.length - 1, { force: true, scroll: true });
+    });
+    typeMenu.appendChild(b);
+  }
+  svTypeMenuNode = typeMenu;
+  btnAdd.addEventListener('click', (e) => {
+    e.stopPropagation();
+    typeMenu.classList.toggle('hidden');
+  });
+  addRow.append(btnAdd, typeMenu);
+  secQs.appendChild(addRow);
+
+  // 4 结束语
+  const secEnd = sectionHead('结束语', { hint: '全部题目完成后的最后一条消息；留空则显示默认感谢文案。' });
+  const endField = makeField('结束语内容（可留空）', svState.endText, 3);
+  endField.input.addEventListener('input', () => {
+    svState.endText = endField.input.value;
+    scheduleSvPreview();
+  });
+  secEnd.appendChild(endField.wrap);
+
+  $svEditor.append(secBasic, secStart, secQs, secEnd);
+  renderSvQuestions();
+}
+
+/* ------------------------------------------------ 数据页 / 个案 / 导出 */
+
+async function renderSvData(id) {
+  $svDataHead.innerHTML = '';
+  $svDataToolbar.innerHTML = '';
+  $svDataSummary.textContent = '';
+  $svDataSummary.classList.remove('err');
+  $svDataList.innerHTML = '';
+
+  let data;
+  try {
+    data = await api(`/api/admin/survey/sessions?id=${encodeURIComponent(id)}`);
+  } catch (err) {
+    if (maybeSessionExpired(err)) return;
+    $svDataTitle.textContent = '问卷数据';
+    $svDataSummary.textContent = err.message || '数据加载失败';
+    $svDataSummary.classList.add('err');
+    return;
+  }
+
+  const { survey, sessions, totalUnits } = data;
+  $svDataTitle.textContent = `${survey.title} · 数据`;
+
+  const titleRow = el('div', 'q-detail-title-row');
+  titleRow.append(
+    el('code', 'cell-code', survey.id),
+    el('span', 'role-tag', `${survey.questionCount} 题 · ${totalUnits} 个作答单元`),
+    el('span', 'q-detail-created', `创建于 ${formatTime(survey.createdAt)}`)
+  );
+  $svDataHead.appendChild(titleRow);
+
+  const linkRow = el('div', 'link-row');
+  const linkInput = document.createElement('input');
+  linkInput.type = 'text';
+  linkInput.readOnly = true;
+  linkInput.value = `${location.origin}/survey?c=${survey.id}`;
+  linkInput.addEventListener('click', () => linkInput.select());
+  const btnCopy = el('button', 'ghost-btn', '复制填写链接');
+  btnCopy.type = 'button';
+  btnCopy.addEventListener('click', () => copyText(linkInput.value, '填写链接已复制'));
+  linkRow.append(linkInput, btnCopy);
+  $svDataHead.appendChild(linkRow);
+
+  const btnExport = el('button', 'ghost-btn', '导出全部（xlsx）');
+  btnExport.type = 'button';
+  btnExport.addEventListener('click', () => exportSvXlsx(survey));
+  $svDataToolbar.appendChild(btnExport);
+
+  const completed = sessions.filter((s) => s.status === 'completed').length;
+  $svDataSummary.textContent = `共 ${sessions.length} 位填写（完成 ${completed} · 进行中 ${sessions.length - completed}）；点击一行查看该次填写的完整作答与对话。`;
+
+  if (!sessions.length) {
+    $svDataList.appendChild(el('p', 'data-empty', '暂无填写数据。把链接发给被试，提交后这里会实时汇总。'));
+    return;
+  }
+
+  const table = el('table', 'data-table');
+  const thead = el('thead');
+  const headRow = el('tr');
+  for (const t of ['编号', '状态', '作答进度', '开始时间', '时长', '操作']) {
+    headRow.appendChild(el('th', '', t));
+  }
+  thead.appendChild(headRow);
+
+  const tbody = el('tbody');
+  for (const s of sessions) {
+    const row = el('tr', 'data-row');
+    row.title = '点击查看该次填写的完整作答与对话';
+    row.append(
+      el('td', 'cell-strong', s.seq == null ? '—' : `#${s.seq}`),
+      el('td', '', s.statusLabel || s.status),
+      el('td', 'cell-strong', `${s.answerCount} / ${totalUnits}`),
+      el('td', '', formatTime(s.startedAt)),
+      el('td', '', formatDuration(s.durationSec)),
+      el('td', '', '查看 →')
+    );
+    row.addEventListener('click', () => {
+      location.hash = `#/sv/${id}/s/${s.id}`;
+    });
+    tbody.appendChild(row);
+  }
+  table.append(thead, tbody);
+  $svDataList.appendChild(table);
+}
+
+async function renderSvSession(id, sid) {
+  $svSession.innerHTML = '';
+  $svSessionTitle.textContent = '填写详情';
+
+  let data;
+  try {
+    data = await api(`/api/admin/survey/session?id=${encodeURIComponent(id)}&sid=${encodeURIComponent(sid)}`);
+  } catch (err) {
+    if (maybeSessionExpired(err)) return;
+    $svSession.appendChild(el('p', 'data-empty', err.message || '会话加载失败'));
+    return;
+  }
+
+  const { survey, session, messages, answers } = data;
+  $svSessionTitle.textContent = `${survey.title} · 填写 #${session.seq == null ? '—' : session.seq}`;
+
+  // 1 会话信息
+  const secMeta = sectionHead('会话信息');
+  const grid = el('div', 'meta-grid');
+  for (const [label, value] of [
+    ['填写编号', session.seq == null ? '—' : `#${session.seq}`],
+    ['状态', session.statusLabel || session.status],
+    ['开始时间', formatTime(session.startedAt)],
+    ['结束时间', formatTime(session.endedAt)],
+    ['时长', formatDuration(session.durationSec)],
+    ['作答进度', `${answers.length} 项已作答`]
+  ]) {
+    const item = el('div', 'meta-item');
+    item.append(el('span', 'meta-label', label), el('span', 'meta-value', value));
+    grid.appendChild(item);
+  }
+  secMeta.appendChild(grid);
+
+  // 2 作答明细
+  const secAns = sectionHead('作答明细', { hint: '按题目顺序排列；「作答」列为填写端实际回显的文案。' });
+  if (!answers.length) {
+    secAns.appendChild(el('p', 'data-empty', '暂无作答记录（可能尚未开始作答）。'));
+  } else {
+    const table = el('table', 'data-table');
+    const thead = el('thead');
+    const headRow = el('tr');
+    for (const t of ['题目', '类型', '作答', '作答时间', '耗时']) {
+      headRow.appendChild(el('th', '', t));
+    }
+    thead.appendChild(headRow);
+
+    const tbody = el('tbody');
+    for (const a of answers) {
+      const label = a.subIndex > 0 ? `第 ${a.questionSort} 题 · 子题 ${a.subIndex + 1}` : `第 ${a.questionSort} 题`;
+      const tr = el('tr');
+      tr.append(
+        el('td', 'cell-strong', `${label}：${a.questionLabel}`),
+        el('td', '', a.typeLabel || a.type),
+        el('td', '', a.answerText),
+        el('td', '', formatTime(a.answeredAt)),
+        el('td', '', a.elapsedMs == null ? '—' : `${Math.round(a.elapsedMs / 100) / 10} 秒`)
+      );
+      tbody.appendChild(tr);
+    }
+    table.append(thead, tbody);
+    secAns.appendChild(table);
+  }
+
+  // 3 对话记录
+  const secMsg = sectionHead('对话记录', { hint: '填写端界面中实际呈现的全部消息，按先后顺序。' });
+  if (!messages.length) {
+    secMsg.appendChild(el('p', 'data-empty', '暂无消息记录。'));
+  } else {
+    const timeline = el('div', 'msg-timeline');
+    for (const m of messages) {
+      const item = el('div', m.role === 'user' ? 'msg-item' : 'msg-item msg-ai');
+      const head = el('div', 'msg-head');
+      head.append(el('span', 'msg-role', m.role === 'user' ? '填写者' : '系统'), el('span', 'msg-time', formatTime(m.created_at)));
+      item.append(head, el('p', 'msg-content', m.content));
+      timeline.appendChild(item);
+    }
+    secMsg.appendChild(timeline);
+  }
+
+  $svSession.append(secMeta, secAns, secMsg);
+}
+
+// 导出：一行一份填写、一题一列（含实验子题；题目变更后的历史列追加在后）
+async function exportSvXlsx(survey) {
+  try {
+    const res = await fetch(`/api/admin/survey/export.xlsx?id=${encodeURIComponent(survey.id)}`, {
+      headers: { Authorization: `Bearer ${state.token}` }
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.message || `导出失败（${res.status}）`);
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${survey.title}-数据.xlsx`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 3000);
+    toast(`已开始下载：${survey.title}-数据.xlsx`);
+  } catch (err) {
+    $svDataSummary.textContent = err.message || '导出失败，请重试';
+    $svDataSummary.classList.add('err');
+  }
 }
 
 /* ---------------------------------------------------------------- 启动 */

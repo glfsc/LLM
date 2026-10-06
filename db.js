@@ -113,6 +113,65 @@ db.exec(`
     key   TEXT PRIMARY KEY,
     value TEXT
   );
+
+  -- 通用问卷（问卷星式，独立空间）：与实验问卷完全隔离
+  CREATE TABLE IF NOT EXISTS surveys (
+    id          TEXT PRIMARY KEY,             -- 链接短码（/survey?c=<id>）
+    title       TEXT NOT NULL DEFAULT '',
+    start_text  TEXT NOT NULL DEFAULT '',     -- 卷首语（可空）
+    end_text    TEXT NOT NULL DEFAULT '',     -- 结束语（可空）
+    created_at  TEXT,
+    updated_at  TEXT
+  );
+
+  -- 通用问卷题目：sort 顺序；options_json 选项数组；config_json 各题型扩展配置
+  CREATE TABLE IF NOT EXISTS survey_questions (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    survey_id    TEXT NOT NULL,
+    sort         INTEGER NOT NULL,
+    type         TEXT NOT NULL,               -- single/multi/text/rating/rank/qa/experiment
+    title        TEXT NOT NULL DEFAULT '',
+    required     INTEGER NOT NULL DEFAULT 1,
+    options_json TEXT NOT NULL DEFAULT '[]',
+    config_json  TEXT NOT NULL DEFAULT '{}'
+  );
+
+  -- 填写会话：按进入顺序编号 seq（被试编号）
+  CREATE TABLE IF NOT EXISTS survey_sessions (
+    id           TEXT PRIMARY KEY,
+    survey_id    TEXT NOT NULL,
+    seq          INTEGER,
+    status       TEXT NOT NULL DEFAULT 'in_progress',
+    started_at   TEXT,
+    ended_at     TEXT,
+    duration_sec INTEGER,
+    user_agent   TEXT
+  );
+
+  -- 对话消息：AI 消息（卷首语/实验背景/结束语）与用户动作回显
+  CREATE TABLE IF NOT EXISTS survey_messages (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    role       TEXT NOT NULL,
+    content    TEXT NOT NULL,
+    seq        INTEGER,
+    created_at TEXT
+  );
+
+  -- 作答记录：一行 = 一个作答单元（实验子题各占一行，sub_index 区分）
+  CREATE TABLE IF NOT EXISTS survey_answers (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id    TEXT NOT NULL,
+    question_id   INTEGER NOT NULL,
+    question_sort INTEGER NOT NULL,
+    sub_index     INTEGER NOT NULL DEFAULT 0,
+    type          TEXT NOT NULL,
+    value_json    TEXT NOT NULL DEFAULT 'null',
+    answer_text   TEXT NOT NULL DEFAULT '',
+    shown_at      TEXT,
+    answered_at   TEXT,
+    elapsed_ms    INTEGER
+  );
 `);
 
 // 老库升级：会话与作答补充问卷相关列（列已存在则跳过）
@@ -720,6 +779,430 @@ function listQuestionnaireExportRows(id, { scenarioId, groupRole, status, experi
     .all(...params);
 }
 
+// ---------------------------------------------------------------- 通用问卷（问卷星式，独立空间）
+// 题型：single 单选 / multi 多选 / text 填空 / rating 评分 / rank 排序 / qa 问答 / experiment 实验（背景+图片+子题）
+// 题目模型：{ id?, sort?, type, title, required, options: [string], config: {…} }
+//   single/multi：layout（每行 N 个，默认 1）、other（其他填空）、minSel/maxSel（多选限选，0 = 不限）
+//   rating：min/max（分值区间）、anchor（锚点说明）、display（ends 仅首末 / all 每档）、cols（每行 N 个，0 = 自适应一行）、labels（逐档文案）
+//   experiment：background（实验背景）、images（图片 URL 数组）、subs（子题，复用其余题型）
+
+const SURVEY_TYPES = ['single', 'multi', 'text', 'rating', 'rank', 'qa', 'experiment'];
+
+function surveyCode() {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    let code = '';
+    for (let i = 0; i < 8; i += 1) {
+      code += QUESTIONNAIRE_CODE_ALPHABET[Math.floor(Math.random() * QUESTIONNAIRE_CODE_ALPHABET.length)];
+    }
+    if (!db.prepare('SELECT 1 FROM surveys WHERE id = ?').get(code)) return code;
+  }
+  throw new Error('无法生成问卷短码，请重试');
+}
+
+function toClampedInt(value, fallback, min, max) {
+  const n = Math.round(Number(value));
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
+// 各题型扩展配置归一化（落库 / 出库共用，保证数据结构稳定）
+function normalizeSurveyConfig(type, raw) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  if (type === 'single' || type === 'multi') {
+    const cfg = {
+      layout: toClampedInt(src.layout, 1, 1, 8),
+      other: !!src.other,
+      minSel: toClampedInt(src.minSel, 0, 0, 50),
+      maxSel: toClampedInt(src.maxSel, 0, 0, 50)
+    };
+    if (cfg.maxSel > 0 && cfg.minSel > cfg.maxSel) cfg.minSel = cfg.maxSel;
+    return cfg;
+  }
+  if (type === 'rating') {
+    const min = toClampedInt(src.min, 1, 0, 10);
+    const max = toClampedInt(src.max, Math.max(min + 1, 5), min + 1, 12);
+    const labels = {};
+    if (src.labels && typeof src.labels === 'object') {
+      for (const [key, value] of Object.entries(src.labels)) {
+        const n = Number(key);
+        if (Number.isInteger(n) && n >= min && n <= max && String(value).trim()) labels[n] = String(value);
+      }
+    }
+    return {
+      min,
+      max,
+      anchor: String(src.anchor ?? ''),
+      display: src.display === 'all' ? 'all' : 'ends',
+      cols: toClampedInt(src.cols, 0, 0, 12),
+      labels
+    };
+  }
+  if (type === 'experiment') {
+    const subs = [];
+    for (const s of Array.isArray(src.subs) ? src.subs : []) {
+      const sub = normalizeSurveyQuestion(s);
+      if (sub.type === 'experiment') continue; // 实验内不允许再嵌套实验
+      subs.push({ type: sub.type, title: sub.title, required: sub.required, options: sub.options, config: sub.config });
+    }
+    return {
+      background: String(src.background ?? ''),
+      images: (Array.isArray(src.images) ? src.images : []).map(String).filter(Boolean).slice(0, 9),
+      subs
+    };
+  }
+  return {};
+}
+
+function normalizeSurveyOptions(type, options) {
+  if (type !== 'single' && type !== 'multi' && type !== 'rank') return [];
+  return (Array.isArray(options) ? options : []).map((o) => String(o ?? '')).slice(0, 100);
+}
+
+function normalizeSurveyQuestion(raw) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const type = SURVEY_TYPES.includes(src.type) ? src.type : 'single';
+  return {
+    type,
+    title: String(src.title ?? '').trim(),
+    required: src.required == null ? true : !!src.required,
+    options: normalizeSurveyOptions(type, src.options),
+    config: normalizeSurveyConfig(type, src.config)
+  };
+}
+
+function parseSurveyQuestionRow(row) {
+  let options = [];
+  let config = {};
+  try { options = JSON.parse(row.options_json || '[]'); } catch { options = []; }
+  try { config = JSON.parse(row.config_json || '{}'); } catch { config = {}; }
+  return {
+    id: Number(row.id),
+    sort: Number(row.sort),
+    ...normalizeSurveyQuestion({ type: row.type, title: row.title, required: !!row.required, options, config })
+  };
+}
+
+function getSurvey(id) {
+  return db.prepare('SELECT * FROM surveys WHERE id = ?').get(id) || null;
+}
+
+function listSurveyQuestions(surveyId) {
+  return db
+    .prepare('SELECT * FROM survey_questions WHERE survey_id = ? ORDER BY sort ASC')
+    .all(surveyId)
+    .map(parseSurveyQuestionRow);
+}
+
+function getSurveyQuestion(surveyId, questionId) {
+  const row = db.prepare('SELECT * FROM survey_questions WHERE survey_id = ? AND id = ?').get(surveyId, Number(questionId));
+  return row ? parseSurveyQuestionRow(row) : null;
+}
+
+function countSurveySessions(surveyId) {
+  return Number(db.prepare('SELECT COUNT(*) AS n FROM survey_sessions WHERE survey_id = ?').get(surveyId).n);
+}
+
+// 问卷负载：withQuestions = false 时仅返回列表页所需摘要（题数 / 数据量）
+function surveyPayload(id, { withQuestions = true } = {}) {
+  const s = getSurvey(id);
+  if (!s) return null;
+  const payload = {
+    id: s.id,
+    title: s.title,
+    startText: s.start_text,
+    endText: s.end_text,
+    questionCount: Number(db.prepare('SELECT COUNT(*) AS n FROM survey_questions WHERE survey_id = ?').get(id).n),
+    sessionCount: countSurveySessions(id),
+    createdAt: s.created_at,
+    updatedAt: s.updated_at
+  };
+  if (withQuestions) payload.questions = listSurveyQuestions(id);
+  return payload;
+}
+
+function getSurveyPayload(id) {
+  return surveyPayload(id, { withQuestions: true });
+}
+
+function listSurveys() {
+  return db
+    .prepare('SELECT id FROM surveys ORDER BY created_at DESC, rowid DESC')
+    .all()
+    .map((r) => surveyPayload(r.id, { withQuestions: false }));
+}
+
+// 题目整树替换（调用方保证事务）
+function saveSurveyQuestions(surveyId, questions) {
+  db.prepare('DELETE FROM survey_questions WHERE survey_id = ?').run(surveyId);
+  const insert = db.prepare(
+    'INSERT INTO survey_questions (survey_id, sort, type, title, required, options_json, config_json) VALUES (?, ?, ?, ?, ?, ?, ?)'
+  );
+  (Array.isArray(questions) ? questions : []).forEach((raw, i) => {
+    const q = normalizeSurveyQuestion(raw);
+    insert.run(surveyId, i + 1, q.type, q.title, q.required ? 1 : 0, JSON.stringify(q.options), JSON.stringify(q.config));
+  });
+}
+
+function createSurvey({ title, startText = '', endText = '', questions = [] }) {
+  const id = surveyCode();
+  const now = nowIso();
+  db.exec('BEGIN');
+  try {
+    db.prepare('INSERT INTO surveys (id, title, start_text, end_text, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)').run(
+      id, String(title || '未命名问卷'), String(startText ?? ''), String(endText ?? ''), now, now
+    );
+    saveSurveyQuestions(id, questions);
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+  return surveyPayload(id);
+}
+
+// 复制问卷：正文与题目整树复制（数据不复制）
+function copySurvey(sourceId, title) {
+  const source = getSurveyPayload(sourceId);
+  if (!source) return null;
+  return createSurvey({
+    title: String(title || '').trim() || `${source.title}（副本）`,
+    startText: source.startText,
+    endText: source.endText,
+    questions: source.questions.map((q) => ({ type: q.type, title: q.title, required: q.required, options: q.options, config: q.config }))
+  });
+}
+
+// 更新问卷（整树事务）：进行中的填写按题目快照继续，不受影响
+function updateSurvey(id, { title, startText, endText, questions }) {
+  if (!getSurvey(id)) return null;
+  db.exec('BEGIN');
+  try {
+    db.prepare('UPDATE surveys SET title = ?, start_text = ?, end_text = ?, updated_at = ? WHERE id = ?').run(
+      String(title || '未命名问卷'), String(startText ?? ''), String(endText ?? ''), nowIso(), id
+    );
+    saveSurveyQuestions(id, questions);
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+  return surveyPayload(id);
+}
+
+// 删除问卷：连带其全部会话 / 消息 / 作答数据；存在数据时需 force = true
+function deleteSurvey(id, { force = false } = {}) {
+  if (!getSurvey(id)) return { ok: false, reason: 'not_found' };
+  const sessionCount = countSurveySessions(id);
+  if (sessionCount > 0 && !force) return { ok: false, reason: 'has_sessions', sessionCount };
+  db.exec('BEGIN');
+  try {
+    const sessionIds = db.prepare('SELECT id FROM survey_sessions WHERE survey_id = ?').all(id).map((r) => r.id);
+    const delMsg = db.prepare('DELETE FROM survey_messages WHERE session_id = ?');
+    const delAnswer = db.prepare('DELETE FROM survey_answers WHERE session_id = ?');
+    for (const sid of sessionIds) {
+      delMsg.run(sid);
+      delAnswer.run(sid);
+    }
+    db.prepare('DELETE FROM survey_sessions WHERE survey_id = ?').run(id);
+    db.prepare('DELETE FROM survey_questions WHERE survey_id = ?').run(id);
+    db.prepare('DELETE FROM surveys WHERE id = ?').run(id);
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+  return { ok: true };
+}
+
+function nextSurveySeq(surveyId) {
+  const row = db.prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS n FROM survey_sessions WHERE survey_id = ?').get(surveyId);
+  return Number(row.n);
+}
+
+function getSurveySession(id) {
+  return db.prepare('SELECT * FROM survey_sessions WHERE id = ?').get(id) || null;
+}
+
+function createSurveySession({ surveyId, seq, userAgent }) {
+  const id = randomUUID();
+  db.prepare(
+    'INSERT INTO survey_sessions (id, survey_id, seq, status, started_at, user_agent) VALUES (?, ?, ?, ?, ?, ?)'
+  ).run(id, surveyId, seq, 'in_progress', nowIso(), userAgent || '');
+  return getSurveySession(id);
+}
+
+function listSurveyMessages(sessionId) {
+  return db
+    .prepare('SELECT id, role, content, seq, created_at FROM survey_messages WHERE session_id = ? ORDER BY seq ASC')
+    .all(sessionId);
+}
+
+function addSurveyMessage(sessionId, role, content) {
+  const maxSeq = db.prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM survey_messages WHERE session_id = ?').get(sessionId);
+  const seq = Number(maxSeq.m) + 1;
+  const createdAt = nowIso();
+  const info = db
+    .prepare('INSERT INTO survey_messages (session_id, role, content, seq, created_at) VALUES (?, ?, ?, ?, ?)')
+    .run(sessionId, role, content, seq, createdAt);
+  return { id: Number(info.lastInsertRowid), role, content, seq, created_at: createdAt };
+}
+
+function countSurveyAnswers(sessionId) {
+  return Number(db.prepare('SELECT COUNT(*) AS n FROM survey_answers WHERE session_id = ?').get(sessionId).n);
+}
+
+function addSurveyAnswer({ sessionId, questionId, questionSort, subIndex = 0, type, valueJson, answerText, shownAt, answeredAt, elapsedMs }) {
+  const info = db
+    .prepare(
+      `INSERT INTO survey_answers (session_id, question_id, question_sort, sub_index, type, value_json, answer_text, shown_at, answered_at, elapsed_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      sessionId, Number(questionId), Number(questionSort), Number(subIndex) || 0, String(type),
+      JSON.stringify(valueJson ?? null), String(answerText || ''), shownAt || null, answeredAt || nowIso(),
+      elapsedMs == null ? null : Number(elapsedMs)
+    );
+  return Number(info.lastInsertRowid);
+}
+
+function listSurveyAnswers(sessionId) {
+  return db
+    .prepare('SELECT * FROM survey_answers WHERE session_id = ? ORDER BY id ASC')
+    .all(sessionId)
+    .map((r) => {
+      let value = null;
+      try { value = JSON.parse(r.value_json || 'null'); } catch { value = null; }
+      return { ...r, value };
+    });
+}
+
+function finishSurveySession(id) {
+  const session = getSurveySession(id);
+  if (!session) return null;
+  if (session.status === 'completed') return session;
+  const endedAt = nowIso();
+  const duration = Math.max(1, Math.round((new Date(endedAt).getTime() - new Date(session.started_at).getTime()) / 1000));
+  db.prepare('UPDATE survey_sessions SET status = ?, ended_at = ?, duration_sec = ? WHERE id = ?').run('completed', endedAt, duration, id);
+  return getSurveySession(id);
+}
+
+// 数据页：会话摘要列表（编号 / 状态 / 开始时间 / 时长 / 作答与消息数量）
+function listSurveySessionSummaries(surveyId) {
+  return db
+    .prepare(
+      `SELECT ss.id, ss.seq, ss.status, ss.started_at, ss.ended_at, ss.duration_sec, ss.user_agent,
+              (SELECT COUNT(*) FROM survey_answers sa WHERE sa.session_id = ss.id) AS answer_count,
+              (SELECT COUNT(*) FROM survey_messages sm WHERE sm.session_id = ss.id) AS message_count
+         FROM survey_sessions ss WHERE ss.survey_id = ? ORDER BY ss.seq ASC`
+    )
+    .all(surveyId)
+    .map((r) => ({
+      id: r.id,
+      seq: r.seq == null ? null : Number(r.seq),
+      status: r.status,
+      startedAt: r.started_at,
+      endedAt: r.ended_at,
+      durationSec: r.duration_sec == null ? null : Number(r.duration_sec),
+      answerCount: Number(r.answer_count),
+      messageCount: Number(r.message_count)
+    }));
+}
+
+// 导出用行级数据：会话 × 作答（服务端拼接宽表列）
+function listSurveyAnswerRows(surveyId) {
+  return db
+    .prepare(
+      `SELECT sa.session_id, ss.seq, ss.status, ss.started_at, ss.ended_at, ss.duration_sec,
+              sa.question_id, sa.question_sort, sa.sub_index, sa.type, sa.value_json, sa.answer_text,
+              sa.shown_at, sa.answered_at, sa.elapsed_ms
+         FROM survey_answers sa JOIN survey_sessions ss ON ss.id = sa.session_id
+        WHERE ss.survey_id = ? ORDER BY ss.seq ASC, sa.question_sort ASC, sa.sub_index ASC, sa.id ASC`
+    )
+    .all(surveyId);
+}
+
+// 首次运行：创建一份示例通用问卷（六种题型 + 实验题），便于开箱体验；
+// 仅首次自动生成（删掉后不会再重建）；调用在文件末尾（依赖后文定义）
+function ensureDefaultSurvey() {
+  if (getSetting('example_survey_seeded') === '1') return;
+  const row = db.prepare('SELECT COUNT(*) AS n FROM surveys').get();
+  if (Number(row.n) > 0) {
+    setSetting('example_survey_seeded', '1');
+    return;
+  }
+  createSurvey({
+    title: '示例问卷 · 用户体验调研',
+    startText: '您好！感谢您参与本次问卷。我会逐一向您提出几个问题，请根据您的真实感受作答，所有答案均无对错之分。',
+    endText: '本次问卷到此结束，非常感谢您的耐心作答！您的反馈对我们非常重要。',
+    questions: [
+      {
+        type: 'single',
+        title: '您平时主要通过哪些渠道了解人工智能相关信息？',
+        required: true,
+        options: ['社交媒体', '新闻资讯', '学术论文', '同事朋友'],
+        config: { layout: 2, other: true, minSel: 0, maxSel: 0 }
+      },
+      {
+        type: 'multi',
+        title: '您使用过以下哪些人工智能相关产品？（限选 2 项）',
+        required: true,
+        options: ['智能语音助手', '推荐算法（短视频/购物）', '生成式 AI 工具', '智能翻译', '自动驾驶功能'],
+        config: { layout: 2, other: true, minSel: 1, maxSel: 2 }
+      },
+      {
+        type: 'text',
+        title: '您的年龄段是？',
+        required: true
+      },
+      {
+        type: 'rating',
+        title: '总体而言，您对人工智能的满意度如何？',
+        required: true,
+        config: {
+          min: 0, max: 6, anchor: '', display: 'all', cols: 0,
+          labels: { 0: '完全不满意', 1: '很不满意', 2: '不太满意', 3: '一般', 4: '比较满意', 5: '很满意', 6: '非常满意' }
+        }
+      },
+      {
+        type: 'rank',
+        title: '请对以下因素的重要性排序（最重要的在最上面）',
+        required: true,
+        options: ['准确性与可靠性', '使用便捷性', '响应速度', '隐私保护']
+      },
+      {
+        type: 'qa',
+        title: '您对人工智能的未来发展有什么看法或期待？',
+        required: false
+      },
+      {
+        type: 'experiment',
+        title: '实验一 · 决策情境阅读',
+        required: true,
+        config: {
+          background: '某城市计划推行一项交通限行政策，预计可使高峰期通行效率提升 12%，但会给部分私家车主带来不便。请阅读以下材料后回答后面的小问题。',
+          images: [],
+          subs: [
+            {
+              type: 'single',
+              title: '阅读材料后，您对这项政策的总体态度是？',
+              required: true,
+              options: ['非常支持', '比较支持', '不太支持', '非常不支持'],
+              config: { layout: 2 }
+            },
+            {
+              type: 'rating',
+              title: '您认为该政策对您个人出行的影响程度如何？',
+              required: true,
+              config: { min: 1, max: 5, display: 'ends', cols: 0, labels: {} }
+            }
+          ]
+        }
+      }
+    ]
+  });
+  setSetting('example_survey_seeded', '1');
+}
+
 // ---------------------------------------------------------------- 会话与消息
 
 function getSession(id) {
@@ -857,6 +1340,27 @@ module.exports = {
   deleteQuestionnaire,
   countSessionsByQuestionnaire,
   listQuestionnaireExportRows,
+  listSurveys,
+  getSurvey,
+  getSurveyPayload,
+  listSurveyQuestions,
+  getSurveyQuestion,
+  createSurvey,
+  copySurvey,
+  updateSurvey,
+  deleteSurvey,
+  countSurveySessions,
+  nextSurveySeq,
+  getSurveySession,
+  createSurveySession,
+  listSurveyMessages,
+  addSurveyMessage,
+  countSurveyAnswers,
+  addSurveyAnswer,
+  listSurveyAnswers,
+  finishSurveySession,
+  listSurveySessionSummaries,
+  listSurveyAnswerRows,
   getSession,
   nextSessionSeq,
   createSession,
@@ -872,3 +1376,5 @@ module.exports = {
 
 // 模块初始化：示例问卷种子（放末尾确保所有 const 已完成初始化）
 ensureDefaultQuestionnaire();
+// 通用问卷：示例问卷种子（六种题型 + 实验题各 1 题）
+ensureDefaultSurvey();

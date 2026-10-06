@@ -360,7 +360,7 @@ async function main() {
   await goto(`${BASE}/chat?q=${questionnaire.id}&fresh=1`, 900);
   await shot('v3-15-mobile-consent');
 
-  // ---- 16. 手机端：勾选同意开始 → 选项卡片界面（单列大点按区域）
+  // ---- 16. 手机端：勾选同意开始 → 选项卡片界面（2 列紧凑 + 右上角折叠按钮）
   await evaluate(`(() => {
     const cb = document.getElementById('consent-checkbox');
     cb.checked = true;

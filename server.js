@@ -15,6 +15,7 @@ const { buildXlsx } = require('./xlsx');
 
 const PORT = Number(process.env.PORT) || 3000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
+const UPLOADS_DIR = path.join(__dirname, 'uploads');
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -23,6 +24,10 @@ const MIME_TYPES = {
   '.json': 'application/json; charset=utf-8',
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
   '.ico': 'image/x-icon'
 };
 
@@ -58,12 +63,12 @@ function sendJson(res, status, payload) {
   res.end(body);
 }
 
-function readJsonBody(req) {
+function readJsonBody(req, maxBytes = 1024 * 1024) {
   return new Promise((resolve, reject) => {
     let raw = '';
     req.on('data', (chunk) => {
       raw += chunk;
-      if (raw.length > 1024 * 1024) {
+      if (raw.length > maxBytes) {
         reject(new Error('payload too large'));
         req.destroy();
       }
@@ -80,11 +85,39 @@ function readJsonBody(req) {
   });
 }
 
+function serveFile(res, absPath) {
+  fs.readFile(absPath, (err, data) => {
+    if (err) {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('404 Not Found');
+      return;
+    }
+    const ext = path.extname(absPath).toLowerCase();
+    res.writeHead(200, {
+      'Content-Type': MIME_TYPES[ext] || 'application/octet-stream',
+      'Cache-Control': 'no-cache'
+    });
+    res.end(data);
+  });
+}
+
 function serveStatic(res, pathname) {
+  // 上传文件（通用问卷实验题图片等）
+  if (pathname.startsWith('/uploads/')) {
+    const absPath = path.normalize(path.join(UPLOADS_DIR, pathname.slice('/uploads/'.length)));
+    if (!absPath.startsWith(UPLOADS_DIR + path.sep)) {
+      res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('403 Forbidden');
+      return;
+    }
+    return serveFile(res, absPath);
+  }
+
   let relPath = null;
   if (pathname === '/' || pathname === '/index.html') relPath = 'index.html';
   else if (pathname === '/chat' || pathname === '/chat.html') relPath = 'chat.html';
   else if (pathname === '/admin' || pathname === '/admin.html') relPath = 'admin.html';
+  else if (pathname === '/survey' || pathname === '/survey.html') relPath = 'survey.html';
   else if (pathname.startsWith('/assets/')) relPath = pathname.slice(1);
 
   if (!relPath) {
@@ -100,19 +133,7 @@ function serveStatic(res, pathname) {
     return;
   }
 
-  fs.readFile(absPath, (err, data) => {
-    if (err) {
-      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
-      res.end('404 Not Found');
-      return;
-    }
-    const ext = path.extname(absPath).toLowerCase();
-    res.writeHead(200, {
-      'Content-Type': MIME_TYPES[ext] || 'application/octet-stream',
-      'Cache-Control': 'no-cache'
-    });
-    res.end(data);
-  });
+  serveFile(res, absPath);
 }
 
 function fmtLocal(iso) {
@@ -953,6 +974,493 @@ function handleAdminQuestionnaireExport(req, res, url) {
   res.end(buf);
 }
 
+// ---------------------------------------------------------------- 通用问卷（问卷星式）
+// 被试端：/survey?c=<短码>；管理端：#/sv...（列表 / 编辑器 / 数据页）
+// 流程：卷首语 → 逐题（实验题先发背景消息，再逐子题）→ 结束语；预览模式不建会话、不落库。
+
+const SURVEY_TYPE_LABELS = { single: '单选', multi: '多选', text: '填空', rating: '评分', rank: '排序', qa: '问答', experiment: '实验' };
+
+// 展平为作答单元：普通题 1 个单元；实验题按子题展开（首个子题附带背景/图片）
+function buildSurveyUnits(questions) {
+  const units = [];
+  (questions || []).forEach((q, qi) => {
+    if (q.type === 'experiment') {
+      const subs = (q.config && q.config.subs) || [];
+      if (!subs.length) return; // 空实验跳过
+      subs.forEach((sub, si) => {
+        units.push({
+          qi,
+          si,
+          questionId: q.id,
+          type: sub.type,
+          title: sub.title,
+          required: sub.required !== false,
+          options: sub.options || [],
+          config: sub.config || {},
+          intro: si === 0 ? { title: q.title, background: String((q.config && q.config.background) || '').trim(), images: (q.config && q.config.images) || [] } : null
+        });
+      });
+    } else {
+      units.push({
+        qi,
+        si: -1,
+        questionId: q.id,
+        type: q.type,
+        title: q.title,
+        required: q.required !== false,
+        options: q.options || [],
+        config: q.config || {},
+        intro: null
+      });
+    }
+  });
+  return units;
+}
+
+function surveyIntroText(intro) {
+  return intro.title ? `${intro.title}\n\n${intro.background}` : intro.background;
+}
+
+// 作答单元 → 客户端动作负载
+function surveyUnitAction(unit) {
+  return {
+    questionId: unit.questionId,
+    subIndex: unit.si < 0 ? 0 : unit.si,
+    questionIndex: unit.qi,
+    isSub: unit.si >= 0,
+    type: unit.type,
+    typeLabel: SURVEY_TYPE_LABELS[unit.type] || unit.type,
+    title: unit.title,
+    required: unit.required,
+    options: unit.options,
+    config: unit.config,
+    intro: unit.intro
+  };
+}
+
+function surveySessionBrief(session) {
+  return {
+    id: session.id,
+    seq: session.seq == null ? null : Number(session.seq),
+    uid: session.seq == null ? '' : String(session.seq),
+    status: session.status
+  };
+}
+
+function surveySessionPayload(session, survey) {
+  const units = buildSurveyUnits(survey.questions);
+  const completed = store.countSurveyAnswers(session.id);
+  const action = session.status === 'completed' || completed >= units.length ? null : surveyUnitAction(units[completed]);
+  return {
+    session: surveySessionBrief(session),
+    messages: store.listSurveyMessages(session.id),
+    action,
+    completedUnits: completed,
+    totalUnits: units.length
+  };
+}
+
+// 作答值校验：返回 { valueJson, answerText } 或 { error }
+function validateSurveyAnswer(unit, body) {
+  const cfg = unit.config || {};
+  const labels = unit.options.map(String);
+  const otherIndex = labels.length; // 「其他（请注明）」虚拟选项索引
+
+  if (body.skip) {
+    if (unit.required) return { error: '本题为必答题，不能跳过' };
+    return { valueJson: null, answerText: '（跳过）' };
+  }
+
+  if (unit.type === 'single') {
+    const value = Number(body.value);
+    if (cfg.other && value === otherIndex) {
+      const otherText = String(body.otherText || '').trim();
+      if (!otherText) return { error: '请填写「其他」的内容' };
+      return { valueJson: { value, otherText }, answerText: `我选择：其他（${otherText}）` };
+    }
+    if (!Number.isInteger(value) || value < 0 || value >= labels.length) return { error: '作答值不合法' };
+    return { valueJson: { value }, answerText: `我选择：${labels[value]}` };
+  }
+
+  if (unit.type === 'multi') {
+    const raw = Array.isArray(body.values) ? body.values : [];
+    const values = [...new Set(raw.map(Number))].sort((a, b) => a - b);
+    if (values.some((v) => !Number.isInteger(v) || v < 0 || v > otherIndex)) return { error: '作答值不合法' };
+    const minSel = Math.max(1, Number(cfg.minSel) || 0);
+    const maxSel = Number(cfg.maxSel) || 0;
+    if (values.length < minSel) return { error: minSel > 1 ? `请至少选择 ${minSel} 项` : '请至少选择 1 项' };
+    if (maxSel > 0 && values.length > maxSel) return { error: `最多选择 ${maxSel} 项` };
+    const otherText = String(body.otherText || '').trim();
+    if (values.includes(otherIndex) && !otherText) return { error: '请填写「其他」的内容' };
+    const picked = values.filter((v) => v !== otherIndex).map((v) => labels[v]);
+    if (values.includes(otherIndex)) picked.push(`其他（${otherText}）`);
+    return { valueJson: { values, otherText }, answerText: `我选择：${picked.join('、')}（共 ${picked.length} 项）` };
+  }
+
+  if (unit.type === 'text' || unit.type === 'qa') {
+    const text = String(body.text || '').trim();
+    const limit = unit.type === 'qa' ? 5000 : 1000;
+    if (!text && unit.required) return { error: '请填写内容后再提交' };
+    if (text.length > limit) return { error: `内容过长（最多 ${limit} 字）` };
+    return { valueJson: { text }, answerText: text ? `我的回答：${text}` : '（空）' };
+  }
+
+  if (unit.type === 'rating') {
+    const value = Number(body.value);
+    const min = Number(cfg.min ?? 0);
+    const max = Number(cfg.max ?? 10);
+    if (!Number.isInteger(value) || value < min || value > max) return { error: '评分值不合法' };
+    return { valueJson: { value }, answerText: `评分：${value} 分` };
+  }
+
+  if (unit.type === 'rank') {
+    const order = Array.isArray(body.order) ? body.order.map(Number) : [];
+    const sorted = [...order].sort((a, b) => a - b).join(',');
+    const expect = labels.map((_, i) => i).join(',');
+    if (order.length !== labels.length || sorted !== expect) return { error: '请给出完整的排序结果' };
+    return {
+      valueJson: { order },
+      answerText: '排序：' + order.map((v, i) => `${i + 1}. ${labels[v]}`).join('  ')
+    };
+  }
+
+  return { error: '未知题型' };
+}
+
+// 题目标签映射：sort#sub → { title, type }（数据页 / 导出共用）
+function surveyQuestionLabelMap(questions) {
+  const map = new Map();
+  (questions || []).forEach((q, qi) => {
+    if (q.type === 'experiment') {
+      ((q.config && q.config.subs) || []).forEach((sub, si) => {
+        map.set(`${qi + 1}#${si}`, { title: `${q.title} · 子题${si + 1}`, type: sub.type });
+      });
+    } else {
+      map.set(`${qi + 1}#0`, { title: q.title, type: q.type });
+    }
+  });
+  return map;
+}
+
+// GET /api/survey/bootstrap?c=&session=&preview=
+// preview=1：仅返回问卷结构（管理端实时预览用），不建会话、不落库
+function handleSurveyBootstrap(req, res, url) {
+  const code = (url.searchParams.get('c') || '').trim();
+  const sid = (url.searchParams.get('session') || '').trim();
+  const survey = store.getSurveyPayload(code);
+  if (!survey) {
+    return sendJson(res, 404, { error: 'survey_not_found', message: '问卷不存在或链接已失效' });
+  }
+  if (url.searchParams.get('preview') === '1') {
+    return sendJson(res, 200, { survey, preview: true, session: null, messages: [], action: null });
+  }
+  let session = sid ? store.getSurveySession(sid) : null;
+  if (session && session.survey_id !== code) session = null; // 防止跨问卷串数据
+  if (!session) {
+    return sendJson(res, 200, { survey, session: null, messages: [], action: null });
+  }
+  sendJson(res, 200, { survey, ...surveySessionPayload(session, survey) });
+}
+
+// POST /api/survey/session { c } —— 创建填写会话（按进入顺序编号）
+async function handleSurveyCreateSession(req, res) {
+  const body = await readJsonBody(req);
+  const code = String(body.c || '').trim();
+  const survey = store.getSurveyPayload(code);
+  if (!survey) {
+    return sendJson(res, 404, { error: 'survey_not_found', message: '问卷不存在或链接已失效' });
+  }
+  const units = buildSurveyUnits(survey.questions);
+  if (!units.length) {
+    return sendJson(res, 400, { error: 'empty_survey', message: '该问卷尚未配置题目，请联系研究人员' });
+  }
+  const seq = store.nextSurveySeq(code);
+  const session = store.createSurveySession({ surveyId: code, seq, userAgent: req.headers['user-agent'] || '' });
+  if (survey.startText) store.addSurveyMessage(session.id, 'assistant', survey.startText);
+  if (units[0].intro && units[0].intro.background) {
+    store.addSurveyMessage(session.id, 'assistant', surveyIntroText(units[0].intro));
+  }
+  const fresh = store.getSurveySession(session.id);
+  sendJson(res, 200, { survey, ...surveySessionPayload(fresh, survey) });
+}
+
+// POST /api/survey/step { sessionId, questionId, subIndex, value/values/text/order/otherText, skip, elapsedMs }
+// 记录一次作答（回显消息 + 作答入库），返回下一个作答单元或结束
+async function handleSurveyStep(req, res) {
+  const body = await readJsonBody(req, 1024 * 1024);
+  const sessionId = String(body.sessionId || '').trim();
+  const elapsedMs = Number.isFinite(Number(body.elapsedMs))
+    ? Math.min(Math.max(Math.round(Number(body.elapsedMs)), 0), 24 * 3600 * 1000)
+    : null;
+
+  const session = sessionId ? store.getSurveySession(sessionId) : null;
+  if (!session) return sendJson(res, 404, { error: 'session_not_found', message: '会话不存在' });
+  if (session.status !== 'in_progress') return sendJson(res, 409, { error: 'session_closed', message: '会话已结束' });
+
+  const survey = store.getSurveyPayload(session.survey_id || '');
+  if (!survey) return sendJson(res, 404, { error: 'survey_not_found', message: '问卷已不存在' });
+
+  const units = buildSurveyUnits(survey.questions);
+  const completed = store.countSurveyAnswers(session.id);
+  if (completed >= units.length) {
+    store.finishSurveySession(session.id);
+    return sendJson(res, 409, { error: 'session_closed', message: '会话已结束' });
+  }
+  const unit = units[completed];
+
+  // 防重复提交 / 跨题提交：客户端必须按当前单元作答
+  if (body.questionId != null && Number(body.questionId) !== unit.questionId) {
+    return sendJson(res, 409, { error: 'out_of_sync', message: '作答与当前题目不同步，请刷新页面重试' });
+  }
+  if (body.subIndex != null && Number(body.subIndex) !== (unit.si < 0 ? 0 : unit.si)) {
+    return sendJson(res, 409, { error: 'out_of_sync', message: '作答与当前子题不同步，请刷新页面重试' });
+  }
+
+  const validated = validateSurveyAnswer(unit, body);
+  if (validated.error) return sendJson(res, 400, { error: 'bad_value', message: validated.error });
+
+  const answeredAt = new Date();
+  const shownAt = elapsedMs == null ? null : new Date(answeredAt.getTime() - elapsedMs).toISOString();
+  const userMessage = store.addSurveyMessage(session.id, 'user', validated.answerText);
+  store.addSurveyAnswer({
+    sessionId, questionId: unit.questionId, questionSort: unit.qi + 1,
+    subIndex: unit.si < 0 ? 0 : unit.si, type: unit.type,
+    valueJson: validated.valueJson, answerText: validated.answerText,
+    shownAt, answeredAt: answeredAt.toISOString(), elapsedMs
+  });
+
+  // 后续消息：进入下一单元（实验背景）/ 结束语
+  const messages = [];
+  const next = units[completed + 1];
+  if (!next) {
+    if (survey.endText) messages.push(store.addSurveyMessage(session.id, 'assistant', survey.endText));
+    store.finishSurveySession(session.id);
+  } else if (next.intro && next.intro.background) {
+    messages.push(store.addSurveyMessage(session.id, 'assistant', surveyIntroText(next.intro)));
+  }
+  const updated = store.getSurveySession(session.id);
+  sendJson(res, 200, {
+    userMessage,
+    messages,
+    action: next ? surveyUnitAction(next) : null,
+    session: surveySessionBrief(updated),
+    completedUnits: completed + 1,
+    totalUnits: units.length
+  });
+}
+
+// POST /api/survey/finish { sessionId } —— 提前结束会话（备用）
+async function handleSurveyFinish(req, res) {
+  const body = await readJsonBody(req);
+  const session = store.finishSurveySession(String(body.sessionId || '').trim());
+  if (!session) return sendJson(res, 404, { error: 'session_not_found', message: '会话不存在' });
+  sendJson(res, 200, { session: surveySessionBrief(session) });
+}
+
+// ---------------------------------------------------------------- 管理端 · 通用问卷
+
+// GET /api/admin/surveys —— 问卷列表（含题数与数据量）
+function handleAdminSurveys(req, res) {
+  if (!requireAdmin(req, res)) return;
+  sendJson(res, 200, { surveys: store.listSurveys() });
+}
+
+// GET /api/admin/survey?id= —— 单条问卷（含题目整树）
+function handleAdminSurvey(req, res, url) {
+  if (!requireAdmin(req, res)) return;
+  const id = (url.searchParams.get('id') || '').trim();
+  const survey = store.getSurveyPayload(id);
+  if (!survey) return sendJson(res, 404, { error: 'survey_not_found', message: '问卷不存在' });
+  sendJson(res, 200, { survey });
+}
+
+// POST /api/admin/survey/create { title, copyFrom? } —— 新建（或复制）问卷
+async function handleAdminSurveyCreate(req, res) {
+  if (!requireAdmin(req, res)) return;
+  const body = await readJsonBody(req);
+  const copyFrom = String(body.copyFrom || '').trim();
+  const title = String(body.title || '').trim();
+  if (copyFrom) {
+    if (!store.getSurvey(copyFrom)) return sendJson(res, 404, { error: 'copy_source_not_found', message: '复制来源问卷不存在' });
+    return sendJson(res, 200, { survey: store.copySurvey(copyFrom, title) });
+  }
+  sendJson(res, 200, { survey: store.createSurvey({ title: title || '未命名问卷' }) });
+}
+
+// POST /api/admin/survey/update { id, title, startText, endText, questions } —— 整树事务保存
+async function handleAdminSurveyUpdate(req, res) {
+  if (!requireAdmin(req, res)) return;
+  const body = await readJsonBody(req, 4 * 1024 * 1024);
+  const id = String(body.id || '').trim();
+  if (!store.getSurvey(id)) return sendJson(res, 404, { error: 'survey_not_found', message: '问卷不存在' });
+  const title = String(body.title || '').trim();
+  if (!title) return sendJson(res, 400, { error: 'bad_title', message: '问卷标题不能为空' });
+  const questions = Array.isArray(body.questions) ? body.questions : [];
+  if (!questions.length) return sendJson(res, 400, { error: 'bad_questions', message: '请至少添加一道题目' });
+  const survey = store.updateSurvey(id, {
+    title,
+    startText: String(body.startText ?? ''),
+    endText: String(body.endText ?? ''),
+    questions
+  });
+  sendJson(res, 200, { survey });
+}
+
+// POST /api/admin/survey/delete { id, force? } —— 删除（有数据需 force，连带清空）
+async function handleAdminSurveyDelete(req, res) {
+  if (!requireAdmin(req, res)) return;
+  const body = await readJsonBody(req);
+  const id = String(body.id || '').trim();
+  const result = store.deleteSurvey(id, { force: !!body.force });
+  if (!result.ok) {
+    if (result.reason === 'not_found') return sendJson(res, 404, { error: 'survey_not_found', message: '问卷不存在' });
+    return sendJson(res, 400, {
+      error: 'has_sessions',
+      message: `该问卷已有 ${result.sessionCount} 份填写数据，删除将一并清空，请确认`,
+      sessionCount: result.sessionCount
+    });
+  }
+  sendJson(res, 200, { ok: true });
+}
+
+// GET /api/admin/survey/sessions?id= —— 数据页：会话摘要列表
+function handleAdminSurveySessions(req, res, url) {
+  if (!requireAdmin(req, res)) return;
+  const id = (url.searchParams.get('id') || '').trim();
+  const survey = store.getSurveyPayload(id);
+  if (!survey) return sendJson(res, 404, { error: 'survey_not_found', message: '问卷不存在' });
+  const units = buildSurveyUnits(survey.questions);
+  const sessions = store.listSurveySessionSummaries(id).map((s) => ({
+    ...s,
+    statusLabel: STATUS_LABELS[s.status] || s.status,
+    totalUnits: units.length
+  }));
+  sendJson(res, 200, { survey, sessions, totalUnits: units.length });
+}
+
+// GET /api/admin/survey/session?id=&sid= —— 个案详情（消息时间线 + 作答明细）
+function handleAdminSurveySession(req, res, url) {
+  if (!requireAdmin(req, res)) return;
+  const id = (url.searchParams.get('id') || '').trim();
+  const sid = (url.searchParams.get('sid') || '').trim();
+  const survey = store.getSurveyPayload(id);
+  if (!survey) return sendJson(res, 404, { error: 'survey_not_found', message: '问卷不存在' });
+  const session = store.getSurveySession(sid);
+  if (!session || session.survey_id !== id) return sendJson(res, 404, { error: 'session_not_found', message: '会话不存在' });
+  const labelMap = surveyQuestionLabelMap(survey.questions);
+  sendJson(res, 200, {
+    survey,
+    session: {
+      id: session.id,
+      seq: session.seq == null ? null : Number(session.seq),
+      status: session.status,
+      statusLabel: STATUS_LABELS[session.status] || session.status,
+      startedAt: session.started_at,
+      endedAt: session.ended_at,
+      durationSec: session.duration_sec == null ? null : Number(session.duration_sec)
+    },
+    messages: store.listSurveyMessages(session.id),
+    answers: store.listSurveyAnswers(session.id).map((a) => {
+      const meta = labelMap.get(`${a.question_sort}#${a.sub_index}`);
+      return {
+        id: a.id,
+        questionId: a.question_id,
+        questionSort: a.question_sort,
+        subIndex: a.sub_index,
+        type: a.type,
+        typeLabel: SURVEY_TYPE_LABELS[a.type] || a.type,
+        questionLabel: meta ? meta.title : `第${a.question_sort}题（题目已变更）`,
+        value: a.value,
+        answerText: a.answer_text,
+        shownAt: a.shown_at,
+        answeredAt: a.answered_at,
+        elapsedMs: a.elapsed_ms == null ? null : Number(a.elapsed_ms)
+      };
+    })
+  });
+}
+
+// GET /api/admin/survey/export.xlsx?id= —— 宽表导出（一行一份填写，一题一列）
+function handleAdminSurveyExport(req, res, url) {
+  if (!requireAdmin(req, res)) return;
+  const id = (url.searchParams.get('id') || '').trim();
+  const survey = store.getSurveyPayload(id);
+  if (!survey) return sendJson(res, 404, { error: 'survey_not_found', message: '问卷不存在' });
+
+  // 列：按当前题目定义展开（实验题按子题各占一列）；题目变更后的历史列追加在后
+  const columns = [];
+  const keySeen = new Set();
+  survey.questions.forEach((q, qi) => {
+    if (q.type === 'experiment') {
+      ((q.config && q.config.subs) || []).forEach((sub, si) => {
+        columns.push({ key: `${qi + 1}#${si}`, title: `Q${qi + 1}.${si + 1} ${sub.title || ''}`.trim(), width: 28 });
+        keySeen.add(`${qi + 1}#${si}`);
+      });
+    } else {
+      columns.push({ key: `${qi + 1}#0`, title: `Q${qi + 1} ${q.title || ''}`.trim(), width: 30 });
+      keySeen.add(`${qi + 1}#0`);
+    }
+  });
+  const rows = store.listSurveyAnswerRows(id);
+  const extras = [];
+  for (const a of rows) {
+    const key = `${a.question_sort}#${a.sub_index}`;
+    if (!keySeen.has(key)) {
+      keySeen.add(key);
+      extras.push({ key, title: a.sub_index > 0 ? `第${a.question_sort}题·子题${a.sub_index + 1}（题目已变更）` : `第${a.question_sort}题（题目已变更）`, width: 24 });
+    }
+  }
+  columns.push(...extras);
+  const colIndex = new Map(columns.map((c, i) => [c.key, i]));
+
+  const sessions = store.listSurveySessionSummaries(id);
+  const grid = new Map(sessions.map((s) => [s.id, new Array(columns.length).fill('')]));
+  for (const a of rows) {
+    const line = grid.get(a.session_id);
+    if (line) line[colIndex.get(`${a.question_sort}#${a.sub_index}`)] = a.answer_text;
+  }
+
+  const sheetColumns = [
+    { title: '填写编号', width: 10 },
+    { title: '状态', width: 10 },
+    { title: '开始时间', width: 20 },
+    { title: '耗时（秒）', width: 10 },
+    ...columns.map((c) => ({ title: c.title, width: c.width }))
+  ];
+  const sheetRows = sessions.map((s) => [
+    s.seq,
+    STATUS_LABELS[s.status] || s.status,
+    fmtLocal(s.startedAt),
+    s.durationSec == null ? '' : s.durationSec,
+    ...(grid.get(s.id) || new Array(columns.length).fill(''))
+  ]);
+
+  const buf = buildXlsx([{ name: '问卷数据', columns: sheetColumns, rows: sheetRows }]);
+  const fileName = `${survey.title}.xlsx`;
+  res.writeHead(200, {
+    'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'Content-Disposition': `attachment; filename="survey-${id}.xlsx"; filename*=UTF-8''${encodeURIComponent(fileName)}`
+  });
+  res.end(buf);
+}
+
+// POST /api/admin/survey/upload { dataUrl } —— 实验题图片上传（base64 JSON，存盘到 uploads/survey/）
+async function handleAdminSurveyUpload(req, res) {
+  if (!requireAdmin(req, res)) return;
+  const body = await readJsonBody(req, 12 * 1024 * 1024);
+  const match = /^data:(image\/(png|jpe?g|gif|webp));base64,([A-Za-z0-9+/=\s]+)$/i.exec(String(body.dataUrl || ''));
+  if (!match) return sendJson(res, 400, { error: 'bad_image', message: '仅支持 PNG / JPG / GIF / WebP 图片' });
+  const ext = match[2].toLowerCase().replace('jpeg', 'jpg');
+  const buf = Buffer.from(match[3].replace(/\s/g, ''), 'base64');
+  if (!buf.length) return sendJson(res, 400, { error: 'bad_image', message: '图片内容为空' });
+  if (buf.length > 8 * 1024 * 1024) return sendJson(res, 400, { error: 'bad_image', message: '单张图片不能超过 8MB' });
+  const dir = path.join(UPLOADS_DIR, 'survey');
+  fs.mkdirSync(dir, { recursive: true });
+  const name = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+  fs.writeFileSync(path.join(dir, name), buf);
+  sendJson(res, 200, { url: `/uploads/survey/${name}`, size: buf.length });
+}
+
 // ---------------------------------------------------------------- 路由
 
 const server = http.createServer(async (req, res) => {
@@ -1027,6 +1535,47 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/admin/questionnaire/export.xlsx' && req.method === 'GET') {
       return handleAdminQuestionnaireExport(req, res, url);
     }
+    // 被试端 · 通用问卷
+    if (pathname === '/api/survey/bootstrap' && req.method === 'GET') {
+      return handleSurveyBootstrap(req, res, url);
+    }
+    if (pathname === '/api/survey/session' && req.method === 'POST') {
+      return await handleSurveyCreateSession(req, res);
+    }
+    if (pathname === '/api/survey/step' && req.method === 'POST') {
+      return await handleSurveyStep(req, res);
+    }
+    if (pathname === '/api/survey/finish' && req.method === 'POST') {
+      return await handleSurveyFinish(req, res);
+    }
+    // 管理端 · 通用问卷
+    if (pathname === '/api/admin/surveys' && req.method === 'GET') {
+      return handleAdminSurveys(req, res);
+    }
+    if (pathname === '/api/admin/survey' && req.method === 'GET') {
+      return handleAdminSurvey(req, res, url);
+    }
+    if (pathname === '/api/admin/survey/create' && req.method === 'POST') {
+      return await handleAdminSurveyCreate(req, res);
+    }
+    if (pathname === '/api/admin/survey/update' && req.method === 'POST') {
+      return await handleAdminSurveyUpdate(req, res);
+    }
+    if (pathname === '/api/admin/survey/delete' && req.method === 'POST') {
+      return await handleAdminSurveyDelete(req, res);
+    }
+    if (pathname === '/api/admin/survey/sessions' && req.method === 'GET') {
+      return handleAdminSurveySessions(req, res, url);
+    }
+    if (pathname === '/api/admin/survey/session' && req.method === 'GET') {
+      return handleAdminSurveySession(req, res, url);
+    }
+    if (pathname === '/api/admin/survey/export.xlsx' && req.method === 'GET') {
+      return handleAdminSurveyExport(req, res, url);
+    }
+    if (pathname === '/api/admin/survey/upload' && req.method === 'POST') {
+      return await handleAdminSurveyUpload(req, res);
+    }
 
     if (req.method === 'GET') {
       return serveStatic(res, pathname);
@@ -1047,5 +1596,9 @@ server.listen(PORT, () => {
     );
   } else {
     console.log('  提示：暂无问卷，请先在管理端创建问卷');
+  }
+  const surveys = store.listSurveys();
+  if (surveys.length) {
+    console.log(`  通用问卷示例：http://localhost:${PORT}/survey?c=${surveys[0].id}（${surveys[0].title}）`);
   }
 });

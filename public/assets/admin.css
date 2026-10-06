@@ -1704,6 +1704,804 @@ tr.q-row:hover {
   }
 }
 
+/* ------------------------------------------------------------ 通用问卷（列表 / 编辑器 / 数据） */
+
+/* 编辑器：主区加宽、去掉底部留白，两栏撑满视口：左侧独立滚动，右侧手机（10:22）常驻 */
+.admin-main.sv-editing {
+  max-width: 1480px;
+  padding-bottom: 0;
+}
+
+.sv-editor-main {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 26px);
+}
+
+.sv-editor-cols {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  gap: 56px;
+}
+
+.sv-editor-scroll {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 780px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 2px 16px 30px 2px;
+}
+
+.sv-editor-scroll::-webkit-scrollbar {
+  width: 10px;
+}
+
+.sv-editor-scroll::-webkit-scrollbar-thumb {
+  background: #d8d8dc;
+  border-radius: 8px;
+  border: 3px solid #fff;
+}
+
+.sv-editor-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 编辑器标题行右侧：填写链接芯片 */
+.sv-link-box {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.sv-link-box input {
+  width: min(320px, 34vw);
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--fg-soft);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 7px 11px;
+  background: var(--surface);
+  outline: none;
+}
+
+.sv-link-box input:focus {
+  border-color: var(--border-strong);
+  background: #fff;
+}
+
+/* 右侧预览列（手机常驻） */
+.sv-preview-col {
+  flex: 0 0 auto;
+  width: 330px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-bottom: 18px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.sv-preview-col::-webkit-scrollbar {
+  width: 8px;
+}
+
+.sv-preview-col::-webkit-scrollbar-thumb {
+  background: #e2e2e6;
+  border-radius: 8px;
+  border: 2px solid #fff;
+}
+
+.sv-pv-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
+.sv-pv-tag {
+  font-size: 12px;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  background: #fff;
+  border-radius: 999px;
+  padding: 4px 11px;
+  transition: color 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+}
+
+.sv-pv-tag.on {
+  color: var(--fg);
+  font-weight: 600;
+  border-color: var(--border-strong);
+}
+
+.sv-pv-tag.trial {
+  color: #7a5c14;
+  background: #fdf7e7;
+  border-color: #efe2bb;
+  font-weight: 600;
+}
+
+.sv-pv-btn {
+  margin-left: auto;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+  border-radius: 999px;
+  padding: 6px 14px;
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: background 0.16s ease;
+}
+
+.sv-pv-btn:hover {
+  background: var(--accent-hover);
+}
+
+.sv-pv-btn.stop {
+  background: #fff;
+  color: var(--fg);
+  border-color: var(--border-strong);
+}
+
+.sv-pv-btn.stop:hover {
+  background: var(--surface);
+}
+
+.sv-pv-note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.7;
+  flex: 0 0 auto;
+}
+
+.sv-pv-note b {
+  color: var(--fg);
+}
+
+/* 手机外框：内容区 310×682（≈ 10:22），与左侧问卷栏间隔 56px */
+.sv-phone {
+  flex: 0 0 auto;
+  border: 10px solid #1b1c1f;
+  border-radius: 40px;
+  background: #1b1c1f;
+  box-shadow: 0 20px 46px rgba(0, 0, 0, 0.2);
+}
+
+.sv-screen {
+  width: 310px;
+  height: 682px;
+  background: #fff;
+  border-radius: 30px;
+  overflow: hidden;
+}
+
+.sv-iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  display: block;
+  background: #fff;
+}
+
+/* 题卡（点击任意处即选中：上下边界高亮 + 右侧预览跟随） */
+.sv-qcard {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: #fff;
+  padding: 14px 16px;
+  margin-bottom: 12px;
+  transition: border-color 0.15s ease, box-shadow 0.18s ease;
+}
+
+.sv-qcard:not(.editing):hover {
+  border-color: var(--border-strong);
+}
+
+.sv-qcard.editing {
+  border-color: #e2e2e6;
+  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.07);
+}
+
+.sv-qcard.editing::before,
+.sv-qcard.editing::after {
+  content: "";
+  position: absolute;
+  left: -1px;
+  right: -1px;
+  height: 2px;
+  background: var(--accent);
+}
+
+.sv-qcard.editing::before {
+  top: -1px;
+  border-radius: 2px 2px 0 0;
+}
+
+.sv-qcard.editing::after {
+  bottom: -1px;
+  border-radius: 0 0 2px 2px;
+}
+
+.sv-qhead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sv-qnum {
+  width: 25px;
+  height: 25px;
+  flex: 0 0 auto;
+  border-radius: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.sv-qcard.editing .sv-qnum {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.sv-qbadge {
+  flex: 0 0 auto;
+  font-size: 11px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: var(--bubble);
+  color: var(--fg-soft);
+}
+
+.sv-qbadge.exp {
+  background: #eef1ff;
+  color: #3b4fc4;
+}
+
+.sv-qtitle {
+  flex: 1;
+  min-width: 0;
+  font-size: 13.5px;
+  line-height: 1.6;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sv-qreq {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--muted);
+  border-left: 1px solid var(--border);
+  padding-left: 10px;
+}
+
+.sv-qreq.off {
+  color: var(--faint);
+}
+
+.sv-qops {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 4px;
+}
+
+.sv-qops button {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.sv-qops button:hover {
+  background: var(--bubble);
+  color: var(--fg);
+}
+
+.sv-qops button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.sv-qops button.danger:hover {
+  color: var(--danger);
+}
+
+.sv-qcollapse {
+  flex: 0 0 auto;
+  width: 27px;
+  height: 27px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #fff;
+  color: var(--fg-soft);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.sv-qcollapse:hover {
+  border-color: var(--border-strong);
+  background: var(--surface);
+}
+
+.sv-qcollapse svg {
+  width: 13px;
+  height: 13px;
+  transition: transform 0.2s var(--ease-out);
+}
+
+.sv-qcard.collapsed .sv-qcollapse svg {
+  transform: rotate(-180deg);
+}
+
+.sv-qcard.collapsed .sv-qbody {
+  display: none;
+}
+
+.sv-qcard.collapsed {
+  padding: 12px 16px;
+}
+
+.sv-qbody {
+  border-top: 1px dashed var(--border);
+  margin-top: 13px;
+  padding-top: 14px;
+  display: grid;
+  gap: 13px;
+}
+
+.sv-qbody .sv-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.sv-inline-hint {
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.sv-qcount {
+  font-size: 11.5px;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 10px;
+}
+
+/* 选项编辑行 */
+.sv-opt-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sv-opt-row .drag {
+  color: var(--faint);
+  font-size: 13px;
+}
+
+.sv-opt-row input[type="text"] {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 13px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 11px;
+  outline: none;
+}
+
+.sv-opt-row input[type="text"]:focus {
+  border-color: var(--accent);
+}
+
+.sv-opt-row .del {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  color: var(--faint);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.sv-opt-row .del:hover {
+  color: var(--danger);
+  background: var(--bubble);
+}
+
+.sv-add-opt {
+  align-self: flex-start;
+  border: 1px dashed var(--border-strong);
+  color: var(--muted);
+  background: transparent;
+  border-radius: 10px;
+  padding: 7px 13px;
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.sv-add-opt:hover {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+
+/* 开关 / 数字输入 / 分段 */
+.sv-toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 13px;
+  color: var(--fg-soft);
+  cursor: pointer;
+  margin: 0;
+}
+
+.sv-switch {
+  position: relative;
+  width: 37px;
+  height: 21px;
+  border-radius: 999px;
+  background: #e4e4e8;
+  transition: background 0.18s ease;
+  flex: 0 0 auto;
+}
+
+.sv-switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+  transition: left 0.18s ease;
+}
+
+.sv-switch.on {
+  background: var(--accent);
+}
+
+.sv-switch.on::after {
+  left: 18px;
+}
+
+.sv-num {
+  width: 64px;
+  font: inherit;
+  font-size: 12.5px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 6px 8px;
+  outline: none;
+}
+
+.sv-num:focus {
+  border-color: var(--accent);
+}
+
+.sv-seg {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  overflow: hidden;
+}
+
+.sv-seg button {
+  border: none;
+  background: #fff;
+  padding: 6px 12px;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--muted);
+  border-right: 1px solid var(--border);
+  cursor: pointer;
+}
+
+.sv-seg button:last-child {
+  border-right: none;
+}
+
+.sv-seg button.on {
+  background: var(--accent);
+  color: #fff;
+}
+
+/* 评分逐档文案 */
+.sv-score-labels {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  gap: 6px;
+}
+
+.sv-score-labels .cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sv-score-labels .cell .n {
+  width: 22px;
+  flex: 0 0 auto;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.sv-score-labels .cell input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 7px 9px;
+  font: inherit;
+  font-size: 12.5px;
+  outline: none;
+}
+
+.sv-score-labels .cell input:focus {
+  border-color: var(--accent);
+}
+
+/* 实验题图片条 */
+.sv-img-strip {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.sv-img-thumb {
+  width: 104px;
+  height: 70px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  position: relative;
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.sv-img-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.sv-img-thumb .x {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 19px;
+  height: 19px;
+  border-radius: 6px;
+  border: none;
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.sv-upload-btn {
+  width: 104px;
+  height: 70px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
+.sv-upload-btn:hover {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+
+.sv-upload-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* 实验题子题卡 */
+.sv-sub-list {
+  display: grid;
+  gap: 9px;
+}
+
+.sv-subcard {
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  padding: 10px 12px;
+  background: var(--surface);
+}
+
+.sv-subcard-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  cursor: pointer;
+}
+
+.sv-subcard .snum {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.sv-subcard .stitle {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sv-subcard .del {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  border: none;
+  background: transparent;
+  color: var(--faint);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.sv-subcard .del:hover {
+  color: var(--danger);
+  background: var(--bubble);
+}
+
+.sv-subcard-body {
+  border-top: 1px dashed var(--border);
+  margin-top: 9px;
+  padding-top: 10px;
+  display: grid;
+  gap: 9px;
+}
+
+.sv-subcard-body .field textarea,
+.sv-subcard-body .field input {
+  background: #fff;
+}
+
+/* 添加题目 + 类型菜单 */
+.sv-add-question {
+  position: relative;
+  margin-top: 4px;
+  display: flex;
+  gap: 10px;
+}
+
+.sv-type-menu {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 8px);
+  left: 0;
+  width: 560px;
+  max-width: 100%;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: var(--shadow-lift);
+  padding: 10px;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+
+.sv-type-menu.sub {
+  width: 460px;
+  grid-template-columns: repeat(3, 1fr);
+  top: calc(100% + 6px);
+}
+
+.sv-type-menu button {
+  border: 1px solid var(--border);
+  background: #fff;
+  border-radius: 11px;
+  padding: 11px 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--fg-soft);
+  cursor: pointer;
+}
+
+.sv-type-menu button:hover {
+  border-color: var(--accent);
+  color: var(--fg);
+  box-shadow: var(--shadow-soft);
+}
+
+.sv-type-menu .ic {
+  width: 28px;
+  height: 28px;
+  border-radius: 9px;
+  background: var(--surface);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  color: var(--fg);
+}
+
+/* 中等宽度降级：预览手机移到编辑器下方 */
+@media (max-width: 1180px) {
+  .admin-main.sv-editing {
+    padding-bottom: 80px;
+  }
+
+  .sv-editor-main {
+    height: auto;
+    min-height: calc(100vh - 26px);
+  }
+
+  .sv-editor-cols {
+    flex-wrap: wrap;
+    gap: 30px;
+  }
+
+  .sv-editor-scroll {
+    overflow: visible;
+    max-width: none;
+    height: auto;
+    padding-right: 0;
+  }
+
+  .sv-preview-col {
+    width: 100%;
+    align-items: center;
+    overflow: visible;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

@@ -14,6 +14,7 @@ const $stream = document.getElementById('chat-stream');
 const $scroll = document.getElementById('chat-scroll');
 const $actionArea = document.getElementById('action-area');
 const $actionQuestion = document.getElementById('action-question');
+const $actionCollapse = document.getElementById('action-collapse');
 const $actionOptions = document.getElementById('action-options');
 const $actionAnchor = document.getElementById('action-anchor');
 const $btnSubmit = document.getElementById('btn-submit');
@@ -216,6 +217,8 @@ function renderAction(action) {
   $actionAnchor.classList.toggle('hidden', !action.anchor);
   $btnSubmit.disabled = true;
   $actionArea.classList.remove('hidden');
+  // 新题默认展开；折叠仅视觉层，不影响提交与埋点
+  $actionArea.classList.remove('collapsed');
   $actionHint.classList.add('hidden');
   state.actionShownAt = performance.now();
   scrollToBottom();
@@ -411,6 +414,11 @@ function showError(message) {
 /* ---------------------------------------------------------------- 事件绑定 */
 
 $btnSubmit.addEventListener('click', submit);
+
+// 收起 / 展开作答区（仅视觉层：不改变选中值与提交行为）
+$actionCollapse.addEventListener('click', () => {
+  $actionArea.classList.toggle('collapsed');
+});
 
 // 知情同意：勾选后才可开始；创建会话失败时就地提示并允许重试
 $consentCheckbox.addEventListener('change', () => {

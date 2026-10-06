@@ -1,0 +1,526 @@
+/* ==========================================================================
+   通用问卷 · 填写端样式（对话式）
+   复用 chat.css 的设计变量与骨架（顶栏 / 消息流 / 底部题卡 / 全屏页），
+   本文件只放问卷专属控件：选项网格 / 评分 / 排序 / 输入行 / 材料图片。
+   ========================================================================== */
+
+.survey-page .chat-stream {
+  /* 题卡常驻底部（flex 布局占位），无需 chat 的 112px 底部预留 */
+  padding-bottom: 24px;
+}
+
+/* 顶栏右侧状态标记（实时预览 / 试填中） */
+.brand-tag {
+  font-size: 11.5px;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 10px;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------ 底部题卡 */
+
+.s-card {
+  max-width: 820px;
+  margin: 0 auto;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 13px 16px 12px;
+  box-shadow: var(--shadow-lift);
+  animation: rise-in 0.34s var(--ease-out) both;
+}
+
+.s-qhead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.s-tag {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--fg-soft);
+  background: var(--bubble);
+  border-radius: 999px;
+  padding: 3px 10px;
+  white-space: nowrap;
+}
+
+.s-hint {
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 折叠 / 展开按钮：折叠态仅保留题条一行 */
+.s-collapse {
+  margin-left: auto;
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: #fff;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: border-color 0.16s ease, transform 0.22s var(--ease-out);
+}
+
+.s-collapse svg {
+  width: 15px;
+  height: 15px;
+  transition: transform 0.22s var(--ease-out);
+}
+
+.s-collapse:hover {
+  border-color: var(--border-strong);
+}
+
+.s-card.collapsed .s-collapse svg {
+  transform: rotate(180deg);
+}
+
+.s-card.collapsed .s-title,
+.s-card.collapsed .s-controls,
+.s-card.collapsed .s-foot,
+.s-card.collapsed .s-tip,
+.s-card.collapsed .s-error {
+  display: none;
+}
+
+.s-title {
+  margin: 9px 0 10px;
+  font-size: 14.5px;
+  font-weight: 600;
+  line-height: 1.7;
+  color: var(--fg);
+  word-break: break-word;
+}
+
+.s-title:empty {
+  display: none;
+}
+
+.s-controls {
+  min-height: 0;
+}
+
+.s-empty {
+  padding: 6px 2px 10px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+/* 题卡内错误提示 / 提示条 */
+.s-error {
+  margin: 9px 0 0;
+  font-size: 12.5px;
+  color: #c03434;
+}
+
+.s-tip {
+  margin: 9px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+/* ------------------------------------------------------------ 选项（单选 / 多选） */
+
+.s-opts {
+  display: grid;
+  grid-template-columns: repeat(var(--cols, 1), minmax(0, 1fr));
+  gap: 7px;
+  max-height: 22vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* 触屏惯性滚动 + 细滚动条 */
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  padding: 1px;
+}
+
+.s-opts::-webkit-scrollbar {
+  width: 4px;
+}
+
+.s-opts::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 2px;
+}
+
+.s-opt {
+  font: inherit;
+  font-size: 13.5px;
+  line-height: 1.5;
+  text-align: left;
+  color: var(--fg);
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 9px 11px;
+  cursor: pointer;
+  word-break: break-word;
+  touch-action: manipulation;
+  transition: border-color 0.16s ease, background 0.16s ease, color 0.16s ease, transform 0.12s ease;
+}
+
+.s-opt:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+
+.s-opt:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.s-opt.sel {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.s-opt:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+/* 「其他（请注明）」输入行：占满整行 */
+.s-other-row {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.s-other-row input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 13.5px;
+  color: var(--fg);
+  background: #fff;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  padding: 9px 11px;
+  outline: none;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.s-other-row input:focus {
+  border-color: var(--fg);
+  box-shadow: 0 0 0 3px rgba(17, 18, 19, 0.06);
+}
+
+/* ------------------------------------------------------------ 评分 */
+
+.s-rate {
+  display: grid;
+  grid-template-columns: repeat(var(--cols, 5), minmax(0, 1fr));
+  gap: 6px;
+}
+
+.s-rate button {
+  font: inherit;
+  font-size: var(--fs, 13.5px);
+  font-weight: 600;
+  min-width: 0;
+  aspect-ratio: 1;
+  color: var(--fg);
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  padding: 0;
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: border-color 0.16s ease, background 0.16s ease, color 0.16s ease, transform 0.12s ease;
+}
+
+.s-rate button:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+
+.s-rate button:active:not(:disabled) {
+  transform: scale(0.95);
+}
+
+.s-rate button.sel {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+/* 每档都显示注释：按钮改圆角矩形（两行：数字 + 文案） */
+.s-rate.all button {
+  aspect-ratio: auto;
+  border-radius: 10px;
+  min-height: 42px;
+  padding: 5px 2px;
+}
+
+.s-rate button .num {
+  font-size: var(--fs, 13.5px);
+  line-height: 1.1;
+}
+
+.s-rate button .txt {
+  font-size: var(--fs2, 9.5px);
+  font-weight: 500;
+  line-height: 1.15;
+  color: var(--muted);
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.s-rate button.sel .txt {
+  color: rgba(255, 255, 255, 0.82);
+}
+
+/* ------------------------------------------------------------ 排序 */
+
+.s-rank {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  max-height: 34vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  padding: 1px;
+}
+
+.s-rank .item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 12px;
+  font-size: 13.5px;
+  line-height: 1.5;
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+  will-change: transform;
+  word-break: break-word;
+}
+
+.s-rank .item .idx {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--bubble);
+  color: var(--fg-soft);
+  font-size: 11.5px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.s-rank .item .grip {
+  margin-left: auto;
+  flex: 0 0 auto;
+  color: var(--faint);
+  font-size: 15px;
+  letter-spacing: 1px;
+}
+
+.s-rank .item.dragging {
+  position: relative;
+  z-index: 5;
+  cursor: grabbing;
+  border-color: var(--border-strong);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.14);
+}
+
+.s-rank .item.returning {
+  transition: transform 0.2s var(--ease-out);
+}
+
+/* ------------------------------------------------------------ 输入行（填空 / 问答） */
+
+.s-inputrow {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.s-inputrow textarea {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--fg);
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 9px 12px;
+  resize: none;
+  outline: none;
+  max-height: 96px;
+  overflow-y: auto;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.s-inputrow textarea:focus {
+  border-color: var(--border-strong);
+  box-shadow: 0 0 0 3px rgba(17, 18, 19, 0.05);
+}
+
+.s-inputrow textarea::placeholder {
+  color: var(--faint);
+}
+
+.s-send {
+  flex: 0 0 auto;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: background 0.16s ease, transform 0.12s ease, opacity 0.16s ease;
+}
+
+.s-send svg {
+  width: 16px;
+  height: 16px;
+}
+
+.s-send:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+.s-send:disabled {
+  opacity: 0.32;
+  cursor: default;
+}
+
+/* ------------------------------------------------------------ 底部操作行 */
+
+.s-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.s-anchor {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.s-foot .ghost-btn {
+  flex: 0 0 auto;
+  padding: 7px 14px;
+}
+
+.s-foot .primary-btn {
+  flex: 0 0 auto;
+}
+
+/* 聊天流内居中小字提示（试填结束等） */
+.s-note {
+  font-size: 12px;
+  color: var(--faint);
+  text-align: center;
+  padding: 2px 0;
+  letter-spacing: 0.05em;
+}
+
+/* ------------------------------------------------------------ 实验材料图片（聊天流内） */
+
+.s-img {
+  display: flex;
+  animation: rise-in 0.34s var(--ease-out) both;
+}
+
+.s-img img {
+  max-width: 88%;
+  max-height: 260px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  display: block;
+  object-fit: contain;
+  background: var(--surface);
+}
+
+/* ------------------------------------------------------------ 响应式（手机） */
+
+@media (max-width: 640px) {
+  .s-card {
+    padding: 11px 12px 10px;
+    border-radius: 16px;
+  }
+
+  .s-title {
+    font-size: 14.5px;
+    margin: 8px 0 9px;
+  }
+
+  .s-opt {
+    font-size: 13.5px;
+    padding: 9px 10px;
+    border-radius: 12px;
+  }
+
+  .s-opt.sel:active {
+    transform: none;
+  }
+
+  .s-foot .primary-btn {
+    padding: 10px 20px;
+    font-size: 13.5px;
+  }
+
+  .s-foot .ghost-btn {
+    padding: 9px 13px;
+  }
+
+  .s-img img {
+    max-width: 96%;
+    max-height: 220px;
+  }
+}
+
+/* 触屏设备：消除点击后残留的 hover 高亮（不影响选中态） */
+@media (hover: none) {
+  .s-opt:not(.sel):hover:not(:disabled),
+  .s-rate button:not(.sel):hover:not(:disabled),
+  .s-collapse:hover,
+  .s-other-row input {
+    border-color: var(--border);
+  }
+
+  .s-other-row input:focus {
+    border-color: var(--fg);
+  }
+}
