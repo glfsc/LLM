@@ -20,7 +20,7 @@ const ZIP_PATH = path.join(DIST, `${STAGE_NAME}.zip`);
 
 const COPY_FILES = ['server.js', 'db.js', 'xlsx.js', 'package.json', '启动预实验.bat', '实验人员须知.txt'];
 const COPY_DIRS = ['public', 'vendor'];
-const COPY_NESTED = ['scripts/reset-db.js', 'scripts/pilot-start.js'];
+const COPY_NESTED = ['scripts/reset-db.js', 'scripts/pilot-start.js', 'scripts/simulate-subjects.js'];
 
 // 压缩后必须存在于 zip 中的关键文件（防止静默丢内容）
 const MUST_HAVE_IN_ZIP = [
@@ -31,6 +31,7 @@ const MUST_HAVE_IN_ZIP = [
   '预实验便携包/实验人员须知.txt',
   '预实验便携包/scripts/reset-db.js',
   '预实验便携包/scripts/pilot-start.js',
+  '预实验便携包/scripts/simulate-subjects.js',
   '预实验便携包/public/index.html',
   '预实验便携包/public/chat.html',
   '预实验便携包/public/admin.html',

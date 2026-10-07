@@ -1207,8 +1207,10 @@ function buildConnectHtml() {
     <div class="url"><code>${primary}</code></div>
     <ul class="tips">
       <li>用手机「相机」扫码，选择浏览器打开；微信扫一扫若无法打开，请改用相机。</li>
-      <li>打不开时检查：手机是否在用流量（需关闭并连 WiFi）；路由器是否开启了「AP 隔离」。</li>
-      <li>没有共同 WiFi 时：电脑开启「移动热点」，手机连上热点后再扫码即可。</li>
+      <li>手机与电脑要在同一个网里：电脑开热点让手机连，或手机开热点让电脑连，都行。</li>
+      <li>打不开时先看：手机是否还开着流量（需关掉并连同一 WiFi）；防火墙是否放行了
+        「专用网络」和「公用网络」两个（手机热点常被判为公用网络）。</li>
+      <li>路由器若开了「AP 隔离」，手机也连不上，需关闭或改用热点方式。</li>
       ${altItems ? `<li>若上方地址无法访问，可尝试备选地址：<ul class="alt">${altItems}</ul></li>` : ''}
     </ul>
     <div class="admin">电脑端编辑/数据入口：<a href="/admin">http://localhost:${PORT}/admin</a>（本机打开）</div>
