@@ -18,12 +18,12 @@ const $sidebarMenu = $('sidebar-menu');
 const $sidebarOutline = $('sidebar-outline');
 const $segMenu = $('seg-menu');
 const $segOutline = $('seg-outline');
-const $sidebarTip = $('sidebar-tip');
 
 const TOKEN_KEY = 'expchat_admin_token';
 
 const state = {
   token: sessionStorage.getItem(TOKEN_KEY) || '',
+  user: null,             // 当前登录用户 { id, username, role, avatar }
   meta: null,             // { itemTypes, itemTypeLabels, itemLimits, timingMeta, itemDefaults, defaultQuestionnaireItems, resumeWindowHours }
   experiments: [],
   questionnaires: [],
@@ -176,8 +176,9 @@ function makeNumberField(labelText, value, min, max, hint) {
 /* ---------------------------------------------------------------- 弹窗 */
 
 let modalOnConfirm = null;
+let modalOnExtra = null;
 
-function openModal({ title, body, confirmLabel = '确定', danger = false, onConfirm }) {
+function openModal({ title, body, confirmLabel = '确定', danger = false, onConfirm, extraLabel, onExtra, hideCancel = false }) {
   $modalTitle.textContent = title;
   $modalBody.innerHTML = '';
   if (body) $modalBody.appendChild(body);
@@ -185,13 +186,34 @@ function openModal({ title, body, confirmLabel = '确定', danger = false, onCon
   $modalConfirm.textContent = confirmLabel;
   $modalConfirm.classList.toggle('danger', Boolean(danger));
   $modalConfirm.disabled = false;
+  $modalCancel.classList.toggle('hidden', hideCancel);
   modalOnConfirm = onConfirm || null;
+  modalOnExtra = onExtra || null;
+  let extra = document.getElementById('modal-extra');
+  if (extraLabel && onExtra) {
+    if (!extra) {
+      extra = el('button', 'ghost-btn');
+      extra.id = 'modal-extra';
+      extra.type = 'button';
+      extra.addEventListener('click', async () => {
+        if (!modalOnExtra) return;
+        extra.disabled = true;
+        try { await modalOnExtra(); } catch (err) { showModalError(err.message || '操作失败，请重试'); } finally { extra.disabled = false; }
+      });
+      $modalCancel.parentElement.insertBefore(extra, $modalCancel);
+    }
+    extra.textContent = extraLabel;
+    extra.classList.remove('hidden');
+  } else if (extra) {
+    extra.classList.add('hidden');
+  }
   $modal.classList.remove('hidden');
 }
 
 function closeModal() {
   $modal.classList.add('hidden');
   modalOnConfirm = null;
+  modalOnExtra = null;
 }
 
 function showModalError(message) {
@@ -216,46 +238,19 @@ async function loadMeta() {
 
 async function enterAdmin() {
   initLayout();
+  const me = await api('/api/auth/me');
+  state.user = me.user;
   await Promise.all([loadMeta(), reloadExperiments(), reloadQuestionnaires()]);
-  $('login-view').classList.add('hidden');
   $('admin-view').classList.remove('hidden');
   handleRoute();
 }
 
 async function boot() {
-  if (!state.token) return;
+  if (!state.token) { location.replace('/'); return; }
   try { await enterAdmin(); } catch (err) {
-    if (err.status === 401) { state.token = ''; sessionStorage.removeItem(TOKEN_KEY); }
+    if (err.status === 401) { state.token = ''; sessionStorage.removeItem(TOKEN_KEY); location.replace('/'); }
   }
 }
-
-$('login-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const password = $('login-password').value;
-  if (!password) return;
-  $('login-btn').disabled = true;
-  try {
-    const res = await api('/api/admin/login', { body: { password } });
-    state.token = res.token;
-    sessionStorage.setItem(TOKEN_KEY, res.token);
-    $('login-error').classList.add('hidden');
-    $('login-password').value = '';
-    await enterAdmin();
-  } catch (err) {
-    $('login-error').textContent = err.message || '密码不正确，请重试。';
-    $('login-error').classList.remove('hidden');
-    $('login-password').select();
-  } finally {
-    $('login-btn').disabled = false;
-  }
-});
-
-$('btn-logout').addEventListener('click', async () => {
-  try { await api('/api/admin/logout', { body: {} }); } catch { /* 忽略 */ }
-  state.token = '';
-  sessionStorage.removeItem(TOKEN_KEY);
-  location.reload();
-});
 
 function maybeSessionExpired(err) {
   if (err.status !== 401) return false;
@@ -268,10 +263,13 @@ function maybeSessionExpired(err) {
 /* ---------------------------------------------------------------- 路由 */
 // #/exp、#/exp/:id
 // #/q、#/q/:id、#/q/:id/data、#/q/:id/s/:sid
+// #/settings（个人设置）、#/users（用户管理，仅管理员）
 
 function parseHash() {
   const raw = location.hash.replace(/^#\/?/, '');
   const [section, a, b, c] = raw.split('/');
+  if (section === 'settings') return { section, view: 'settings' };
+  if (section === 'users') return { section, view: 'users' };
   if (section === 'exp') return a ? { section, view: 'editor', id: a } : { section, view: 'list' };
   if (section === 'q') {
     if (!a) return { section, view: 'list' };
@@ -297,6 +295,14 @@ function handleRoute() {
   });
 
   const editing = route.view === 'editor';
+  if (route.view === 'settings' || route.view === 'users') {
+    state.view = route.view;
+    setSidebarMode('menu');
+    if (route.view === 'settings') renderSettings();
+    else renderUsers();
+    window.scrollTo(0, 0);
+    return;
+  }
   state.view = route.section === 'exp' ? (editing ? 'exp-editor' : 'exp-list') : route.view === 'list' ? 'q-list' : route.view === 'editor' ? 'q-editor' : route.view === 'data' ? 'q-data' : 'q-session';
 
   // 进入编辑页默认切到大纲；回到列表 / 数据页切回菜单
@@ -322,6 +328,11 @@ document.querySelectorAll('.sidebar-item').forEach((a) => {
   });
 });
 
+$('btn-settings').addEventListener('click', () => {
+  state.trial = null;
+  location.hash = '#/settings';
+});
+
 /* ---------------------------------------------------------------- 侧边栏（菜单 / 大纲） */
 
 function setSidebarMode(mode) {
@@ -334,9 +345,6 @@ function setSidebarMode(mode) {
   $segMenu.classList.toggle('on', !isOutline);
   $segOutline.classList.toggle('on', isOutline);
   $segOutline.disabled = !editing;
-  $sidebarTip.textContent = editing
-    ? '大纲与编辑器双向联动：点大纲跳到该题，点题卡高亮大纲；拖动题卡排序，大纲同步更新。'
-    : '只有 9 种题目：量表 = 多道打分题，创作 = 一个题组（广告语 + 创作说明同屏作答）。实验是可复用的题目模板，问卷插入后即可逐条修改。';
   if (isOutline) renderOutline();
 }
 
@@ -361,8 +369,8 @@ function applyLayout(l) {
   root.setProperty('--sidebar-w', `${l.sidebar}px`);
   root.setProperty('--phone-w', `${l.phone}px`);
   document.body.classList.toggle('side-collapsed', !!l.collapsed);
-  const btn = $('btn-side-expand');
-  if (btn) btn.classList.toggle('hidden', !l.collapsed);
+  const btn = $('btn-side-collapse');
+  if (btn) btn.textContent = l.collapsed ? '»' : '«';
 }
 function startDrag(ev, which) {
   ev.preventDefault();
@@ -389,15 +397,17 @@ function initLayout() {
     side.addEventListener('mousedown', (e) => startDrag(e, 'sidebar'));
     side.addEventListener('dblclick', () => { saveLayout({ sidebar: LAYOUT_DEF.sidebar }); toast('菜单栏宽度已复位'); });
   }
-  $('btn-side-in').addEventListener('click', () => saveLayout({ sidebar: Math.min(460, loadLayout().sidebar + 40) }));
-  $('btn-side-out').addEventListener('click', () => saveLayout({ sidebar: Math.max(180, loadLayout().sidebar - 40) }));
-  $('btn-side-collapse').addEventListener('click', () => { saveLayout({ collapsed: true }); toast('菜单栏已折叠'); });
-  $('btn-side-expand').addEventListener('click', () => { saveLayout({ collapsed: false }); toast('菜单栏已展开'); });
+  $('btn-side-collapse').addEventListener('click', () => {
+    const next = !loadLayout().collapsed;
+    saveLayout({ collapsed: next });
+    toast(next ? '菜单栏已折叠' : '菜单栏已展开');
+  });
 }
 
 function renderOutline() {
   const target = currentEditing();
   if (!target || !$sidebarOutline) return;
+  const outlineScroll = $sidebarOutline.scrollTop;
   $sidebarOutline.innerHTML = '';
 
   for (const [label, anchor] of [
@@ -441,6 +451,7 @@ function renderOutline() {
     };
     $sidebarOutline.appendChild(row);
   });
+  $sidebarOutline.scrollTop = outlineScroll;
 }
 
 function TYPE_ICON(type) {
@@ -498,6 +509,9 @@ function buildItemEditor(list, timing, opts = {}) {
   function rerender() { render(); }
 
   function render() {
+    // 保留滚动位置：增删 / 选择 / 拖动后的重渲染不做视觉跳动
+    const sc = wrap.closest('.editor-scroll');
+    const scrollTop = sc ? sc.scrollTop : 0;
     wrap.innerHTML = '';
     let lastBand = null;
 
@@ -725,6 +739,7 @@ function buildItemEditor(list, timing, opts = {}) {
     }
     wrap.appendChild(addRow);
     onChange(list);
+    if (sc) sc.scrollTop = scrollTop;
   }
 
   render();
@@ -997,14 +1012,43 @@ function renderEditorView() {
   renderOutline();
 }
 
-function editorShell({ title, backHash, saveLabel, hint, body, phoneTitle, withTrial }) {
+function editorShell({ title, backHash, saveLabel, hint, body, phoneTitle, withTrial, onSave, isDirty }) {
   $main.className = 'admin-main editing';
   $main.innerHTML = '';
 
   const head = el('div', 'editor-head');
   const back = el('button', 'ghost-btn', '← 返回列表');
-  back.onclick = () => { state.trial = null; location.hash = backHash; };
+  // 未修改直接返回；有修改才弹确认（保存 / 不保存返回）
+  back.onclick = () => {
+    if (isDirty && !isDirty()) {
+      state.trial = null;
+      location.hash = backHash;
+      return;
+    }
+    openModal({
+      title: '返回列表',
+      body: el('p', 'modal-note', '当前内容尚未保存，是否保存后返回？'),
+      confirmLabel: '保存',
+      extraLabel: '不保存返回',
+      hideCancel: true,
+      onExtra: async () => {
+        closeModal();
+        state.trial = null;
+        location.hash = backHash;
+      },
+      onConfirm: async () => {
+        if (onSave) await onSave({ exit: true, modal: true });
+      }
+    });
+  };
   head.append(back, el('h2', '', title));
+  const headRight = el('div', 'editor-head-right');
+  if (hint) headRight.appendChild(el('span', 'hint', hint));
+  const save = el('button', 'primary-btn', saveLabel);
+  save.type = 'button';
+  save.onclick = () => onSave && onSave({ exit: false });
+  headRight.appendChild(save);
+  head.appendChild(headRight);
   $main.appendChild(head);
 
   const cols = el('div', 'editor-cols');
@@ -1044,6 +1088,8 @@ function editorShell({ title, backHash, saveLabel, hint, body, phoneTitle, withT
   const screen = el('div', 'screen');
   const top = el('div', 'screen-top');
   top.append(el('span', 'dot'), el('span', 'name', phoneTitle));
+  const tools = el('span', 'screen-tools hidden');
+  top.appendChild(tools);
   const screenBody = el('div', 'screen-body');
   screenBody.id = 'pv-body';
   screen.append(top, screenBody);
@@ -1056,12 +1102,6 @@ function editorShell({ title, backHash, saveLabel, hint, body, phoneTitle, withT
   split.addEventListener('dblclick', () => { saveLayout({ phone: LAYOUT_DEF.phone }); toast('手机栏宽度已复位'); });
   cols.append(split, col);
   $main.appendChild(cols);
-
-  const foot = el('div', 'editor-foot');
-  foot.appendChild(el('span', 'hint', hint || ''));
-  const save = el('button', 'primary-btn', saveLabel);
-  foot.appendChild(save);
-  $main.appendChild(foot);
 
   return { saveBtn: save, screenBody, tag, scroll };
 }
@@ -1091,6 +1131,7 @@ async function renderPhoneBody(ctx, { upTo, animateFrom, speed } = {}) {
   const { body, list, timing } = ctx;
   body.innerHTML = "";
   const end = upTo == null ? list.length : Math.min(upTo, list.length);
+  let prevMsg = false;               // 上一条渲染的是消息 → 再渲染消息前插分割线
   for (let i = 0; i < end; i += 1) {
     const item = list[i];
     const prev = i > 0 ? list[i - 1] : null;
@@ -1099,6 +1140,8 @@ async function renderPhoneBody(ctx, { upTo, animateFrom, speed } = {}) {
         body.appendChild(el("div", "pv-skip", `（${item.title || "消息"}为空 · 被试端跳过）`));
         continue;
       }
+      if (prevMsg) body.appendChild(el("div", "pv-divider"));
+      prevMsg = true;
       const d = effLimit(item, "delay", timing);
       if (d > 0) body.appendChild(el("div", "pv-tagline", `系统将在 ${d} 秒后发出 ↓`));
       const node = el("div", "pv-msg");
@@ -1110,6 +1153,7 @@ async function renderPhoneBody(ctx, { upTo, animateFrom, speed } = {}) {
         node.textContent = item.text;
       }
     } else if (item.type === "gate") {
+      prevMsg = false;
       const g = el("div", "screen-gate");
       g.append(el("h3", "", item.title || "知情同意说明"), el("div", "txt", item.text || ""));
       const c = el("div", "check");
@@ -1201,8 +1245,10 @@ function renderPhoneOnly() {
 }
 
 /* ---------------------------------------------------------------- 预览模拟（思考 / 流式 / 计时） */
-// 与真实被试端一致的节奏：思考停顿 ~0.42s、正文 11ms/字、标点 65ms；speed = 演示倍速
+// 与真实被试端一致的节奏：思考停顿 ~0.42s、正文 28ms/字、标点额外停顿；speed = 演示倍速
 const MOCK_PUNCT = "，。；：！？、,.!?;:";
+const MOCK_TYPE_MS = 30;        // 与被试端 TYPE_MS_DEFAULT 一致
+const MOCK_TYPE_MS_MIN = 26;    // 旧内容存了过快速度时的下限钳制
 function sleepMs(ms, speed) { return new Promise((r) => setTimeout(r, Math.max(0, ms / (speed || 1)))); }
 
 // 页面内滚动：打字过程中跟随底部；新题渲染后滚到该题顶部（见 mockScrollTop）
@@ -1212,25 +1258,40 @@ function mockScroll(node) {
 }
 
 async function typewriteMock(node, text, speed, typeMs) {
-  const base = Number.isFinite(Number(typeMs)) ? Number(typeMs) : 11;
+  const raw = Number.isFinite(Number(typeMs)) ? Number(typeMs) : MOCK_TYPE_MS;
+  const base = raw > 0 ? Math.max(raw, MOCK_TYPE_MS_MIN) : 0;
   if (base <= 0) { node.textContent = text; mockScroll(node); return; }
   node.textContent = "";
   node.classList.add("typing-mock");
   for (let i = 0; i < text.length; i += 1) {
     node.textContent += text[i];
-    await sleepMs(MOCK_PUNCT.includes(text[i]) ? base + 54 : base, speed);
+    await sleepMs(MOCK_PUNCT.includes(text[i]) ? base + 90 : base, speed);
     if (i % 12 === 0) mockScroll(node);
   }
   node.classList.remove("typing-mock");
   mockScroll(node);
 }
 
-// 「正在思考」动画：thinkMs 可覆盖（0 = 不显示）
+// 「正在深度思考」动画：黑色圆圈旋转徽标 + 圆点（thinkMs 可覆盖，0 = 不显示）
 async function thinkingMock(body, speed, thinkMs) {
   const ms = Number.isFinite(Number(thinkMs)) ? Number(thinkMs) : 420;
   if (ms <= 0) return;
   const row = el("div", "pv-msg pv-thinking");
-  row.appendChild(el("span", "", "正在思考"));
+  const badge = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  badge.setAttribute("class", "pv-think-badge");
+  badge.setAttribute("viewBox", "0 0 24 24");
+  badge.setAttribute("fill", "none");
+  const c = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+  c.setAttribute("cx", "12");
+  c.setAttribute("cy", "12");
+  c.setAttribute("r", "9");
+  c.setAttribute("stroke", "#111213");
+  c.setAttribute("stroke-width", "2.6");
+  c.setAttribute("stroke-linecap", "round");
+  c.setAttribute("stroke-dasharray", "42 18");
+  badge.appendChild(c);
+  row.appendChild(badge);
+  row.appendChild(el("span", "", "正在深度思考..."));
   const t = el("span", "typing");
   t.append(el("span"), el("span"), el("span"));
   row.appendChild(t);
@@ -1257,7 +1318,7 @@ async function countdownMock(node, seconds, speed, label) {
 async function startTrial() {
   const editing = currentEditing();
   if (!editing) return;
-  state.trial = { list: editing.items, timing: editing.timing, idx: 0, results: {}, running: true };
+  state.trial = { list: editing.items, timing: editing.timing, idx: 0, results: {}, running: true, showAnswered: false };
   toast('已进入试填：按真实节奏模拟（可调倍速）');
   await renderTrial();
 }
@@ -1265,6 +1326,8 @@ async function startTrial() {
 function exitTrial() {
   state.trial = null;
   toast('已退出试填');
+  const tools = document.querySelector('.screen-tools');
+  if (tools) { tools.innerHTML = ''; tools.classList.add('hidden'); }
   renderPhoneOnly();
 }
 
@@ -1331,10 +1394,17 @@ function trialControl(sub, value, active, onPick, withTitle = true) {
     else inp.type = 'text';
     inp.placeholder = sub.placeholder || '请输入…';
     inp.value = value && value.text ? value.text : '';
+    if (sub.maxLen > 0) inp.maxLength = Number(sub.maxLen);   // 硬上限：与被试端一致
     if (!active) inp.setAttribute('readonly', 'readonly');
-    else inp.addEventListener('input', () => onPick && onPick());
+    else inp.addEventListener('input', () => { if (count) refreshCount(); onPick && onPick(); });
     box.appendChild(inp);
-    if (sub.maxLen) box.appendChild(el('div', 'pv-anchor', `最多 ${sub.maxLen} 字`));
+    const count = sub.maxLen ? el('div', 'pv-count') : null;
+    const refreshCount = () => {
+      count.textContent = `${inp.value.length}/${sub.maxLen}`;
+      count.classList.toggle('near', inp.value.length >= Math.max(1, Number(sub.maxLen) - 20));
+    };
+    if (count) { refreshCount(); box.appendChild(count); }
+    if (sub.maxLen && !active && count) count.textContent = `${inp.value.length}/${sub.maxLen}`;
   } else if (sub.type === 'rating') {
     const row = el('div', 'trial-opts rating-row');
     for (let v = Number(sub.min) || 1; v <= (Number(sub.max) || 5); v += 1) {
@@ -1404,7 +1474,7 @@ function trialControl(sub, value, active, onPick, withTitle = true) {
   return { node: box, payloadOf, echoOf, empty };
 }
 
-// 题目卡片：active = 可交互，否则为已提交的只读展示
+// 题目卡片：active = 可交互；已提交卡片默认整体隐藏（与被试端一致），可单独显示
 function trialQuestionCard(ctx, item, index, active, result, handlers) {
   const card = el('div', 'pv-qcard' + (active ? ' active' : ' done'));
   const head = el('div', 'pv-qhead');
@@ -1413,13 +1483,15 @@ function trialQuestionCard(ctx, item, index, active, result, handlers) {
   const timer = el('span', 'pv-timer hidden');            // 右上角倒计时（issue 1）
   head.appendChild(timer);
   if (!active) {
-    const toggle = el('button', 'mini-btn pv-qtoggle', '折叠');   // 已答题的折叠按钮（issue 2）
+    const shown = !!(state.trial && state.trial.showAnswered);
+    const toggle = el('button', 'mini-btn pv-qtoggle', shown ? '隐藏' : '显示');
     toggle.type = 'button';
     toggle.addEventListener('click', () => {
-      const collapsed = card.classList.toggle('collapsed');
-      toggle.textContent = collapsed ? '展开' : '折叠';
+      const hidden = card.classList.toggle('answered-hidden');
+      toggle.textContent = hidden ? '显示' : '隐藏';
     });
     head.appendChild(toggle);
+    if (!shown) card.classList.add('answered-hidden');
   }
   card.appendChild(head);
   if (item.text) card.appendChild(el('div', 'pv-qtext', item.text));
@@ -1504,6 +1576,7 @@ async function renderTrial() {
   ctx.body.innerHTML = '';
   let activeCard = null;
   let activeHandlers = null;
+  updateTrialTools(ctx, trial);
   // 提交按钮的可用性：已作答 且 门控（阅读停留 / 最短提交）已到 —— 与正式被试端一致
   const gateItem = trial.list[trial.idx];
   const gateAnswerable = !!gateItem && !['message', 'gate', 'debrief'].includes(gateItem.type);
@@ -1522,12 +1595,22 @@ async function renderTrial() {
     const active = i === trial.idx;
     if (item.type === 'message') {
       if (!String(item.text || '').trim()) continue;
-      if (!active) { ctx.body.appendChild(el('div', 'pv-msg', item.text)); continue; }
-      // 当前消息：延迟 → 等待（不显示剩余时间）；然后思考 + 流式
+      if (!active) { appendTrialDivider(ctx.body, item.type); ctx.body.appendChild(el('div', 'pv-msg', item.text)); continue; }
+      // 当前消息：延迟 → 等待（不显示剩余时间）；然后深度思考 + 流式
       const delaySec = effLimit(item, 'delay', trial.timing);
       if (delaySec > 0) {
         const row = el('div', 'pv-msg pv-thinking');
-        row.appendChild(el('span', '', '对方正在输入…'));
+        const badge = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        badge.setAttribute('class', 'pv-think-badge');
+        badge.setAttribute('viewBox', '0 0 24 24');
+        badge.setAttribute('fill', 'none');
+        const bc = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        bc.setAttribute('cx', '12'); bc.setAttribute('cy', '12'); bc.setAttribute('r', '9');
+        bc.setAttribute('stroke', '#111213'); bc.setAttribute('stroke-width', '2.6');
+        bc.setAttribute('stroke-linecap', 'round'); bc.setAttribute('stroke-dasharray', '42 18');
+        badge.appendChild(bc);
+        row.appendChild(badge);
+        row.appendChild(el('span', '', '正在深度思考...'));
         const dots = el('span', 'typing');
         dots.append(el('span'), el('span'), el('span'));
         row.appendChild(dots);
@@ -1536,6 +1619,7 @@ async function renderTrial() {
         await sleepMs(delaySec * 1000, speed);
         row.remove();
       }
+      appendTrialDivider(ctx.body, 'message');
       const node = el('div', 'pv-msg');
       ctx.body.appendChild(node);
       const rhythm = trialRhythm(item, trial.timing);
@@ -1598,6 +1682,42 @@ async function renderTrial() {
   }
 }
 
+// 试填中相邻材料消息之间的分割线（与被试端一致）
+function appendTrialDivider(body, upcomingType) {
+  const last = body.lastElementChild;
+  if (last && (last.classList.contains('pv-msg') || last.classList.contains('pv-divider'))) {
+    body.appendChild(el('div', 'pv-divider'));
+  }
+}
+
+// 试填顶栏工具：已答题(N) 显示/隐藏 + 重做
+function updateTrialTools(ctx, trial) {
+  const tools = document.querySelector('.screen-tools');
+  if (!tools) return;
+  const answerableCount = () => {
+    let n = 0;
+    for (let i = 0; i < trial.idx && i < trial.list.length; i += 1) {
+      const t = trial.list[i].type;
+      if (t !== 'message' && t !== 'gate' && t !== 'debrief') n += 1;
+    }
+    return n;
+  };
+  tools.innerHTML = '';
+  tools.classList.remove('hidden');
+  const bAns = el('button', 'mini-btn', `${trial.showAnswered ? '隐藏' : '显示'}已答题（${answerableCount()}）`);
+  bAns.type = 'button';
+  bAns.onclick = () => { trial.showAnswered = !trial.showAnswered; renderTrial(); };
+  const bRedo = el('button', 'mini-btn', '重做');
+  bRedo.type = 'button';
+  bRedo.onclick = () => {
+    trial.idx = 0;
+    trial.results = {};
+    trial.showAnswered = false;
+    renderTrial();
+  };
+  tools.append(bAns, bRedo);
+}
+
 function mockScrollTop(screenBody, node) {
   if (!screenBody) return;
   if (!node) { screenBody.scrollTop = screenBody.scrollHeight; return; }
@@ -1616,10 +1736,10 @@ function renderExpList() {
   const box = el('div', 'grow');
   box.append(
     el('h2', '', '实验管理'),
-    el('p', 'panel-sub', '实验是可复用的题目模板：一套题目 + 计时默认值。问卷「插入实验」时整组复制其题目，复制后即可逐条修改。只有 9 种题目——量表是多道打分题，创作是一个题组（广告语 + 创作说明同屏作答、一次提交）。')
+    el('p', 'panel-sub', '实验是可复用的题目模板：一套题目 + 计时默认值。问卷「插入实验」时整组复制其题目，复制后即可逐条修改。')
   );
   const btn = el('button', 'primary-btn', '+ 新建实验');
-  btn.onclick = () => openExperimentModal({ mode: 'new' });
+  btn.onclick = () => createExperimentDirect({ copyFrom: null });
   head.append(box, btn);
   $main.appendChild(head);
 
@@ -1646,7 +1766,7 @@ function renderExpList() {
     const td6 = el('td');
     const actions = el('div', 'row-actions');
     const bCopy = el('button', 'ghost-btn', '复制');
-    bCopy.onclick = (e) => { e.stopPropagation(); openExperimentModal({ mode: 'copy', source: exp }); };
+    bCopy.onclick = (e) => { e.stopPropagation(); createExperimentDirect({ copyFrom: exp }); };
     const bDel = el('button', 'ghost-btn danger', '删除');
     bDel.onclick = (e) => { e.stopPropagation(); removeExperiment(exp); };
     const bEdit = el('button', 'ghost-btn', '进入编辑');
@@ -1676,17 +1796,23 @@ async function renderExpEditor(id) {
   state.editingExp = { id: experiment.id, name: experiment.name, timing: { ...experiment.timing }, items: experiment.items.map((it) => ({ ...it, collapsed: false })) };
   state.selected = null;
   state.trial = null;
+  state.expBaseline = JSON.stringify({ n: experiment.name, t: experiment.timing, i: experiment.items.map(stripLocal) });
   setSidebarMode('outline');       // 题目已就绪，切到题目大纲
   renderExpEditorBody();
 }
+
+// 未命名占位名：编辑器里显示为空，保存 / 返回保存时强制填写
+const UNNAMED_EXP = '未命名实验';
+const UNNAMED_Q = '未命名问卷';
 
 function renderExpEditorBody() {
   const exp = state.editingExp;
   const body = el('div');
 
-  const secBasic = sectionHead('模板信息', '实验是可复用的题目模板；问卷「插入实验」时整组复制其题目，复制后即可逐条修改。');
+  const secBasic = sectionHead('模板信息', '实验是可复用的题目模板：一套题目 + 计时默认值。问卷「插入实验」时整组复制其题目，复制后即可逐条修改。');
   secBasic.id = 'sec-basic';
-  const nameField = makeField('实验名称', exp.name, 1);
+  const nameField = makeField('实验名称', exp.name === UNNAMED_EXP ? '' : exp.name, 1);
+  nameField.input.placeholder = '请填写实验名称';
   nameField.input.addEventListener('input', () => { exp.name = nameField.input.value; });
   secBasic.appendChild(nameField.wrap);
   body.appendChild(secBasic);
@@ -1723,32 +1849,47 @@ function renderExpEditorBody() {
   secItems.appendChild(editor.wrap);
   body.appendChild(secItems);
 
+  // 保存：名称必填；exit = 保存后返回列表（返回确认弹窗复用）
+  const doSave = async (opts = {}) => {
+    const name = (exp.name || '').trim();
+    if (!name || name === UNNAMED_EXP) {
+      const msg = '请先填写实验名称';
+      if (opts.modal) { showModalError(msg); return false; }
+      toast(msg);
+      nameField.input.focus();
+      return false;
+    }
+    shell.saveBtn.disabled = true;
+    try {
+      await api('/api/admin/experiment/update', {
+        body: { id: exp.id, name, timing: exp.timing, items: exp.items.map(stripLocal) }
+      });
+      await reloadExperiments();
+      state.expBaseline = JSON.stringify({ n: name, t: exp.timing, i: exp.items.map(stripLocal) });
+      toast('已保存该实验模板');
+      state.trial = null;
+      if (opts.modal) closeModal();
+      location.hash = '#/exp';
+      return true;
+    } catch (err) {
+      toast(err.message || '保存失败，请重试');
+      return false;
+    } finally {
+      shell.saveBtn.disabled = false;
+    }
+  };
+
   const shell = editorShell({
-    title: `实验 · ${exp.name || '未命名'}`,
+    title: `实验 · ${(exp.name && exp.name !== UNNAMED_EXP) ? exp.name : '未命名'}`,
     backHash: '#/exp',
     saveLabel: '保存该实验',
     hint: `模板共 ${exp.items.length} 道题`,
     body,
     phoneTitle: '实验模板预览',
-    withTrial: true
+    withTrial: true,
+    onSave: doSave,
+    isDirty: () => JSON.stringify({ n: exp.name, t: exp.timing, i: exp.items.map(stripLocal) }) !== state.expBaseline
   });
-  shell.saveBtn.onclick = async () => {
-    if (!exp.name.trim()) return toast('请填写实验名称');
-    shell.saveBtn.disabled = true;
-    try {
-      await api('/api/admin/experiment/update', {
-        body: { id: exp.id, name: exp.name.trim(), timing: exp.timing, items: exp.items.map(stripLocal) }
-      });
-      await reloadExperiments();
-      toast('已保存该实验模板');
-      state.trial = null;
-      location.hash = '#/exp';
-    } catch (err) {
-      toast(err.message || '保存失败，请重试');
-    } finally {
-      shell.saveBtn.disabled = false;
-    }
-  };
   renderPhoneOnly();
 }
 
@@ -1758,33 +1899,35 @@ function stripLocal(item) {
   return out;
 }
 
-function openExperimentModal({ mode, source }) {
-  const isCopy = mode === 'copy';
-  const nameField = makeField('实验名称', isCopy ? `${source.name} 副本` : '', 1);
-  const body = el('div', 'modal-fields');
-  body.appendChild(el('p', 'modal-note', isCopy
-    ? `将完整复制「${source.name}」的题目与计时默认值。`
-    : '创建后生成空白模板，请进入编辑页插入题目。'));
-  body.appendChild(nameField.wrap);
-  openModal({
-    title: isCopy ? '复制实验模板' : '新建实验模板',
-    body,
-    confirmLabel: isCopy ? '复制并进入编辑' : '创建并进入编辑',
-    onConfirm: async () => {
-      const name = nameField.input.value.trim();
-      if (!name) return showModalError('实验名称不能为空');
-      let created;
-      try {
-        created = (await api('/api/admin/experiment/create', { body: { name, copyFrom: isCopy ? source.id : '' } })).experiment;
-      } catch (err) {
-        return showModalError(err.message || '创建失败，请重试');
-      }
-      await reloadExperiments();
-      closeModal();
-      toast(isCopy ? '已复制实验模板' : '已创建实验模板');
-      location.hash = `#/exp/${created.id}`;
-    }
-  });
+// 复制命名：在原名末尾加编号（1）（2）…，取第一个未占用的
+function numberedCopyTitle(base, existingTitles) {
+  const used = new Set((existingTitles || []).map((t) => String(t || '').trim()));
+  for (let n = 1; ; n += 1) {
+    const t = `${base}（${n}）`;
+    if (!used.has(t)) return t;
+  }
+}
+
+// 直接创建（免填名）：新建立即进入编辑器；复制停留在列表页（自动编号（1）（2）…）
+async function createExperimentDirect({ copyFrom }) {
+  let created;
+  try {
+    const name = copyFrom
+      ? numberedCopyTitle(copyFrom.name, state.experiments.map((e) => e.name))
+      : UNNAMED_EXP;
+    created = (await api('/api/admin/experiment/create', { body: { name, copyFrom: copyFrom ? copyFrom.id : '' } })).experiment;
+  } catch (err) {
+    toast(err.message || '创建失败，请重试');
+    return;
+  }
+  await reloadExperiments();
+  if (copyFrom) {
+    toast(`已复制为「${created.name}」，点击「进入编辑」修改`);
+    renderExpList();
+    return;
+  }
+  toast('已创建实验模板，进入编辑');
+  location.hash = `#/exp/${created.id}`;
 }
 
 function removeExperiment(exp) {
@@ -1819,7 +1962,7 @@ function renderQList() {
     el('p', 'panel-sub', '每份问卷 = 一条链接 + 一列题目 + 计时默认值。可逐题插入、批量插入打分题，或整组插入实验模板后逐条修改；数据按问卷隔离，被试编号按进入顺序自动分配。')
   );
   const btn = el('button', 'primary-btn', '+ 新建问卷');
-  btn.onclick = () => openQuestionnaireModal({ mode: 'new' });
+  btn.onclick = () => createQuestionnaireDirect({ copyFrom: null });
   head.append(box, btn);
   $main.appendChild(head);
 
@@ -1863,9 +2006,11 @@ function renderQList() {
     bEdit.onclick = (e) => { e.stopPropagation(); location.hash = `#/q/${q.id}`; };
     const bData = el('button', 'ghost-btn', '数据');
     bData.onclick = (e) => { e.stopPropagation(); location.hash = `#/q/${q.id}/data`; };
+    const bCopy = el('button', 'ghost-btn', '复制');
+    bCopy.onclick = (e) => { e.stopPropagation(); createQuestionnaireDirect({ copyFrom: q }); };
     const bDel = el('button', 'ghost-btn danger', '删除');
     bDel.onclick = (e) => { e.stopPropagation(); removeQuestionnaire(q); };
-    actions.append(bEdit, bData, bDel);
+    actions.append(bEdit, bData, bCopy, bDel);
     td6.appendChild(actions);
     row.appendChild(td6);
     row.addEventListener('dblclick', () => { location.hash = `#/q/${q.id}`; });
@@ -1876,33 +2021,26 @@ function renderQList() {
   $main.appendChild(wrap);
 }
 
-function openQuestionnaireModal({ mode, source }) {
-  const isCopy = mode === 'copy';
-  const nameField = makeField('问卷名称', isCopy ? `${source.title} 副本` : '', 1);
-  const body = el('div', 'modal-fields');
-  body.appendChild(el('p', 'modal-note', isCopy
-    ? `将完整复制「${source.title}」的题目与计时设置（不含数据）。`
-    : '新建问卷默认包含：欢迎语（空）、知情同意页、结束语（空）、结束说明页；可在编辑页增删改。'));
-  body.appendChild(nameField.wrap);
-  openModal({
-    title: isCopy ? '复制问卷' : '新建问卷',
-    body,
-    confirmLabel: isCopy ? '复制并进入编辑' : '创建并进入编辑',
-    onConfirm: async () => {
-      const title = nameField.input.value.trim();
-      if (!title) return showModalError('问卷名称不能为空');
-      let created;
-      try {
-        created = (await api('/api/admin/questionnaire/create', { body: { title, copyFrom: isCopy ? source.id : '' } })).questionnaire;
-      } catch (err) {
-        return showModalError(err.message || '创建失败，请重试');
-      }
-      await reloadQuestionnaires();
-      closeModal();
-      toast(isCopy ? '已复制问卷' : '已创建问卷');
-      location.hash = `#/q/${created.id}`;
-    }
-  });
+// 直接创建（免填名）：新建立即进入编辑器；复制停留在列表页（自动编号（1）（2）…）
+async function createQuestionnaireDirect({ copyFrom }) {
+  let created;
+  try {
+    const title = copyFrom
+      ? numberedCopyTitle(copyFrom.title, state.questionnaires.map((q) => q.title))
+      : UNNAMED_Q;
+    created = (await api('/api/admin/questionnaire/create', { body: { title, copyFrom: copyFrom ? copyFrom.id : '' } })).questionnaire;
+  } catch (err) {
+    toast(err.message || '创建失败，请重试');
+    return;
+  }
+  await reloadQuestionnaires();
+  if (copyFrom) {
+    toast(`已复制为「${created.title}」，点击「编辑」修改`);
+    renderQList();
+    return;
+  }
+  toast('已创建问卷，进入编辑');
+  location.hash = `#/q/${created.id}`;
 }
 
 function removeQuestionnaire(q) {
@@ -1950,6 +2088,7 @@ async function renderQEditor(id) {
   };
   state.selected = null;
   state.trial = null;
+  state.qBaseline = JSON.stringify({ n: questionnaire.title, t: questionnaire.timing, i: questionnaire.items.map(stripLocal) });
   setSidebarMode('outline');       // 题目已就绪，切到题目大纲
   renderQEditorBody();
 }
@@ -1960,7 +2099,8 @@ function renderQEditorBody() {
 
   const secBasic = sectionHead('问卷信息', '问卷 = 一条链接 + 一列题目 + 计时默认值。链接自动生成（8 位不透明短码），被试打开即作答。');
   secBasic.id = 'sec-basic';
-  const titleField = makeField('问卷名称', q.title, 1);
+  const titleField = makeField('问卷名称', q.title === UNNAMED_Q ? '' : q.title, 1);
+  titleField.input.placeholder = '请填写问卷名称';
   titleField.input.addEventListener('input', () => { q.title = titleField.input.value; });
   secBasic.appendChild(titleField.wrap);
   const linkRow = el('div', 'link-row');
@@ -2008,32 +2148,47 @@ function renderQEditorBody() {
   secItems.appendChild(editor.wrap);
   body.appendChild(secItems);
 
+  // 保存：名称必填；exit = 保存后返回列表（返回确认弹窗复用）
+  const doSave = async (opts = {}) => {
+    const title = (q.title || '').trim();
+    if (!title || title === UNNAMED_Q) {
+      const msg = '请先填写问卷名称';
+      if (opts.modal) { showModalError(msg); return false; }
+      toast(msg);
+      titleField.input.focus();
+      return false;
+    }
+    shell.saveBtn.disabled = true;
+    try {
+      await api('/api/admin/questionnaire/update', {
+        body: { id: q.id, title, timing: q.timing, items: q.items.map(stripLocal) }
+      });
+      await reloadQuestionnaires();
+      state.qBaseline = JSON.stringify({ n: title, t: q.timing, i: q.items.map(stripLocal) });
+      toast('已保存问卷');
+      state.trial = null;
+      if (opts.modal) closeModal();
+      location.hash = '#/q';
+      return true;
+    } catch (err) {
+      toast(err.message || '保存失败，请重试');
+      return false;
+    } finally {
+      shell.saveBtn.disabled = false;
+    }
+  };
+
   const shell = editorShell({
-    title: `修改问卷 · ${q.title || '未命名'}`,
+    title: `修改问卷 · ${(q.title && q.title !== UNNAMED_Q) ? q.title : '未命名'}`,
     backHash: '#/q',
     saveLabel: '保存问卷',
     hint: `共 ${q.items.length} 道题`,
     body,
     phoneTitle: q.title || '未命名问卷',
-    withTrial: true
+    withTrial: true,
+    onSave: doSave,
+    isDirty: () => JSON.stringify({ n: q.title, t: q.timing, i: q.items.map(stripLocal) }) !== state.qBaseline
   });
-  shell.saveBtn.onclick = async () => {
-    if (!q.title.trim()) return toast('请填写问卷名称');
-    shell.saveBtn.disabled = true;
-    try {
-      await api('/api/admin/questionnaire/update', {
-        body: { id: q.id, title: q.title.trim(), timing: q.timing, items: q.items.map(stripLocal) }
-      });
-      await reloadQuestionnaires();
-      toast('已保存问卷');
-      state.trial = null;
-      location.hash = '#/q';
-    } catch (err) {
-      toast(err.message || '保存失败，请重试');
-    } finally {
-      shell.saveBtn.disabled = false;
-    }
-  };
   renderPhoneOnly();
 }
 
@@ -2063,9 +2218,10 @@ async function renderQData(id) {
   const phead = el('div', 'panel-head');
   const box = el('div', 'grow');
   box.append(el('h2', '', `${questionnaire.title} · 数据`), el('p', 'panel-sub', `共 ${sessions.length} 位被试 · 问卷共 ${questionnaire.itemCount} 道题（其中 ${totalAnswers} 道需作答）。点击一行查看该被试的完整作答与对话。`));
-  const exportBtn = el('button', 'primary-btn', '导出 Excel');
+  const exportBtn = el('button', 'ghost-btn', '导出 Excel');
   exportBtn.onclick = () => exportXlsx(questionnaire);
-  phead.append(box, exportBtn);
+  const delBtn = el('button', 'ghost-btn danger', '删除数据');
+  phead.append(box, exportBtn, delBtn);
   panel.appendChild(phead);
 
   const linkRow = el('div', 'link-row');
@@ -2085,30 +2241,144 @@ async function renderQData(id) {
     return;
   }
 
+  // 筛选：状态 / 最短时长（分钟）
+  const filterRow = el('div', 'data-filters');
+  filterRow.appendChild(el('span', 'lbl', '筛选：'));
+  const statusSel = el('select', 'filter-select');
+  [['', '全部状态'], ['in_progress', '进行中'], ['completed', '已完成']].forEach(([v, label]) => {
+    const o = el('option', '', label);
+    o.value = v;
+    statusSel.appendChild(o);
+  });
+  const minDur = el('input', 'filter-num');
+  minDur.type = 'number';
+  minDur.min = '0';
+  minDur.placeholder = '时长≥(分钟)';
+  const resetBtn = el('button', 'mini-btn', '重置');
+  resetBtn.type = 'button';
+  resetBtn.onclick = () => { statusSel.value = ''; minDur.value = ''; applyFilters(); };
+  filterRow.append(statusSel, minDur, resetBtn);
+  panel.appendChild(filterRow);
+
   const wrap = el('div', 'data-table-wrap');
+  const countBar = el('p', 'filter-count');
   const table = el('table', 'data-table');
   const thead = el('thead');
   const tr = el('tr');
+  const checkTh = el('th', 'check-col hidden');
+  const checkAll = el('input');
+  checkAll.type = 'checkbox';
+  checkTh.appendChild(checkAll);
+  tr.appendChild(checkTh);
   for (const t of ['编号', '状态', '作答进度', '开始时间', '结束时间', '时长']) tr.appendChild(el('th', '', t));
   thead.appendChild(tr);
   const tbody = el('tbody');
-  for (const s of sessions) {
-    const row = el('tr');
-    row.append(
-      el('td', 'cell-strong', s.seq == null ? '—' : `#${s.seq}`),
-      el('td', '', s.statusLabel),
-      el('td', '', `${s.answerCount} / ${totalAnswers}`),
-      el('td', '', formatTime(s.startedAt)),
-      el('td', '', formatTime(s.endedAt)),
-      el('td', '', formatDuration(s.durationSec))
-    );
-    row.onclick = () => { location.hash = `#/q/${questionnaire.id}/s/${s.id}`; };
-    tbody.appendChild(row);
-  }
   table.append(thead, tbody);
   wrap.appendChild(table);
+  wrap.appendChild(countBar);
   panel.appendChild(wrap);
   $main.appendChild(panel);
+
+  // 勾选删除模式
+  let deleteMode = false;
+  const selectedIds = new Set();
+
+  const syncActionButtons = () => {
+    checkTh.classList.toggle('hidden', !deleteMode);
+    checkAll.checked = selectedIds.size > 0 && selectedIds.size === visibleRows().length;
+    delBtn.textContent = deleteMode ? `删除所选（${selectedIds.size}）` : '删除数据';
+    delBtn.classList.toggle('danger', true);
+    if (deleteMode && selectedIds.size) delBtn.textContent = `删除所选（${selectedIds.size}）`;
+  };
+
+  const visibleRows = () => sessions.filter((s) => {
+    if (statusSel.value && s.status !== statusSel.value) return false;
+    const minMinutes = Number(minDur.value) || 0;
+    if (minMinutes > 0 && (s.durationSec == null || s.durationSec < minMinutes * 60)) return false;
+    return true;
+  });
+
+  function renderRows() {
+    const rows = visibleRows();
+    tbody.innerHTML = '';
+    countBar.textContent = `显示 ${rows.length} / ${sessions.length} 条记录`;
+    for (const s of rows) {
+      const row = el('tr', deleteMode ? 'delete-mode' : '');
+      const checkTd = el('td', 'check-col' + (deleteMode ? '' : ' hidden'));
+      const cb = el('input');
+      cb.type = 'checkbox';
+      cb.checked = selectedIds.has(s.id);
+      cb.addEventListener('change', () => {
+        if (cb.checked) selectedIds.add(s.id);
+        else selectedIds.delete(s.id);
+        syncActionButtons();
+      });
+      checkTd.appendChild(cb);
+      row.appendChild(checkTd);
+      row.append(
+        el('td', 'cell-strong', s.seq == null ? '—' : `#${s.seq}`),
+        el('td', '', s.statusLabel),
+        el('td', '', `${s.answerCount} / ${totalAnswers}`),
+        el('td', '', formatTime(s.startedAt)),
+        el('td', '', formatTime(s.endedAt)),
+        el('td', '', formatDuration(s.durationSec))
+      );
+      row.onclick = (e) => {
+        if (deleteMode) {
+          if (e.target.tagName !== 'INPUT') cb.checked = !cb.checked;
+          if (cb.checked) selectedIds.add(s.id);
+          else selectedIds.delete(s.id);
+          syncActionButtons();
+          return;
+        }
+        location.hash = `#/q/${questionnaire.id}/s/${s.id}`;
+      };
+      tbody.appendChild(row);
+    }
+    syncActionButtons();
+  }
+
+  function applyFilters() {
+    selectedIds.clear();
+    renderRows();
+  }
+  statusSel.addEventListener('change', applyFilters);
+  minDur.addEventListener('input', applyFilters);
+  checkAll.addEventListener('change', () => {
+    const rows = visibleRows();
+    if (checkAll.checked) rows.forEach((s) => selectedIds.add(s.id));
+    else selectedIds.clear();
+    renderRows();
+  });
+
+  delBtn.onclick = () => {
+    if (!deleteMode) {
+      deleteMode = true;
+      selectedIds.clear();
+      renderRows();
+      return;
+    }
+    if (!selectedIds.size) { toast('请先勾选要删除的记录'); return; }
+    openModal({
+      title: '删除数据',
+      body: el('p', 'modal-note', `确定删除所选的 ${selectedIds.size} 条被试记录吗？连同其全部作答与对话记录一并清空，且不可恢复。`),
+      confirmLabel: '确认删除',
+      danger: true,
+      onConfirm: async () => {
+        try {
+          await api('/api/admin/questionnaire/sessions/delete', { body: { id: questionnaire.id, ids: [...selectedIds] } });
+        } catch (err) {
+          return showModalError(err.message || '删除失败，请重试');
+        }
+        closeModal();
+        toast(`已删除 ${selectedIds.size} 条记录`);
+        // 重新加载本页数据
+        renderQData(id);
+      }
+    });
+  };
+
+  renderRows();
 }
 
 async function exportXlsx(questionnaire) {
@@ -2220,6 +2490,353 @@ async function renderQSession(id, sid) {
   secMsg.appendChild(timeline);
   panel.appendChild(secMsg);
   $main.appendChild(panel);
+}
+
+/* ---------------------------------------------------------------- 个人设置页（#/settings） */
+
+function avatarNode(user, size) {
+  const wrap = el('div', 'avatar' + (user.avatar ? '' : ' empty'));
+  wrap.style.width = `${size}px`;
+  wrap.style.height = `${size}px`;
+  if (user.avatar) {
+    const img = el('img');
+    img.src = user.avatar;
+    img.alt = '头像';
+    wrap.appendChild(img);
+  } else {
+    wrap.textContent = (user.username || '?').slice(0, 1).toUpperCase();
+  }
+  return wrap;
+}
+
+async function saveMyAvatar(dataUrl) {
+  const res = await api('/api/auth/avatar', { body: { avatar: dataUrl } });
+  state.user.avatar = res.avatar;
+}
+
+// 头像裁剪弹窗：圆形视窗内拖动照片 / 滚轮缩放，确认后按可视区裁成 256×256
+function openAvatarCropper(src, onDone) {
+  const SIZE = 220;
+  const body = el('div', 'crop-wrap');
+  const viewport = el('div', 'crop-viewport');
+  const img = el('img', 'crop-img');
+  img.src = src;
+  img.draggable = false;
+  viewport.appendChild(img);
+  body.appendChild(viewport);
+  body.appendChild(el('p', 'crop-hint', '拖动照片调整位置 · 滚轮缩放'));
+
+  let baseScale = 1;
+  let scale = 1;
+  let x = 0;
+  let y = 0;
+  const apply = () => {
+    const w = img.naturalWidth * scale;
+    const h = img.naturalHeight * scale;
+    img.style.width = `${w}px`;
+    img.style.height = `${h}px`;
+    img.style.left = `${(SIZE - w) / 2 + x}px`;
+    img.style.top = `${(SIZE - h) / 2 + y}px`;
+  };
+  const clampXY = () => {
+    const maxX = Math.max(0, (img.naturalWidth * scale - SIZE) / 2);
+    const maxY = Math.max(0, (img.naturalHeight * scale - SIZE) / 2);
+    x = Math.min(maxX, Math.max(-maxX, x));
+    y = Math.min(maxY, Math.max(-maxY, y));
+  };
+  img.onload = () => {
+    baseScale = Math.max(SIZE / img.naturalWidth, SIZE / img.naturalHeight);
+    scale = baseScale;
+    apply();
+  };
+
+  let drag = null;
+  viewport.addEventListener('pointerdown', (e) => {
+    drag = { sx: e.clientX, sy: e.clientY, ox: x, oy: y };
+    viewport.setPointerCapture(e.pointerId);
+    viewport.classList.add('grabbing');
+  });
+  viewport.addEventListener('pointermove', (e) => {
+    if (!drag) return;
+    x = drag.ox + (e.clientX - drag.sx);
+    y = drag.oy + (e.clientY - drag.sy);
+    clampXY();
+    apply();
+  });
+  const endDrag = () => { drag = null; viewport.classList.remove('grabbing'); };
+  viewport.addEventListener('pointerup', endDrag);
+  viewport.addEventListener('pointercancel', endDrag);
+  viewport.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    scale = Math.min(baseScale * 4, Math.max(baseScale, scale * (e.deltaY < 0 ? 1.12 : 0.89)));
+    clampXY();
+    apply();
+  }, { passive: false });
+
+  openModal({
+    title: '裁剪头像',
+    body,
+    confirmLabel: '使用这张',
+    onConfirm: async () => {
+      const out = document.createElement('canvas');
+      out.width = out.height = 256;
+      out.getContext('2d').drawImage(img, -x / scale, -y / scale, SIZE / scale, SIZE / scale, 0, 0, 256, 256);
+      await onDone(out.toDataURL('image/jpeg', 0.88));
+    }
+  });
+}
+
+function renderSettings() {
+  $main.innerHTML = '';
+  const panel = el('div', 'page-panel');
+
+  // 左上角返回
+  const back = el('button', 'ghost-btn settings-back', '← 返回');
+  back.type = 'button';
+  back.addEventListener('click', () => { location.hash = '#/exp'; });
+  panel.appendChild(back);
+
+  const head = el('div', 'settings-head');
+  head.appendChild(el('h2', 'page-title', '个人设置'));
+  head.appendChild(el('p', 'page-sub', '管理您的账号信息与登录密码。'));
+  panel.appendChild(head);
+
+  // 头像
+  const secAvatar = sectionHead('头像', '支持 PNG / JPG / WebP，自动压缩后保存。');
+  const avatarRow = el('div', 'avatar-row');
+  const avatarBox = avatarNode(state.user, 72);
+  avatarRow.appendChild(avatarBox);
+  const fileBtn = el('button', 'ghost-btn', '上传新头像');
+  fileBtn.type = 'button';
+  const fileInput = el('input');
+  fileInput.type = 'file';
+  fileInput.accept = 'image/*';
+  fileInput.classList.add('hidden');
+  const removeBtn = el('button', 'ghost-btn', '移除头像');
+  removeBtn.type = 'button';
+  const btnRow = el('div', 'avatar-btns');
+  btnRow.append(fileBtn, removeBtn);
+  avatarRow.appendChild(btnRow);
+  secAvatar.appendChild(avatarRow);
+  panel.appendChild(secAvatar);
+
+  fileBtn.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', () => {
+    const file = fileInput.files && fileInput.files[0];
+    fileInput.value = '';
+    if (!file) return;
+    if (!/^image\//.test(file.type)) { toast('请选择图片文件'); return; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      // 圆形裁剪预览：拖动调整位置、滚轮缩放，确认后输出 256×256
+      openAvatarCropper(reader.result, async (dataUrl) => {
+        try {
+          await saveMyAvatar(dataUrl);
+          const fresh = avatarNode(state.user, 72);
+          avatarBox.replaceWith(fresh);
+          toast('头像已更新');
+        } catch (err) {
+          if (!maybeSessionExpired(err)) toast(err.message || '头像保存失败');
+        }
+      });
+    };
+    reader.readAsDataURL(file);
+  });
+  removeBtn.addEventListener('click', async () => {
+    try {
+      await saveMyAvatar('');
+      const fresh = avatarNode(state.user, 72);
+      avatarBox.replaceWith(fresh);
+      toast('已移除头像');
+    } catch (err) {
+      if (!maybeSessionExpired(err)) toast(err.message || '操作失败');
+    }
+  });
+  panel.appendChild(fileInput);
+
+  // 账号信息
+  const secInfo = sectionHead('账号信息');
+  const infoRow = el('div', 'kv-row');
+  infoRow.appendChild(el('span', 'kv-key', '用户账号'));
+  infoRow.appendChild(el('span', 'kv-val', state.user.username));
+  secInfo.appendChild(infoRow);
+  const roleRow = el('div', 'kv-row');
+  roleRow.appendChild(el('span', 'kv-key', '角色'));
+  roleRow.appendChild(el('span', 'kv-val', state.user.role === 'admin' ? '管理员' : '普通主试'));
+  secInfo.appendChild(roleRow);
+  if (state.user.role === 'admin') {
+    const usersBtn = el('button', 'ghost-btn', '用户管理');
+    usersBtn.type = 'button';
+    usersBtn.addEventListener('click', () => { location.hash = '#/users'; });
+    secInfo.appendChild(usersBtn);
+  }
+  panel.appendChild(secInfo);
+
+  // 修改密码
+  const secPwd = sectionHead('修改密码', '修改后需要使用新密码重新登录。');
+  const oldField = makeField('当前密码', '');
+  oldField.input.type = 'password';
+  const newField = makeField('新密码（至少 6 位）', '');
+  newField.input.type = 'password';
+  const newField2 = makeField('确认新密码', '');
+  newField2.input.type = 'password';
+  secPwd.append(oldField.wrap, newField.wrap, newField2.wrap);
+  const pwdBtn = el('button', 'primary-btn', '保存新密码');
+  pwdBtn.type = 'button';
+  pwdBtn.addEventListener('click', async () => {
+    const oldPassword = oldField.input.value;
+    const newPassword = newField.input.value;
+    if (!oldPassword || newPassword.length < 6) { toast('请填写当前密码，新密码至少 6 位'); return; }
+    if (newPassword !== newField2.input.value) { toast('两次输入的新密码不一致'); return; }
+    pwdBtn.disabled = true;
+    try {
+      await api('/api/auth/password', { body: { oldPassword, newPassword } });
+      oldField.input.value = newField.input.value = newField2.input.value = '';
+      toast('密码已修改');
+    } catch (err) {
+      if (!maybeSessionExpired(err)) toast(err.message || '密码修改失败');
+    } finally {
+      pwdBtn.disabled = false;
+    }
+  });
+  secPwd.appendChild(pwdBtn);
+  panel.appendChild(secPwd);
+
+  // 退出登录
+  const secOut = sectionHead('登录状态');
+  const outBtn = el('button', 'ghost-btn danger', '退出登录');
+  outBtn.type = 'button';
+  outBtn.addEventListener('click', async () => {
+    try { await api('/api/auth/logout', { body: {} }); } catch { /* 忽略 */ }
+    state.token = '';
+    sessionStorage.removeItem(TOKEN_KEY);
+    location.replace('/');
+  });
+  secOut.appendChild(outBtn);
+  panel.appendChild(secOut);
+
+  $main.appendChild(panel);
+}
+
+/* ---------------------------------------------------------------- 用户管理页（#/users，管理员） */
+
+async function renderUsers() {
+  if (!state.user || state.user.role !== 'admin') {
+    location.replace('#/exp');
+    return;
+  }
+  $main.innerHTML = '';
+  const panel = el('div', 'page-panel');
+
+  const head = el('div', 'settings-head');
+  head.appendChild(el('h2', 'page-title', '用户管理'));
+  head.appendChild(el('p', 'page-sub', '查看与维护系统用户：新增账号、修改资料、重置密码、删除用户。'));
+  panel.appendChild(head);
+
+  const addBtn = el('button', 'primary-btn', '＋ 新增用户');
+  addBtn.type = 'button';
+  addBtn.addEventListener('click', () => openUserEditor(null));
+  panel.appendChild(addBtn);
+
+  const box = el('div', 'users-list');
+  panel.appendChild(box);
+  $main.appendChild(panel);
+
+  let users = [];
+  try {
+    users = (await api('/api/admin/users')).users;
+  } catch (err) {
+    if (!maybeSessionExpired(err)) toast(err.message || '用户列表加载失败');
+    return;
+  }
+
+  const table = el('table', 'users-table');
+  const thead = el('thead');
+  thead.appendChild(el('tr', '', '')).append(
+    el('th', '', '用户'), el('th', '', '角色'), el('th', '', '创建时间'), el('th', '', '操作')
+  );
+  const tbody = el('tbody');
+  for (const u of users) {
+    const tr = el('tr');
+    const nameCell = el('td');
+    const nameWrap = el('div', 'user-cell');
+    nameWrap.appendChild(avatarNode(u, 34));
+    nameWrap.appendChild(el('span', '', u.username));
+    nameCell.appendChild(nameWrap);
+    tr.appendChild(nameCell);
+    tr.appendChild(el('td', '', u.role === 'admin' ? '管理员' : '普通主试'));
+    tr.appendChild(el('td', '', formatTime(u.createdAt)));
+    const ops = el('td');
+    const bEdit = el('button', 'mini-btn', '编辑');
+    bEdit.type = 'button';
+    bEdit.addEventListener('click', () => openUserEditor(u));
+    const bDel = el('button', 'mini-btn', '删除');
+    bDel.type = 'button';
+    if (u.id === state.user.id) bDel.disabled = true;
+    bDel.addEventListener('click', () => {
+      openModal({
+        title: '删除用户',
+        body: el('p', 'modal-text', `确定删除用户「${u.username}」吗？该操作不可恢复。`),
+        confirmLabel: '删除',
+        danger: true,
+        onConfirm: async () => {
+          await api('/api/admin/users/delete', { body: { id: u.id } });
+          toast('已删除');
+          renderUsers();
+        }
+      });
+    });
+    ops.append(bEdit, bDel);
+    tr.appendChild(ops);
+    tbody.appendChild(tr);
+  }
+  table.append(thead, tbody);
+  box.appendChild(table);
+}
+
+// 新增 / 编辑用户弹窗
+function openUserEditor(user) {
+  const isEdit = !!user;
+  const body = el('div', 'form-grid');
+  const nameField = makeField('用户账号', isEdit ? user.username : '');
+  const roleField = el('label', 'field');
+  roleField.appendChild(el('span', '', '角色'));
+  const roleSel = el('select');
+  ['user', 'admin'].forEach((r) => {
+    const opt = el('option', '', r === 'admin' ? '管理员' : '普通主试');
+    opt.value = r;
+    roleSel.appendChild(opt);
+  });
+  roleSel.value = isEdit ? user.role : 'user';
+  roleField.appendChild(roleSel);
+  const pwdLabel = isEdit ? '重置密码（留空则不修改）' : '初始密码（至少 6 位）';
+  const pwdField = makeField(pwdLabel, '');
+  pwdField.input.type = 'password';
+  body.append(nameField.wrap, roleField, pwdField.wrap);
+
+  openModal({
+    title: isEdit ? `编辑用户 · ${user.username}` : '新增用户',
+    body,
+    onConfirm: async () => {
+      if (isEdit) {
+        await api('/api/admin/users/update', {
+          body: {
+            id: user.id,
+            username: nameField.input.value.trim(),
+            role: roleSel.value,
+            password: pwdField.input.value || undefined
+          }
+        });
+        toast('已保存');
+      } else {
+        await api('/api/admin/users/create', {
+          body: { username: nameField.input.value.trim(), role: roleSel.value, password: pwdField.input.value }
+        });
+        toast('已创建');
+      }
+      renderUsers();
+    }
+  });
 }
 
 /* ---------------------------------------------------------------- 启动 */

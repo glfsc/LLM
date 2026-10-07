@@ -15,8 +15,8 @@
 | 启动命令 | `node server.js`（等价 `npm start`） |
 | 监听端口 | 默认 `3000`，可用环境变量 `PORT` 覆盖 |
 | 静态资源 | `public/` 目录 |
-| 入口地址 | 被试端 `/chat?q=<问卷ID>`；管理端 `/admin`；健康检查 `/api/health` |
-| 管理密码 | 默认 `admin123`，存于 `settings` 表（见「六、上线前检查」修改方法） |
+| 入口地址 | 首页 `/`（账号密码登录 · 注册 · 问卷链接入口）；被试端 `/chat?q=<问卷ID>`；管理端 `/admin`（需登录）；健康检查 `/api/health` |
+| 账号 | 首次启动自动创建管理员 `admin`（初始密码 `admin123`，登录后请立即在「设置 → 修改密码」中修改）；普通账号可在登录页自助注册 |
 
 首次启动会自动建表，并灌入种子数据：两个实验模板（组别3 / 组别4）+ 两份预设问卷。
 
@@ -78,8 +78,7 @@ node server.js
 看到类似输出即成功：
 
 ```
-管理端入口：  http://localhost:3000/admin
-被试端示例：  http://localhost:3000/chat?q=xxxxxxxx
+登录入口：  http://localhost:3000/
 ```
 
 另开一个终端验证：`curl http://127.0.0.1:3000/api/health` 应返回 `{"ok":true}`。
@@ -156,7 +155,7 @@ sudo apt install -y certbot python3-certbot-nginx
 sudo certbot --nginx -d glfsc.ltd
 ```
 
-完成后访问 `https://glfsc.ltd` 应看到首页，`https://glfsc.ltd/admin` 进入管理端。
+完成后访问 `https://glfsc.ltd` 应看到登录页，登录后进入管理端。
 
 ---
 
@@ -171,14 +170,7 @@ sudo certbot --nginx -d glfsc.ltd
 
 ## 六、上线前检查清单
 
-- [ ] **修改管理密码**（必须！默认 `admin123`，当前版本管理界面没有改密入口，用命令改）：
-
-  ```bash
-  cd /opt/experiment-chat
-  pm2 stop experiment-chat
-  node -e "const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync('data.db');db.prepare(\"UPDATE settings SET value='你的新密码' WHERE key='admin_password'\").run();console.log('密码已更新')"
-  pm2 start experiment-chat
-  ```
+- [ ] **修改管理员密码**（必须！初始密码为 `admin123`）：登录后进入左下角「设置 → 修改密码」直接修改，无需命令行
 
 - [ ] 服务器防火墙 / 安全组只放行 `22`、`80`、`443`，**不要对公网开放 3000**
 - [ ] 在管理端建好各分组问卷，记录每组被试链接 `https://glfsc.ltd/chat?q=<问卷ID>`

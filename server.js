@@ -533,44 +533,158 @@ async function handleFinish(req, res) {
   sendJson(res, 200, { session: { id: session.id, status: session.status, duration_sec: session.duration_sec } });
 }
 
-// ---------------------------------------------------------------- 管理端鉴权
-const ADMIN_TOKEN_TTL = 24 * 60 * 60 * 1000;
-const adminTokens = new Map();
+// ---------------------------------------------------------------- 鉴权（用户账号）
+const TOKEN_TTL = 24 * 60 * 60 * 1000;
+const tokens = new Map(); // token -> { userId, expiresAt }
 
-function issueAdminToken() {
+function issueToken(user) {
   const token = randomUUID();
-  adminTokens.set(token, Date.now() + ADMIN_TOKEN_TTL);
+  tokens.set(token, { userId: user.id, expiresAt: Date.now() + TOKEN_TTL });
   return token;
 }
 
-function requireAdmin(req, res) {
+function revokeToken(token) {
+  tokens.delete(token);
+}
+
+// 返回当前登录用户；未登录 / 过期则已发送 401 并返回 null
+function requireUser(req, res) {
   const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
-  const expiresAt = adminTokens.get(token);
-  if (!token || !expiresAt || expiresAt < Date.now()) {
-    adminTokens.delete(token);
+  const hit = tokens.get(token);
+  if (!token || !hit || hit.expiresAt < Date.now()) {
+    tokens.delete(token);
     sendJson(res, 401, { error: 'unauthorized', message: '登录已失效，请重新登录' });
-    return false;
+    return null;
   }
-  return true;
+  const user = store.getUser(hit.userId);
+  if (!user) {
+    tokens.delete(token);
+    sendJson(res, 401, { error: 'unauthorized', message: '账号不存在，请重新登录' });
+    return null;
+  }
+  return user;
 }
 
-async function handleAdminLogin(req, res) {
+function requireAdmin(req, res) {
+  const user = requireUser(req, res);
+  if (!user) return null;
+  if (user.role !== 'admin') {
+    sendJson(res, 403, { error: 'forbidden', message: '需要管理员权限' });
+    return null;
+  }
+  return user;
+}
+
+// 数据按创建者完全隔离：每个账号（含管理员）只能看到和操作自己创建的实验 / 问卷
+function canAccess(user, row) {
+  return !!row && row.owner_id === user.id;
+}
+
+async function handleRegister(req, res) {
   const body = await readJsonBody(req);
-  const password = String(body.password || '');
-  const expected = store.getSetting('admin_password') || '';
-  if (!password || password !== expected) return sendJson(res, 401, { error: 'bad_credentials', message: '密码不正确' });
-  sendJson(res, 200, { token: issueAdminToken() });
+  try {
+    const user = store.createUser({ username: body.username, password: body.password, role: 'user' });
+    sendJson(res, 200, { token: issueToken(user), user: { id: user.id, username: user.username, role: user.role, avatar: user.avatar } });
+  } catch (err) {
+    sendJson(res, 400, { error: 'register_failed', message: err.message || '注册失败' });
+  }
 }
 
-async function handleAdminLogout(req, res) {
-  const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
-  adminTokens.delete(token);
+async function handleLogin(req, res) {
+  const body = await readJsonBody(req);
+  const user = store.getUserByName(body.username);
+  if (!user || !store.verifyPassword(user, String(body.password || ''))) {
+    return sendJson(res, 401, { error: 'bad_credentials', message: '账号或密码不正确' });
+  }
+  sendJson(res, 200, { token: issueToken(user), user: { id: user.id, username: user.username, role: user.role, avatar: user.avatar } });
+}
+
+async function handleLogout(req, res) {
+  revokeToken(String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim());
+  sendJson(res, 200, { ok: true });
+}
+
+function handleMe(req, res) {
+  const user = requireUser(req, res);
+  if (!user) return;
+  sendJson(res, 200, { user: { id: user.id, username: user.username, role: user.role, avatar: user.avatar } });
+}
+
+async function handleChangePassword(req, res) {
+  const user = requireUser(req, res);
+  if (!user) return;
+  const body = await readJsonBody(req);
+  if (!store.verifyPassword(user, String(body.oldPassword || ''))) {
+    return sendJson(res, 400, { error: 'bad_password', message: '当前密码不正确' });
+  }
+  try {
+    store.updateUserPassword(user.id, String(body.newPassword || ''));
+  } catch (err) {
+    return sendJson(res, 400, { error: 'bad_password', message: err.message || '密码修改失败' });
+  }
+  sendJson(res, 200, { ok: true });
+}
+
+async function handleAvatar(req, res) {
+  const user = requireUser(req, res);
+  if (!user) return;
+  const body = await readJsonBody(req);
+  const avatar = String(body.avatar || '');
+  if (avatar && !/^data:image\/(png|jpe?g|webp|gif);base64,/.test(avatar)) {
+    return sendJson(res, 400, { error: 'bad_avatar', message: '仅支持图片文件' });
+  }
+  if (avatar.length > 600 * 1024) {
+    return sendJson(res, 400, { error: 'avatar_too_large', message: '图片过大，请换一张较小的图片' });
+  }
+  store.updateUser(user.id, { avatar });
+  sendJson(res, 200, { avatar });
+}
+
+// ---------------------------------------------------------------- 用户管理（管理员）
+function handleUsersList(req, res) {
+  const user = requireAdmin(req, res);
+  if (!user) return;
+  sendJson(res, 200, { users: store.listUsers() });
+}
+
+async function handleUserCreate(req, res) {
+  const admin = requireAdmin(req, res);
+  if (!admin) return;
+  const body = await readJsonBody(req);
+  try {
+    sendJson(res, 200, { user: store.createUser(body) });
+  } catch (err) {
+    sendJson(res, 400, { error: 'user_create_failed', message: err.message || '创建失败' });
+  }
+}
+
+async function handleUserUpdate(req, res) {
+  const admin = requireAdmin(req, res);
+  if (!admin) return;
+  const body = await readJsonBody(req);
+  const target = store.getUser(String(body.id || '').trim());
+  if (!target) return sendJson(res, 404, { error: 'user_not_found', message: '用户不存在' });
+  try {
+    sendJson(res, 200, { user: store.updateUser(target.id, body) });
+  } catch (err) {
+    sendJson(res, 400, { error: 'user_update_failed', message: err.message || '修改失败' });
+  }
+}
+
+async function handleUserDelete(req, res) {
+  const admin = requireAdmin(req, res);
+  if (!admin) return;
+  const body = await readJsonBody(req);
+  const id = String(body.id || '').trim();
+  if (id === admin.id) return sendJson(res, 400, { error: 'self_delete', message: '不能删除自己的账号' });
+  const result = store.deleteUser(id);
+  if (!result.ok) return sendJson(res, 404, { error: 'user_not_found', message: '用户不存在' });
   sendJson(res, 200, { ok: true });
 }
 
 // GET /api/admin/meta —— 编辑器元信息（题型 / 限制 / 默认题目 / 设置）
 function handleAdminMeta(req, res) {
-  if (!requireAdmin(req, res)) return;
+  if (!requireUser(req, res)) return;
   sendJson(res, 200, {
     itemTypes: store.ITEM_TYPES,
     itemTypeLabels: store.ITEM_TYPE_LABELS,
@@ -595,90 +709,123 @@ async function handleAdminSaveSettings(req, res) {
   sendJson(res, 200, { settings: { resumeWindowHours: store.getResumeWindowHours() } });
 }
 
-// ---------------------------------------------------------------- 管理端 · 实验模板库
+// ---------------------------------------------------------------- 实验模板库（按创建者隔离）
 function handleAdminExperiments(req, res) {
-  if (!requireAdmin(req, res)) return;
-  sendJson(res, 200, { experiments: store.listExperiments() });
+  const user = requireUser(req, res);
+  if (!user) return;
+  sendJson(res, 200, { experiments: store.listExperiments(user.id) });
 }
 
 function handleAdminExperiment(req, res, url) {
-  if (!requireAdmin(req, res)) return;
-  const experiment = store.getExperimentPayload((url.searchParams.get('id') || '').trim());
-  if (!experiment) return sendJson(res, 404, { error: 'experiment_not_found', message: '实验不存在' });
-  sendJson(res, 200, { experiment });
+  const user = requireUser(req, res);
+  if (!user) return;
+  const experiment = store.getExperiment((url.searchParams.get('id') || '').trim());
+  if (!experiment || !canAccess(user, experiment)) {
+    return sendJson(res, 404, { error: 'experiment_not_found', message: '实验不存在' });
+  }
+  sendJson(res, 200, { experiment: store.getExperimentPayload(experiment.id) });
 }
 
 async function handleAdminExperimentCreate(req, res) {
-  if (!requireAdmin(req, res)) return;
+  const user = requireUser(req, res);
+  if (!user) return;
   const body = await readJsonBody(req);
   const name = String(body.name || '').trim();
   if (!name) return sendJson(res, 400, { error: 'bad_name', message: '实验名称不能为空' });
   const copyFrom = String(body.copyFrom || '').trim();
-  if (copyFrom && !store.getExperimentPayload(copyFrom)) {
-    return sendJson(res, 400, { error: 'copy_source_not_found', message: '复制来源实验不存在' });
+  if (copyFrom) {
+    const source = store.getExperiment(copyFrom);
+    if (!source || !canAccess(user, source)) {
+      return sendJson(res, 400, { error: 'copy_source_not_found', message: '复制来源实验不存在' });
+    }
   }
-  sendJson(res, 200, { experiment: store.createExperiment({ name, copyFrom: copyFrom || null }) });
+  sendJson(res, 200, { experiment: store.createExperiment({ name, copyFrom: copyFrom || null, ownerId: user.id }) });
 }
 
 async function handleAdminExperimentUpdate(req, res) {
-  if (!requireAdmin(req, res)) return;
+  const user = requireUser(req, res);
+  if (!user) return;
   const body = await readJsonBody(req);
-  const id = String(body.id || '').trim();
-  if (!store.getExperiment(id)) return sendJson(res, 404, { error: 'experiment_not_found', message: '实验不存在' });
+  const experiment = store.getExperiment(String(body.id || '').trim());
+  if (!experiment || !canAccess(user, experiment)) {
+    return sendJson(res, 404, { error: 'experiment_not_found', message: '实验不存在' });
+  }
   const name = String(body.name || '').trim();
   if (!name) return sendJson(res, 400, { error: 'bad_name', message: '实验名称不能为空' });
-  sendJson(res, 200, { experiment: store.updateExperiment(id, { name, timing: body.timing, items: body.items }) });
+  sendJson(res, 200, { experiment: store.updateExperiment(experiment.id, { name, timing: body.timing, items: body.items }) });
 }
 
 async function handleAdminExperimentDelete(req, res) {
-  if (!requireAdmin(req, res)) return;
+  const user = requireUser(req, res);
+  if (!user) return;
   const body = await readJsonBody(req);
-  const result = store.deleteExperiment(String(body.id || '').trim());
-  if (!result.ok) return sendJson(res, 404, { error: 'experiment_not_found', message: '实验不存在' });
+  const experiment = store.getExperiment(String(body.id || '').trim());
+  if (!experiment || !canAccess(user, experiment)) {
+    return sendJson(res, 404, { error: 'experiment_not_found', message: '实验不存在' });
+  }
+  store.deleteExperiment(experiment.id);
   sendJson(res, 200, { ok: true });
 }
 
-// ---------------------------------------------------------------- 管理端 · 问卷
+// ---------------------------------------------------------------- 问卷（按创建者隔离）
 function handleAdminQuestionnaires(req, res) {
-  if (!requireAdmin(req, res)) return;
-  sendJson(res, 200, { questionnaires: store.listQuestionnaires() });
+  const user = requireUser(req, res);
+  if (!user) return;
+  sendJson(res, 200, { questionnaires: store.listQuestionnaires(user.id) });
 }
 
 function handleAdminQuestionnaire(req, res, url) {
-  if (!requireAdmin(req, res)) return;
-  const questionnaire = store.getQuestionnairePayload((url.searchParams.get('id') || '').trim());
-  if (!questionnaire) return sendJson(res, 404, { error: 'questionnaire_not_found', message: '问卷不存在' });
-  sendJson(res, 200, { questionnaire });
+  const user = requireUser(req, res);
+  if (!user) return;
+  const questionnaire = store.getQuestionnaire((url.searchParams.get('id') || '').trim());
+  if (!questionnaire || !canAccess(user, questionnaire)) {
+    return sendJson(res, 404, { error: 'questionnaire_not_found', message: '问卷不存在' });
+  }
+  sendJson(res, 200, { questionnaire: store.getQuestionnairePayload(questionnaire.id) });
 }
 
 async function handleAdminQuestionnaireCreate(req, res) {
-  if (!requireAdmin(req, res)) return;
+  const user = requireUser(req, res);
+  if (!user) return;
   const body = await readJsonBody(req);
   const title = String(body.title || '').trim();
   if (!title) return sendJson(res, 400, { error: 'bad_title', message: '问卷名称不能为空' });
   const copyFrom = String(body.copyFrom || '').trim();
   if (copyFrom) {
-    const copied = store.copyQuestionnaire(copyFrom, title);
+    const source = store.getQuestionnaire(copyFrom);
+    if (!source || !canAccess(user, source)) {
+      return sendJson(res, 400, { error: 'copy_source_not_found', message: '复制来源问卷不存在' });
+    }
+    const copied = store.copyQuestionnaire(copyFrom, title, user.id);
     if (!copied) return sendJson(res, 400, { error: 'copy_source_not_found', message: '复制来源问卷不存在' });
     return sendJson(res, 200, { questionnaire: copied });
   }
-  sendJson(res, 200, { questionnaire: store.createQuestionnaire({ title, timing: body.timing, items: body.items }) });
+  sendJson(res, 200, { questionnaire: store.createQuestionnaire({ title, timing: body.timing, items: body.items, ownerId: user.id }) });
 }
 
 async function handleAdminQuestionnaireUpdate(req, res) {
-  if (!requireAdmin(req, res)) return;
+  const user = requireUser(req, res);
+  if (!user) return;
   const body = await readJsonBody(req);
-  const id = String(body.id || '').trim();
-  if (!store.getQuestionnaire(id)) return sendJson(res, 404, { error: 'questionnaire_not_found', message: '问卷不存在' });
+  const questionnaire = store.getQuestionnaire(String(body.id || '').trim());
+  if (!questionnaire || !canAccess(user, questionnaire)) {
+    return sendJson(res, 404, { error: 'questionnaire_not_found', message: '问卷不存在' });
+  }
   const title = String(body.title || '').trim();
   if (!title) return sendJson(res, 400, { error: 'bad_title', message: '问卷名称不能为空' });
-  sendJson(res, 200, { questionnaire: store.updateQuestionnaire(id, { title, timing: body.timing, items: body.items }) });
+  sendJson(res, 200, { questionnaire: store.updateQuestionnaire(questionnaire.id, { title, timing: body.timing, items: body.items }) });
 }
 
 async function handleAdminQuestionnaireDelete(req, res) {
-  if (!requireAdmin(req, res)) return;
+  const user = requireUser(req, res);
+  if (!user) return;
   const body = await readJsonBody(req);
-  const result = store.deleteQuestionnaire(String(body.id || '').trim(), { force: !!body.force });
+  const questionnaire = store.getQuestionnaire(String(body.id || '').trim());
+  if (!questionnaire || !canAccess(user, questionnaire)) {
+    if (questionnaire) return sendJson(res, 403, { error: 'forbidden', message: '无权删除该问卷' });
+    return sendJson(res, 404, { error: 'questionnaire_not_found', message: '问卷不存在' });
+  }
+  const result = store.deleteQuestionnaire(questionnaire.id, { force: !!body.force });
   if (!result.ok) {
     if (result.reason === 'not_found') return sendJson(res, 404, { error: 'questionnaire_not_found', message: '问卷不存在' });
     return sendJson(res, 400, {
@@ -754,13 +901,17 @@ function choiceColumns(items) { return answerAtoms(items).filter((a) => a.type =
 
 // GET /api/admin/questionnaire/sessions?id=
 function handleAdminQuestionnaireSessions(req, res, url) {
-  if (!requireAdmin(req, res)) return;
+  const user = requireUser(req, res);
+  if (!user) return;
   const id = (url.searchParams.get('id') || '').trim();
-  const questionnaire = store.getQuestionnairePayload(id);
-  if (!questionnaire) return sendJson(res, 404, { error: 'questionnaire_not_found', message: '问卷不存在' });
+  const questionnaire = store.getQuestionnaire(id);
+  if (!questionnaire || !canAccess(user, questionnaire)) {
+    return sendJson(res, 404, { error: 'questionnaire_not_found', message: '问卷不存在' });
+  }
+  const payload = store.getQuestionnairePayload(id);
 
   // 可作答题目数（消息类只呈现，不计入作答进度）
-  const answerable = questionnaire.itemCount - questionnaire.items.filter((it) => it.type === 'message').length;
+  const answerable = payload.itemCount - payload.items.filter((it) => it.type === 'message').length;
 
   const counts = new Map();
   for (const r of store.listResponseRows(id)) counts.set(r.session_id, (counts.get(r.session_id) || 0) + 1);
@@ -777,20 +928,37 @@ function handleAdminQuestionnaireSessions(req, res, url) {
   }));
 
   sendJson(res, 200, {
-    questionnaire: store.getQuestionnairePayload(id, { withItems: false }),
+    questionnaire: payload,
     sessions,
     sessionCount: sessions.length,
     answerable
   });
 }
 
+// POST /api/admin/questionnaire/sessions/delete { id, ids }
+async function handleAdminSessionsDelete(req, res, url) {
+  const user = requireUser(req, res);
+  if (!user) return;
+  const body = await readJsonBody(req);
+  const id = String(body.id || '').trim();
+  const questionnaire = store.getQuestionnaire(id);
+  if (!questionnaire || !canAccess(user, questionnaire)) {
+    return sendJson(res, 404, { error: 'questionnaire_not_found', message: '问卷不存在' });
+  }
+  const result = store.deleteSessions(id, body.ids);
+  sendJson(res, 200, { ok: true, deleted: result.deleted });
+}
+
 // GET /api/admin/questionnaire/session?id=&sid=
 function handleAdminQuestionnaireSession(req, res, url) {
-  if (!requireAdmin(req, res)) return;
+  const user = requireUser(req, res);
+  if (!user) return;
   const id = (url.searchParams.get('id') || '').trim();
   const sid = (url.searchParams.get('sid') || '').trim();
-  const questionnaire = store.getQuestionnairePayload(id, { withItems: false });
-  if (!questionnaire) return sendJson(res, 404, { error: 'questionnaire_not_found', message: '问卷不存在' });
+  const questionnaire = store.getQuestionnaire(id);
+  if (!questionnaire || !canAccess(user, questionnaire)) {
+    return sendJson(res, 404, { error: 'questionnaire_not_found', message: '问卷不存在' });
+  }
   const session = store.getSession(sid);
   if (!session || session.questionnaire_id !== id) return sendJson(res, 404, { error: 'session_not_found', message: '会话不存在' });
 
@@ -800,7 +968,7 @@ function handleAdminQuestionnaireSession(req, res, url) {
   const labels = itemLabelMap(items);
 
   sendJson(res, 200, {
-    questionnaire,
+    questionnaire: store.getQuestionnairePayload(id, { withItems: false }),
     session: {
       id: session.id,
       seq: session.seq == null ? null : Number(session.seq),
@@ -836,12 +1004,16 @@ function handleAdminQuestionnaireSession(req, res, url) {
 
 // GET /api/admin/questionnaire/export.xlsx?id=
 function handleAdminQuestionnaireExport(req, res, url) {
-  if (!requireAdmin(req, res)) return;
+  const user = requireUser(req, res);
+  if (!user) return;
   const id = (url.searchParams.get('id') || '').trim();
-  const questionnaire = store.getQuestionnairePayload(id);
-  if (!questionnaire) return sendJson(res, 404, { error: 'questionnaire_not_found', message: '问卷不存在' });
+  const questionnaire = store.getQuestionnaire(id);
+  if (!questionnaire || !canAccess(user, questionnaire)) {
+    return sendJson(res, 404, { error: 'questionnaire_not_found', message: '问卷不存在' });
+  }
+  const payload = store.getQuestionnairePayload(id);
 
-  const items = questionnaire.items;
+  const items = payload.items;
   const labels = itemLabelMap(items);
 
   const ratingPrefixes = scaleColumns(items);
@@ -931,7 +1103,7 @@ function handleAdminQuestionnaireExport(req, res, url) {
     }
   ];
 
-  const fileName = `${questionnaire.title}.xlsx`;
+  const fileName = `${payload.title}.xlsx`;
   const buf = buildXlsx(sheets);
   res.writeHead(200, {
     'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -955,11 +1127,21 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/finish' && req.method === 'POST') return await handleFinish(req, res);
 
     // 管理端 · 登录与元信息
-    if (pathname === '/api/admin/login' && req.method === 'POST') return await handleAdminLogin(req, res);
-    if (pathname === '/api/admin/logout' && req.method === 'POST') return await handleAdminLogout(req, res);
+    if (pathname === '/api/auth/register' && req.method === 'POST') return await handleRegister(req, res);
+    if (pathname === '/api/auth/login' && req.method === 'POST') return await handleLogin(req, res);
+    if (pathname === '/api/auth/logout' && req.method === 'POST') return await handleLogout(req, res);
+    if (pathname === '/api/auth/me' && req.method === 'GET') return handleMe(req, res);
+    if (pathname === '/api/auth/password' && req.method === 'POST') return await handleChangePassword(req, res);
+    if (pathname === '/api/auth/avatar' && req.method === 'POST') return await handleAvatar(req, res);
     if (pathname === '/api/admin/meta' && req.method === 'GET') return handleAdminMeta(req, res);
     if (pathname === '/api/admin/settings' && req.method === 'GET') return handleAdminGetSettings(req, res);
     if (pathname === '/api/admin/settings' && req.method === 'POST') return await handleAdminSaveSettings(req, res);
+
+    // 用户管理（管理员）
+    if (pathname === '/api/admin/users' && req.method === 'GET') return handleUsersList(req, res);
+    if (pathname === '/api/admin/users/create' && req.method === 'POST') return await handleUserCreate(req, res);
+    if (pathname === '/api/admin/users/update' && req.method === 'POST') return await handleUserUpdate(req, res);
+    if (pathname === '/api/admin/users/delete' && req.method === 'POST') return await handleUserDelete(req, res);
 
     // 管理端 · 实验模板库
     if (pathname === '/api/admin/experiments' && req.method === 'GET') return handleAdminExperiments(req, res);
@@ -975,6 +1157,7 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/admin/questionnaire/update' && req.method === 'POST') return await handleAdminQuestionnaireUpdate(req, res);
     if (pathname === '/api/admin/questionnaire/delete' && req.method === 'POST') return await handleAdminQuestionnaireDelete(req, res);
     if (pathname === '/api/admin/questionnaire/sessions' && req.method === 'GET') return handleAdminQuestionnaireSessions(req, res, url);
+    if (pathname === '/api/admin/questionnaire/sessions/delete' && req.method === 'POST') return await handleAdminSessionsDelete(req, res, url);
     if (pathname === '/api/admin/questionnaire/session' && req.method === 'GET') return handleAdminQuestionnaireSession(req, res, url);
     if (pathname === '/api/admin/questionnaire/export.xlsx' && req.method === 'GET') return handleAdminQuestionnaireExport(req, res, url);
 
@@ -986,12 +1169,6 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  const questionnaires = store.listQuestionnaires();
   console.log('实验平台已启动');
-  console.log(`  管理端入口：  http://localhost:${PORT}/admin`);
-  if (questionnaires.length) {
-    console.log(`  被试端示例：  http://localhost:${PORT}/chat?q=${questionnaires[0].id}（${questionnaires[0].title}）`);
-  } else {
-    console.log('  提示：暂无问卷，请先在管理端创建问卷');
-  }
+  console.log(`  登录入口：  http://localhost:${PORT}/`);
 });

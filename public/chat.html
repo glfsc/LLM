@@ -14,9 +14,9 @@
         <div class="brand">
           <span class="brand-dot" aria-hidden="true"></span>
           <span class="brand-name">智能评估系统</span>
-          <span id="brand-sub" class="brand-sub hidden"></span>
         </div>
-        <button id="btn-collapse-all" class="ghost-btn" type="button">折叠已答题</button>
+        <button id="btn-collapse-all" class="ghost-btn" type="button">显示已答题</button>
+        <button id="btn-redo" class="ghost-btn" type="button">重做</button>
       </div>
     </header>
 
@@ -36,6 +36,18 @@
       </label>
       <p id="page-hint" class="page-hint hidden"></p>
       <button id="page-btn" class="page-go" type="button">继续</button>
+    </div>
+  </div>
+
+  <!-- 应用内确认弹窗（重做等） -->
+  <div id="confirm-mask" class="confirm-mask hidden">
+    <div class="confirm-card">
+      <h3 id="confirm-title">提示</h3>
+      <p id="confirm-text" class="confirm-text"></p>
+      <div class="confirm-actions">
+        <button id="confirm-cancel" class="ghost-btn" type="button">取消</button>
+        <button id="confirm-ok" class="page-go confirm-go" type="button">确定</button>
+      </div>
     </div>
   </div>
 

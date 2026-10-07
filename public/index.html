@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>实验对话系统 · 入口说明</title>
+  <title>实验对话系统</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%23111213'/%3E%3Ccircle cx='16' cy='16' r='5' fill='%23ffffff'/%3E%3C/svg%3E">
   <style>
     :root {
@@ -11,224 +11,99 @@
       --muted: #7a7a80;
       --faint: #b3b3b9;
       --border: #e8e8ea;
+      --border-strong: #c9c9ce;
       --accent: #111213;
       --accent-hover: #2a2b2e;
+      --danger: #c03434;
       --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
         "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
       --ease-out: cubic-bezier(0.21, 0.9, 0.35, 1);
     }
 
     * { box-sizing: border-box; }
+    .hidden { display: none !important; }
 
     body {
       margin: 0;
       min-height: 100vh;
-      padding: 56px 24px 72px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 40px 20px;
       font-family: var(--font);
       color: var(--fg);
       background: #fff;
       -webkit-font-smoothing: antialiased;
-      animation: page-in 0.5s ease both;
+      animation: page-in 0.4s ease both;
     }
 
-    .panel {
-      width: min(94vw, 880px);
-      margin: 0 auto;
-      animation: rise-in 0.55s var(--ease-out) both;
-    }
+    .panel { width: min(92vw, 400px); animation: rise-in 0.5s var(--ease-out) both; }
 
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      margin-bottom: 24px;
-    }
+    .brand { display: flex; align-items: center; gap: 10px; justify-content: center; margin-bottom: 22px; }
+    .dot { width: 20px; height: 20px; border-radius: 50%; background: var(--accent); position: relative; flex: 0 0 auto; }
+    .dot::after { content: ""; position: absolute; inset: 6px; border-radius: 50%; background: #fff; }
+    .brand-name { font-size: 13.5px; font-weight: 600; letter-spacing: 0.02em; }
 
-    .dot {
-      width: 20px;
-      height: 20px;
-      border-radius: 50%;
-      background: var(--accent);
-      position: relative;
-      flex: 0 0 auto;
-    }
-
-    .dot::after {
-      content: "";
-      position: absolute;
-      inset: 6px;
-      border-radius: 50%;
+    .card {
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 26px 24px;
       background: #fff;
     }
+    .card + .card { margin-top: 16px; }
 
-    .brand-name {
-      font-size: 13px;
-      font-weight: 600;
-      letter-spacing: 0.02em;
-      color: var(--muted);
-    }
+    .card-title { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
+    .card-sub { font-size: 12.5px; color: var(--muted); margin: 0 0 16px; line-height: 1.7; }
 
-    h1 {
-      font-size: 22px;
-      font-weight: 600;
-      margin: 0 0 10px;
-      letter-spacing: 0.01em;
-    }
-
-    .sub {
-      font-size: 14px;
-      line-height: 1.9;
-      color: var(--muted);
-      margin: 0 0 36px;
-      max-width: 720px;
-    }
-
-    .entry-section {
-      margin-bottom: 28px;
-    }
-
-    .entry-section-head {
-      display: flex;
-      align-items: baseline;
-      gap: 10px;
-      margin: 0 0 12px;
-    }
-
-    .entry-section-head h2 {
-      font-size: 15.5px;
-      font-weight: 600;
-      margin: 0;
-    }
-
-    .entry-section-head code {
-      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-      font-size: 11.5px;
-      color: var(--muted);
-      background: #f4f4f5;
-      border-radius: 6px;
-      padding: 2px 8px;
-    }
-
-    .group-grid {
-      display: grid;
-      grid-template-columns: 1fr;
-      gap: 12px;
-    }
-
-    .link-card {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 14px;
-      padding: 16px 18px;
-      border: 1px solid var(--border);
-      border-radius: 16px;
-      text-decoration: none;
-      color: var(--fg);
-      transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s var(--ease-out);
-    }
-
-    .link-card:hover {
-      border-color: #c9c9ce;
-      box-shadow: 0 6px 28px rgba(0, 0, 0, 0.07);
-      transform: translateY(-1px);
-    }
-
-    .link-title {
-      font-size: 14px;
-      font-weight: 600;
-      margin-bottom: 4px;
-    }
-
-    .link-desc {
-      font-size: 12.5px;
-      line-height: 1.7;
-      color: var(--muted);
-    }
-
-    .arrow {
-      font-size: 16px;
-      color: var(--faint);
-      transition: color 0.2s ease, transform 0.2s var(--ease-out);
-    }
-
-    .link-card:hover .arrow {
-      color: var(--fg);
-      transform: translateX(2px);
-    }
-
-    .note {
-      margin-top: 32px;
-      font-size: 12px;
-      color: var(--faint);
-      line-height: 1.9;
-    }
-
-    .note a {
-      color: var(--fg);
-    }
-
-    .entry-form {
-      display: flex;
-      gap: 10px;
-      max-width: 540px;
-    }
-
-    .entry-form input {
-      flex: 1;
-      min-width: 0;
+    .field { display: block; margin-bottom: 12px; }
+    .field span { display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px; }
+    .field input {
+      width: 100%;
       font: inherit;
-      font-size: 13.5px;
+      font-size: 14px;
       color: var(--fg);
       background: #fafafa;
       border: 1px solid var(--border);
       border-radius: 12px;
-      padding: 11px 14px;
+      padding: 11px 13px;
       outline: none;
       transition: border-color 0.18s ease;
     }
+    .field input:focus { border-color: var(--border-strong); background: #fff; }
 
-    .entry-form input:focus {
-      border-color: #c9c9ce;
+    .go {
+      display: block; width: 100%; margin-top: 4px;
+      font: inherit; font-size: 14px; font-weight: 600; color: #fff; background: var(--accent);
+      border: 0; border-radius: 999px; padding: 12px; cursor: pointer;
+      transition: background 0.16s ease, opacity 0.16s ease;
+    }
+    .go:hover:not(:disabled) { background: var(--accent-hover); }
+    .go:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .row-links {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-top: 14px; font-size: 12.5px;
+    }
+    .link-btn {
+      font: inherit; font-size: 12.5px; color: var(--muted);
+      background: none; border: 0; padding: 0; cursor: pointer;
+      text-decoration: underline; text-underline-offset: 3px;
+    }
+    .link-btn:hover { color: var(--fg); }
+
+    .err {
+      margin: 0 0 12px; font-size: 12.5px; color: var(--danger);
     }
 
-    .entry-form button {
-      font: inherit;
-      font-size: 13px;
-      color: #fff;
-      background: var(--accent);
-      border: 1px solid var(--accent);
-      border-radius: 999px;
-      padding: 10px 20px;
-      cursor: pointer;
-      white-space: nowrap;
-      transition: background 0.18s ease;
-    }
+    .divider { text-align: center; margin: 14px 0 2px; font-size: 11.5px; color: var(--faint); }
 
-    .entry-form button:hover {
-      background: var(--accent-hover);
-    }
+    @keyframes page-in { from { opacity: 0; } to { opacity: 1; } }
+    @keyframes rise-in { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
 
-    .entry-hint {
-      margin: 10px 0 0;
-      font-size: 12.5px;
-      line-height: 1.8;
-      color: var(--muted);
-    }
-
-    @keyframes page-in {
-      from { opacity: 0; }
-      to { opacity: 1; }
-    }
-
-    @keyframes rise-in {
-      from { opacity: 0; transform: translateY(12px); }
-      to { opacity: 1; transform: none; }
-    }
-
-    @media (max-width: 640px) {
-      body { padding: 40px 18px 56px; }
-      .group-grid { grid-template-columns: 1fr; }
+    @media (max-width: 480px) {
+      body { padding: 28px 14px; }
+      .card { padding: 22px 18px; }
     }
   </style>
 </head>
@@ -239,46 +114,138 @@
       <span class="brand-name">实验对话系统</span>
     </div>
 
-    <h1>入口说明</h1>
-    <p class="sub">
-      一切皆题目：系统只有 9 种题型（消息/材料、知情同意页、结束说明页、题组、打分题、单选、多选、文本题、排序）——
-      量表就是多道打分题，内容创作就是一个题组（广告语 + 创作说明同屏作答、一次提交）。实验是可复用的题目模板，问卷则是一条链接 + 一列题目 + 计时默认值：
-      可逐题插入，也可整组插入实验模板后逐条修改。把链接发给被试即可开始作答。
-    </p>
-
-    <section class="entry-section">
-      <div class="entry-section-head"><h2>管理端</h2><code>/admin</code></div>
-      <div class="group-grid">
-        <a class="link-card" href="/admin">
-          <span>
-            <span class="link-title">实验管理 / 问卷管理</span><br>
-            <span class="link-desc">维护实验模板 · 编排问卷题目（左侧大纲 + 右侧手机预览）· 数据与导出</span>
-          </span>
-          <span class="arrow">→</span>
-        </a>
+    <!-- 登录 / 注册 -->
+    <div class="card">
+      <div id="login-block">
+        <h2 class="card-title">账号登录</h2>
+        <p class="card-sub">登录后进入实验与问卷管理。</p>
+        <form id="login-form" autocomplete="off">
+          <label class="field"><span>账号</span><input id="login-username" type="text" autocomplete="username"></label>
+          <label class="field"><span>密码</span><input id="login-password" type="password" autocomplete="current-password"></label>
+          <p id="login-error" class="err hidden"></p>
+          <button id="login-btn" class="go" type="submit">登录</button>
+        </form>
+        <div class="row-links">
+          <button id="show-register" class="link-btn" type="button">注册新账号</button>
+          <button id="show-reset" class="link-btn" type="button">重置密码</button>
+        </div>
       </div>
-    </section>
 
-    <section class="entry-section">
-      <div class="entry-section-head"><h2>被试端</h2><code>/chat?q=问卷短码</code></div>
-      <form class="entry-form" id="entry-form">
-        <input id="entry-code" type="text" placeholder="输入问卷短码（在问卷管理页复制链接）" autocomplete="off">
-        <button type="submit">进入被试端</button>
+      <div id="register-block" class="hidden">
+        <h2 class="card-title">注册新账号</h2>
+        <p class="card-sub">注册后即可登录并创建自己的实验与问卷。</p>
+        <form id="register-form" autocomplete="off">
+          <label class="field"><span>账号</span><input id="reg-username" type="text" maxlength="32" autocomplete="username"></label>
+          <label class="field"><span>密码（至少 6 位）</span><input id="reg-password" type="password" autocomplete="new-password"></label>
+          <label class="field"><span>确认密码</span><input id="reg-password2" type="password" autocomplete="new-password"></label>
+          <p id="reg-error" class="err hidden"></p>
+          <button id="reg-btn" class="go" type="submit">注册并登录</button>
+        </form>
+        <div class="row-links">
+          <button id="back-login" class="link-btn" type="button">返回登录</button>
+          <span></span>
+        </div>
+      </div>
+
+      <div id="reset-block" class="hidden">
+        <h2 class="card-title">重置密码</h2>
+        <p class="card-sub">
+          为保障数据安全，密码重置需要管理员协助处理。<br>
+          请联系实验管理员，提供您的账号，由管理员在「用户管理」中为您重置密码。
+        </p>
+        <div class="row-links">
+          <button id="back-login2" class="link-btn" type="button">返回登录</button>
+          <span></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 问卷入口：填链接或短码直接进入被试端 -->
+    <div class="card">
+      <h2 class="card-title">填写问卷</h2>
+      <p class="card-sub">粘贴问卷链接或输入问卷短码，无需登录。</p>
+      <form id="survey-form" autocomplete="off">
+        <label class="field"><span>问卷链接 / 短码</span><input id="survey-code" type="text" placeholder="例如：https://…/chat?q=abc12345 或 abc12345" autocomplete="off"></label>
+        <button class="go" type="submit">进入问卷</button>
       </form>
-      <p class="entry-hint">每位被试使用同一条问卷链接；编号按进入顺序自动分配，无需人工干预。</p>
-    </section>
-
-    <p class="note">
-      被试端出现的每一段文字都逐字来自问卷快照，运行时不做任何生成。<br>
-      正式实验请使用问卷管理页中的链接分发；本页仅用于团队调试与说明。
-    </p>
+    </div>
   </div>
 
   <script>
-    // 调试用：粘贴问卷短码，直接以被试身份进入
-    document.getElementById('entry-form').addEventListener('submit', function (e) {
+    var $ = function (id) { return document.getElementById(id); };
+
+    function showBlock(name) {
+      ['login-block', 'register-block', 'reset-block'].forEach(function (id) {
+        $(id).classList.toggle('hidden', id !== name + '-block');
+      });
+    }
+    $('show-register').addEventListener('click', function () { showBlock('register'); });
+    $('show-reset').addEventListener('click', function () { showBlock('reset'); });
+    $('back-login').addEventListener('click', function () { showBlock('login'); });
+    $('back-login2').addEventListener('click', function () { showBlock('login'); });
+
+    function showErr(id, msg) { $(id).textContent = msg; $(id).classList.remove('hidden'); }
+    function hideErr(id) { $(id).classList.add('hidden'); }
+
+    async function post(path, body) {
+      var res = await fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      var data = await res.json().catch(function () { return {}; });
+      if (!res.ok) throw new Error(data.message || '请求失败，请重试');
+      return data;
+    }
+
+    $('login-form').addEventListener('submit', async function (e) {
       e.preventDefault();
-      var code = document.getElementById('entry-code').value.trim();
+      var username = $('login-username').value.trim();
+      var password = $('login-password').value;
+      if (!username || !password) { showErr('login-error', '请输入账号和密码'); return; }
+      hideErr('login-error');
+      $('login-btn').disabled = true;
+      try {
+        var res = await post('/api/auth/login', { username: username, password: password });
+        sessionStorage.setItem('expchat_admin_token', res.token);
+        location.href = '/admin';
+      } catch (err) {
+        showErr('login-error', err.message);
+        $('login-btn').disabled = false;
+      }
+    });
+
+    $('register-form').addEventListener('submit', async function (e) {
+      e.preventDefault();
+      var username = $('reg-username').value.trim();
+      var password = $('reg-password').value;
+      var password2 = $('reg-password2').value;
+      if (!username) { showErr('reg-error', '请输入账号'); return; }
+      if (password.length < 6) { showErr('reg-error', '密码至少 6 位'); return; }
+      if (password !== password2) { showErr('reg-error', '两次输入的密码不一致'); return; }
+      hideErr('reg-error');
+      $('reg-btn').disabled = true;
+      try {
+        var res = await post('/api/auth/register', { username: username, password: password });
+        sessionStorage.setItem('expchat_admin_token', res.token);
+        location.href = '/admin';
+      } catch (err) {
+        showErr('reg-error', err.message);
+        $('reg-btn').disabled = false;
+      }
+    });
+
+    // 支持粘贴完整链接（提取 q= 参数）或直接输入短码
+    $('survey-form').addEventListener('submit', function (e) {
+      e.preventDefault();
+      var raw = $('survey-code').value.trim();
+      if (!raw) return;
+      var code = raw;
+      try {
+        var url = new URL(raw);
+        var q = url.searchParams.get('q') || url.searchParams.get('c');
+        if (q) code = q.trim();
+      } catch (err) { /* 不是 URL：当作短码 */ }
       if (!code) return;
       location.href = '/chat?q=' + encodeURIComponent(code);
     });

@@ -144,7 +144,7 @@ async function walk(questionnaireId, { record } = {}) {
 /* ---------------------------------------------------------------- 主流程 */
 
 async function cleanup() {
-  const login = await request('/api/admin/login', { body: { password: ADMIN_PASSWORD } });
+  const login = await request('/api/auth/login', { body: { username: 'admin', password: ADMIN_PASSWORD } });
   if (!login.ok) throw new Error('管理端登录失败，请确认服务已启动');
   adminToken = login.data.token;
   for (const q of (await admin('/api/admin/questionnaires')).questionnaires) {

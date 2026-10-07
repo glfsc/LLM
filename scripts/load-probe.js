@@ -36,7 +36,7 @@ async function cleanup() {
 }
 
 async function main() {
-  token = (await req('/api/admin/login', { body: { password: ADMIN_PASSWORD } })).data.token;
+  token = (await req('/api/auth/login', { body: { username: 'admin', password: ADMIN_PASSWORD } })).data.token;
   await cleanup();
 
   // 探针问卷：复制组别3 模板并把题目级计时清零，便于快速走完

@@ -54,7 +54,8 @@ body { margin: 0; font-family: var(--font); color: var(--fg); background: #fff; 
   max-width: 860px; margin: 0 auto; padding: 20px 20px 60px;
   display: flex; flex-direction: column; gap: 14px;
 }
-.msg { display: flex; animation: rise-in .34s var(--ease-out) both; }
+/* 消息出现只做淡入，不做位移（避免流式输出时整行“飘入”感） */
+.msg { display: flex; animation: fade-in .16s ease both; }
 .msg.user { justify-content: flex-end; }
 .msg.user .bubble {
   background: var(--bubble); border-radius: 16px; padding: 11px 15px; max-width: 78%;
@@ -62,12 +63,16 @@ body { margin: 0; font-family: var(--font); color: var(--fg); background: #fff; 
 }
 .msg.ai .ai-body { max-width: 94%; }
 .msg.ai .ai-text { font-size: 14.5px; line-height: 1.9; color: var(--fg-soft); white-space: pre-wrap; word-break: break-word; }
-.msg.ai .ai-text.typing::after {
-  content: ""; display: inline-block; width: 2px; height: 15px; margin-left: 2px;
+/* 流式光标：文本尾部的行内元素，始终紧跟最后一个字 */
+.type-cursor {
+  display: inline-block; width: 2px; height: 15px; margin-left: 1px;
   background: var(--fg); vertical-align: -2px; animation: blink 1s step-end infinite;
 }
 .thinking-line { display: flex; align-items: center; gap: 9px; }
 .thinking-label { font-size: 13px; color: var(--muted); }
+/* 「深度思考」徽标：黑色圆圈 + 旋转弧线 */
+.think-badge { width: 15px; height: 15px; flex: 0 0 auto; animation: spin 1.1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
 .typing { display: flex; gap: 4px; }
 .typing span { width: 5px; height: 5px; border-radius: 50%; background: var(--border-strong); animation: bounce 1.2s infinite; }
 .typing span:nth-child(2) { animation-delay: .18s; }
@@ -108,6 +113,8 @@ body { margin: 0; font-family: var(--font); color: var(--fg); background: #fff; 
 .qcard-body.readonly { opacity: .92; }
 .qcard-body.readonly .answer-input,
 .qcard-body.readonly .answer-input:focus { background: #fff; cursor: default; }
+/* 已答题目默认整体隐藏：顶栏「显示已答题」或卡片上的「显示」按钮可临时恢复 */
+.qcard.done.answered-hidden { display: none; }
 .qcard-foot { display: flex; align-items: center; gap: 12px; margin-top: 13px; }
 .qfoot-hint { flex: 1 1 auto; font-size: 12px; line-height: 1.6; color: var(--warn-fg); }
 .qcard.locked .qfoot-hint { color: var(--muted); }
@@ -120,6 +127,7 @@ body { margin: 0; font-family: var(--font); color: var(--fg); background: #fff; 
 .sub-note { font-size: 11.5px; font-weight: 400; color: var(--muted); margin-left: 4px; }
 .sub-anchor { font-size: 11.5px; color: var(--muted); margin-top: 7px; }
 .sub-count { font-size: 11.5px; color: var(--muted); text-align: right; margin-top: 5px; }
+.sub-count.near { color: #c03434; font-weight: 600; }
 
 /* 作答控件 */
 .opt-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
@@ -200,6 +208,33 @@ body { margin: 0; font-family: var(--font); color: var(--fg); background: #fff; 
 @keyframes blink { 50% { opacity: 0; } }
 @keyframes bounce { 0%, 60%, 100% { transform: translateY(0); opacity: .5; } 30% { transform: translateY(-3px); opacity: 1; } }
 @keyframes rise-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+
+/* ---------------------------------------------------------------- 应用内确认弹窗 */
+.confirm-mask {
+  position: fixed; inset: 0; z-index: 90; background: rgba(17, 18, 19, 0.42);
+  display: flex; align-items: center; justify-content: center; padding: 24px;
+  opacity: 0; transition: opacity .2s ease;
+}
+.confirm-mask.visible { opacity: 1; }
+.confirm-card {
+  width: min(92vw, 360px); background: #fff; border-radius: 18px; padding: 22px 20px 18px;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.22);
+  transform: translateY(10px) scale(.98); transition: transform .2s var(--ease-out);
+}
+.confirm-mask.visible .confirm-card { transform: none; }
+.confirm-card h3 { margin: 0 0 8px; font-size: 16px; }
+.confirm-text { margin: 0 0 18px; font-size: 13.5px; line-height: 1.8; color: var(--fg-soft); white-space: pre-wrap; }
+.confirm-actions { display: flex; gap: 10px; justify-content: flex-end; }
+.confirm-actions .ghost-btn { padding: 9px 16px; }
+.confirm-go { width: auto; margin: 0; padding: 9px 22px; font-size: 13.5px; }
+
+/* ---------------------------------------------------------------- 材料分割线：相邻系统消息之间的高亮虚线 */
+.msg-divider {
+  border-top: 2px dashed #a6a6ae;
+  margin: 2px 0;
+  user-select: none;
+}
 
 /* ---------------------------------------------------------------- 手机适配 */
 @media (max-width: 640px) {

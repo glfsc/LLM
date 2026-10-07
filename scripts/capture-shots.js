@@ -43,7 +43,7 @@ async function adminFetch(token, route, options = {}) {
 
 // 准备演示问卷：每次重建，保证数据页只有一条完整会话
 async function ensureDemo() {
-  const token = (await adminFetch('', '/api/admin/login', { body: { password: ADMIN_PASSWORD } })).token;
+  const token = (await adminFetch('', '/api/auth/login', { body: { username: 'admin', password: ADMIN_PASSWORD } })).token;
   const list = await adminFetch(token, '/api/admin/questionnaires');
   for (const q of list.questionnaires.filter((x) => x.title === DEMO_NAME)) {
     await adminFetch(token, '/api/admin/questionnaire/delete', { body: { id: q.id, force: true } });

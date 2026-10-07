@@ -8,34 +8,14 @@
   <link rel="stylesheet" href="/assets/admin.css">
 </head>
 <body>
-  <!-- 登录视图 -->
-  <div id="login-view" class="login-view">
-    <div class="login-card">
-      <div class="brand">
-        <span class="brand-dot" aria-hidden="true"></span>
-        <span class="brand-name">实验对话系统</span>
-      </div>
-      <h1>管理端登录</h1>
-      <p class="login-sub">输入管理密码，进入实验模板与问卷管理。</p>
-      <form id="login-form" autocomplete="off">
-        <input id="login-password" type="password" placeholder="管理密码" autocomplete="current-password">
-        <button id="login-btn" class="primary-btn" type="submit">进入管理端</button>
-      </form>
-      <p id="login-error" class="login-error hidden">密码不正确，请重试。</p>
-      <p class="login-hint">首次使用默认密码：admin123</p>
-    </div>
-  </div>
-
-  <!-- 管理视图：左侧边栏（菜单 / 大纲两种模式复用）+ 右侧内容区 -->
+  <!-- 管理视图：左侧边栏（菜单 / 大纲两种模式复用）+ 右侧内容区（未登录时由脚本跳回首页登录） -->
   <div id="admin-view" class="admin-layout hidden">
     <aside class="sidebar">
       <div class="sidebar-brand">
         <span class="brand-dot" aria-hidden="true"></span>
         <span class="brand-name">实验对话系统<br>管理端</span>
         <span class="brand-tools">
-          <button id="btn-side-out" class="icon-btn" type="button" title="缩窄菜单栏">−</button>
-          <button id="btn-side-in" class="icon-btn" type="button" title="加宽菜单栏">＋</button>
-          <button id="btn-side-collapse" class="icon-btn" type="button" title="折叠菜单栏">«</button>
+          <button id="btn-side-collapse" class="icon-btn" type="button" title="折叠 / 展开菜单栏">«</button>
         </span>
       </div>
       <div class="sidebar-switch">
@@ -54,14 +34,15 @@
       </nav>
       <div class="sidebar-outline hidden" id="sidebar-outline"></div>
       <div class="sidebar-bottom">
-        <p class="sidebar-tip" id="sidebar-tip"></p>
-        <button id="btn-logout" class="ghost-btn" type="button">退出登录</button>
+        <button id="btn-settings" class="sidebar-settings" type="button" title="个人设置">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <span>设置</span>
+        </button>
       </div>
     </aside>
 
     <!-- 三栏之间可拖动的分隔线（默认浅色，悬停/拖动高亮；双击复位） -->
     <div class="splitter" id="split-sidebar" title="拖动调整菜单栏宽度 · 双击复位"></div>
-    <button id="btn-side-expand" class="sidebar-expand hidden" type="button" title="展开菜单栏">»</button>
 
     <main class="admin-main" id="admin-main"></main>
   </div>

@@ -11,8 +11,13 @@ const forceFresh = params.get('fresh') === '1';
 
 const $stream = document.getElementById('chat-stream');
 const $scroll = document.getElementById('chat-scroll');
-const $brandSub = document.getElementById('brand-sub');
 const $btnCollapseAll = document.getElementById('btn-collapse-all');
+const $btnRedo = document.getElementById('btn-redo');
+const $confirmMask = document.getElementById('confirm-mask');
+const $confirmTitle = document.getElementById('confirm-title');
+const $confirmText = document.getElementById('confirm-text');
+const $confirmOk = document.getElementById('confirm-ok');
+const $confirmCancel = document.getElementById('confirm-cancel');
 const $pageScreen = document.getElementById('page-screen');
 const $pageTitle = document.getElementById('page-title');
 const $pageText = document.getElementById('page-text');
@@ -36,7 +41,7 @@ const state = {
   questionNodes: new Map(), // itemId -> { card, ... } 当前待作答卡片
   answeredCount: 0,
   totalAnswers: 0,
-  collapseAll: false,
+  showAnswered: false,      // 已答题目默认整体隐藏，顶栏按钮临时显示
   draft: {},                // itemId -> { subIndex: text }
   deadlineFired: false
 };
@@ -70,27 +75,6 @@ function el(tag, className, text) {
 
 function scrollToBottom(smooth = true) {
   $scroll.scrollTo({ top: $scroll.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
-}
-function scrollToNode(node) {
-  if (!node) return;
-  // 用 rect 计算：滚动容器是 static 定位，offsetTop 会相对于 body，导致滚到底部
-  const top = node.getBoundingClientRect().top - $scroll.getBoundingClientRect().top + $scroll.scrollTop - 12;
-  $scroll.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
-}
-
-// 一轮推进（提交 / 拉取）结束时，把视口落在「本轮新增内容的开头」，让被试从上往下读（issue 5）
-let stepAnchorNode = null;
-let stepMarked = false;
-function markStepStart() { stepAnchorNode = $stream.lastElementChild; stepMarked = true; }
-function takeFirstNewNode(fallback) {
-  const first = !stepMarked
-    ? fallback
-    : (!stepAnchorNode || !stepAnchorNode.isConnected
-      ? ($stream.firstElementChild || fallback)
-      : (stepAnchorNode.nextElementSibling || fallback));
-  stepMarked = false;
-  stepAnchorNode = null;
-  return first;
 }
 function serverNow() {
   return Date.now() + state.serverOffsetMs;
@@ -138,6 +122,7 @@ function appendUserMessage(text) {
 }
 
 function appendAiMessageStatic(text) {
+  insertMaterialDivider();
   const row = el('div', 'msg ai');
   const body = el('div', 'ai-body');
   body.appendChild(el('div', 'ai-text', text));
@@ -146,10 +131,19 @@ function appendAiMessageStatic(text) {
   return row;
 }
 
+// 材料分割线：上一条流内元素也是系统消息时，先插一条高亮虚线，便于区分材料边界
+function insertMaterialDivider() {
+  const last = $stream.lastElementChild;
+  if (last && last.classList && last.classList.contains('msg') && last.classList.contains('ai')) {
+    $stream.appendChild(el('div', 'msg-divider'));
+  }
+}
+
 function appendThinkingRow() {
   const row = el('div', 'msg ai');
   const body = el('div', 'ai-body thinking-line');
-  body.appendChild(el('span', 'thinking-label', '正在思考'));
+  body.appendChild(deepThinkBadge());
+  body.appendChild(el('span', 'thinking-label', '正在深度思考...'));
   const typing = el('div', 'typing');
   typing.append(el('span'), el('span'), el('span'));
   body.appendChild(typing);
@@ -159,18 +153,38 @@ function appendThinkingRow() {
   return row;
 }
 
+// 「深度思考」徽标：黑色圆圈旋转弧线
+function deepThinkBadge() {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('class', 'think-badge');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('fill', 'none');
+  const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  circle.setAttribute('cx', '12');
+  circle.setAttribute('cy', '12');
+  circle.setAttribute('r', '9');
+  circle.setAttribute('stroke', 'var(--fg)');
+  circle.setAttribute('stroke-width', '2.6');
+  circle.setAttribute('stroke-linecap', 'round');
+  circle.setAttribute('stroke-dasharray', '42 18');
+  svg.appendChild(circle);
+  return svg;
+}
+
 function showWaitingRow() {
   if (state.waitingRow) return state.waitingRow;
+  insertMaterialDivider();
   const row = el('div', 'msg ai');
   const body = el('div', 'ai-body thinking-line');
-  const label = el('span', 'thinking-label', '对方正在输入…');
+  body.appendChild(deepThinkBadge());
+  body.appendChild(el('span', 'thinking-label', '正在深度思考...'));
   const typing = el('div', 'typing');
   typing.append(el('span'), el('span'), el('span'));
-  body.append(label, typing);
+  body.append(typing);
   row.appendChild(body);
   $stream.appendChild(row);
   scrollToBottom();
-  state.waitingRow = { row, label };
+  state.waitingRow = { row, label: body.querySelector('.thinking-label') };
   return state.waitingRow;
 }
 
@@ -182,22 +196,36 @@ function removeWaitingRow() {
 // 打字机与思考节奏由服务端按消息下发（think_ms / type_ms；题目可覆盖，否则用问卷默认）
 // 标点在基础速度上额外停顿，读起来更像真实输入
 const PUNCT_PAUSE = '，。；：！？、,.!?;:';
-const PUNCT_EXTRA = 54;          // 标点额外停顿（毫秒）
+const PUNCT_EXTRA = 90;          // 标点额外停顿（毫秒）
 const THINK_MS_DEFAULT = 420;    // 未配置时的思考时长
-const TYPE_MS_DEFAULT = 11;      // 未配置时的流式速度
+const TYPE_MS_DEFAULT = 30;      // 未配置时的流式速度（毫秒/字，正常 LLM 语速）
+const TYPE_MS_MIN = 26;          // 旧问卷里存了过快速度时的下限钳制（0 = 立即整段显示）
 
+// 流式输出：光标是文本尾部的行内元素，始终紧跟最后一个字；
+// 每 tick 输出 1~2 个字符（模拟 LLM 按词块吐字），不做任何飞入动画
 function typewrite(textEl, text, typeMs) {
-  const speed = Number.isFinite(Number(typeMs)) ? Number(typeMs) : TYPE_MS_DEFAULT;
+  const raw = Number.isFinite(Number(typeMs)) ? Number(typeMs) : TYPE_MS_DEFAULT;
+  const speed = raw > 0 ? Math.max(raw, TYPE_MS_MIN) : 0;
   if (speed <= 0) { textEl.textContent = text; scrollToBottom(false); return Promise.resolve(); }
   return new Promise((resolve) => {
+    const textNode = document.createTextNode('');
+    const cursor = el('span', 'type-cursor');
+    textEl.append(textNode, cursor);
     let i = 0;
-    textEl.classList.add('typing');
     const step = () => {
-      if (i >= text.length) { textEl.classList.remove('typing'); resolve(); return; }
-      textEl.textContent += text[i];
-      i += 1;
-      if (i % 5 === 0 || i === text.length) scrollToBottom(false);
-      window.setTimeout(step, PUNCT_PAUSE.includes(text[i - 1]) ? speed + PUNCT_EXTRA : speed);
+      if (i >= text.length) {
+        cursor.remove();
+        scrollToBottom(false);
+        resolve();
+        return;
+      }
+      // LLM 流式感：每次吐 1~2 字，速度带轻微抖动
+      const burst = 1 + Math.floor(Math.random() * 2);
+      textNode.textContent += text.slice(i, i + burst);
+      i += burst;
+      if (i % 4 === 0 || i >= text.length) scrollToBottom(false);
+      const prev = text[i - 1] || '';
+      window.setTimeout(step, PUNCT_PAUSE.includes(prev) ? speed + PUNCT_EXTRA : speed + Math.random() * 14);
     };
     step();
   });
@@ -295,6 +323,7 @@ function makeTextInput(sub, value, onInput) {
   input.className = 'answer-input';
   input.placeholder = sub.placeholder || '请输入…';
   input.value = value || '';
+  if (sub.maxLen > 0) input.maxLength = Number(sub.maxLen); // 硬上限：超过后无法继续输入
   input.addEventListener('input', () => onInput(input.value));
   if (rows > 1) autoGrow(input);
   return input;
@@ -326,7 +355,10 @@ function buildSubControl(sub, value, onChange, onSubmit, withTitle = true) {
     wrap.appendChild(input);
     const count = sub.maxLen ? el('div', 'sub-count') : null;
     const refresh = () => {
-      if (count) count.textContent = `${input.value.length}/${sub.maxLen}`;
+      if (count) {
+        count.textContent = `${input.value.length}/${sub.maxLen}`;
+        count.classList.toggle('near', input.value.length >= Math.max(1, Number(sub.maxLen) - 20));
+      }
       onSubmit && onSubmit();
     };
     if (count) { refresh(); wrap.appendChild(count); }
@@ -513,7 +545,8 @@ function renderQuestionCard(action) {
   return node;
 }
 
-// 已作答题目：**保留原控件**并置为只读（选中态与输入内容就地保留），移除提交按钮，标题栏加「已提交」与折叠按钮
+// 已作答题目：保留原控件并置为只读，但默认整体隐藏（不做“折叠留题干”）；
+// 顶栏「显示已答题」可临时全部显示，卡片上的按钮可单独 隐藏/显示
 function finalizeQuestionCard(action, answerText) {
   const node = state.questionNodes.get(action.itemId);
   if (!node) return;
@@ -530,24 +563,27 @@ function finalizeQuestionCard(action, answerText) {
   card.querySelector('.qcard-timer')?.remove();      // 已提交：撤掉倒计时
   const head = card.querySelector('.qcard-head');
   if (head) head.appendChild(el('span', 'qdone-mark', '✓ 已提交'));
-  const toggle = el('button', 'mini-btn qcard-toggle', '折叠');
+  const toggle = el('button', 'mini-btn qcard-toggle', '隐藏');
   toggle.type = 'button';
   toggle.addEventListener('click', () => {
-    const collapsed = card.classList.toggle('collapsed');
-    toggle.textContent = collapsed ? '展开' : '折叠';
+    const hidden = card.classList.toggle('answered-hidden');
+    toggle.textContent = hidden ? '显示' : '隐藏';
   });
-  card.querySelector('.qcard-head').appendChild(toggle);
+  head.appendChild(toggle);
+  card.classList.add('answered-hidden');             // 后续答完的题自动隐藏
   state.questionNodes.delete(action.itemId);
 }
 
-function setCollapseAll(flag) {
-  state.collapseAll = flag;
+// 顶栏按钮：临时显示全部已答题目 / 再次整体隐藏
+function setAnsweredVisible(flag) {
+  state.showAnswered = flag;
   document.querySelectorAll('.qcard.done').forEach((card) => {
-    card.classList.toggle('collapsed', flag);
+    const hidden = !flag;
+    card.classList.toggle('answered-hidden', hidden);
     const t = card.querySelector('.qcard-toggle');
-    if (t) t.textContent = flag ? '展开' : '折叠';
+    if (t) t.textContent = hidden ? '显示' : '隐藏';
   });
-  $btnCollapseAll.textContent = flag ? '展开全部' : '折叠已答题';
+  $btnCollapseAll.textContent = flag ? '隐藏已答题' : '显示已答题';
 }
 
 /* ---------------------------------------------------------------- 提交 */
@@ -649,13 +685,12 @@ function applyPayload(payload) {
   }
 
   const node = renderQuestionCard(action);
-  scrollToNode(takeFirstNewNode(node.card));
+  scrollToBottom(true);   // 新题在下方追加，平滑跟随（不做跳顶）
 }
 
 // 提交后的统一处理：渲染新消息 → 推进到下一题 / 结束
 async function afterStep(action, echo, res) {
   state.serverOffsetMs = (res.nowMs || Date.now()) - Date.now();
-  markStepStart();
   for (const m of res.messages) {
     if (m.role === 'assistant') await appendAiMessageAnimated(m.content, { thinkMs: m.think_ms, typeMs: m.type_ms });
   }
@@ -770,7 +805,6 @@ async function refetchAndAdvance() {
     const boot = await api(`/api/bootstrap?q=${encodeURIComponent(questionnaireCode)}&session=${encodeURIComponent(state.sessionId)}`);
     if (boot.nowMs != null) state.serverOffsetMs = boot.nowMs - Date.now();
     removeWaitingRow();
-    markStepStart();
     const fresh = boot.messages.slice(state.renderedMessages);
     for (const m of fresh) {
       if (m.role === 'assistant') await appendAiMessageAnimated(m.content, { thinkMs: m.think_ms, typeMs: m.type_ms });
@@ -818,11 +852,6 @@ async function startSession() {
   const created = await api('/api/session', { body: { q: questionnaireCode } });
   state.sessionId = created.session.id;
   storeSession(created.session.id);
-  if (created.questionnaireTitle && $brandSub) {
-    $brandSub.textContent = created.questionnaireTitle;
-    $brandSub.classList.remove('hidden');
-  }
-  markStepStart();
   state.renderedMessages = await renderMessages(created.messages, true);
   applyPayload(created);
 }
@@ -835,10 +864,6 @@ async function init() {
   try {
     const sid = loadStoredSession();
     const boot = await api(`/api/bootstrap?q=${encodeURIComponent(questionnaireCode)}${sid ? `&session=${encodeURIComponent(sid)}` : ''}`);
-    if (boot.questionnaireTitle && $brandSub) {
-      $brandSub.textContent = boot.questionnaireTitle;
-      $brandSub.classList.remove('hidden');
-    }
     if (boot.session) {
       state.sessionId = boot.session.id;
       storeSession(boot.session.id);
@@ -858,6 +883,53 @@ async function init() {
   }
 }
 
-$btnCollapseAll.addEventListener('click', () => setCollapseAll(!state.collapseAll));
+$btnCollapseAll.addEventListener('click', () => setAnsweredVisible(!state.showAnswered));
+
+// 应用内确认弹窗（替代浏览器原生 confirm）
+let confirmHandler = null;
+function openConfirm({ title, text, okLabel, onOk }) {
+  $confirmTitle.textContent = title || '提示';
+  $confirmText.textContent = text || '';
+  $confirmOk.textContent = okLabel || '确定';
+  confirmHandler = onOk || null;
+  $confirmMask.classList.remove('hidden');
+  requestAnimationFrame(() => $confirmMask.classList.add('visible'));
+}
+function closeConfirm() {
+  $confirmMask.classList.remove('visible');
+  confirmHandler = null;
+  setTimeout(() => $confirmMask.classList.add('hidden'), 200);
+}
+$confirmCancel.addEventListener('click', closeConfirm);
+$confirmMask.addEventListener('click', (e) => { if (e.target === $confirmMask) closeConfirm(); });
+$confirmOk.addEventListener('click', async () => {
+  const fn = confirmHandler;
+  closeConfirm();
+  if (fn) await fn();
+});
+
+// 重做：作废当前会话、清除本机草稿，回到知情同意页重新开始
+$btnRedo.addEventListener('click', () => {
+  openConfirm({
+    title: '重做本问卷',
+    text: '当前已填写的作答记录将被清除，并回到开始页重新填写。确定要重做吗？',
+    okLabel: '重做',
+    onOk: async () => {
+      $btnRedo.disabled = true;
+      try {
+        if (state.sessionId && !state.completed) {
+          await api('/api/finish', { method: 'POST', body: { sessionId: state.sessionId } });
+        }
+      } catch { /* 会话作废失败也继续重开（旧会话保留在历史里） */ }
+      clearStoredSession();
+      try {
+        Object.keys(localStorage)
+          .filter((k) => k.startsWith(`${DRAFT_PREFIX}${questionnaireCode}_`))
+          .forEach((k) => localStorage.removeItem(k));
+      } catch { /* 忽略 */ }
+      location.replace(`${location.pathname}?q=${encodeURIComponent(questionnaireCode)}&fresh=1`);
+    }
+  });
+});
 
 init();

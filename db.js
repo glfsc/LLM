@@ -4,7 +4,7 @@
 'use strict';
 
 const { DatabaseSync } = require('node:sqlite');
-const { randomUUID } = require('node:crypto');
+const { randomUUID, randomBytes, scryptSync, timingSafeEqual } = require('node:crypto');
 const path = require('node:path');
 
 const DB_PATH = path.join(__dirname, 'data.db');
@@ -91,12 +91,32 @@ db.exec(`
     value TEXT
   );
 
+  -- 用户账号：普通主试（user）/ 管理员（admin）；密码只存盐值 + scrypt 摘要
+  CREATE TABLE IF NOT EXISTS users (
+    id         TEXT PRIMARY KEY,
+    username   TEXT NOT NULL UNIQUE,
+    pass_hash  TEXT NOT NULL,
+    salt       TEXT NOT NULL,
+    role       TEXT NOT NULL DEFAULT 'user',
+    avatar     TEXT,
+    created_at TEXT,
+    updated_at TEXT
+  );
+
   -- 热点索引
   CREATE INDEX IF NOT EXISTS idx_responses_session ON responses(session_id, id);
   CREATE INDEX IF NOT EXISTS idx_messages_session  ON messages(session_id, seq);
   CREATE INDEX IF NOT EXISTS idx_messages_visible  ON messages(session_id, visible_at);
   CREATE INDEX IF NOT EXISTS idx_sessions_question ON sessions(questionnaire_id, seq);
 `);
+
+// 旧库升级：为实验 / 问卷补充创建者（已有数据归管理员）
+function ensureColumn(table, col) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((r) => r.name);
+  if (!cols.includes(col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} TEXT`);
+}
+ensureColumn('experiments', 'owner_id');
+ensureColumn('questionnaires', 'owner_id');
 
 // 旧库升级：早期版本遗留的表一并清理（本轮为重建式升级，不做数据迁移）
 for (const t of [
@@ -486,6 +506,100 @@ function setResumeWindowHours(value) {
   setSetting('resume_window_hours', String(Number.isFinite(n) && n >= 0 ? Math.min(n, 24 * 30) : RESUME_WINDOW_DEFAULT_HOURS));
 }
 
+// ---------------------------------------------------------------- 用户账号
+// 密码只存 scrypt 摘要 + 随机盐，不以明文或可逆形式落库
+function hashPassword(password, salt) {
+  return scryptSync(String(password), String(salt), 64).toString('hex');
+}
+
+function userPayload(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    username: row.username,
+    role: row.role,
+    avatar: row.avatar || '',
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function getUser(id) {
+  return db.prepare('SELECT * FROM users WHERE id = ?').get(id) || null;
+}
+
+function getUserByName(username) {
+  return db.prepare('SELECT * FROM users WHERE username = ?').get(String(username || '').trim()) || null;
+}
+
+function verifyPassword(row, password) {
+  if (!row) return false;
+  const expected = Buffer.from(row.pass_hash, 'hex');
+  const actual = Buffer.from(hashPassword(password, row.salt), 'hex');
+  return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+
+function createUser({ username, password, role, avatar }) {
+  const name = String(username || '').trim();
+  if (!name) throw new Error('用户名不能为空');
+  if (!password || String(password).length < 6) throw new Error('密码至少 6 位');
+  if (getUserByName(name)) throw new Error('用户名已存在');
+  const id = randomUUID();
+  const now = nowIso();
+  const salt = randomBytes(16).toString('hex');
+  db.prepare('INSERT INTO users (id, username, pass_hash, salt, role, avatar, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(id, name, hashPassword(password, salt), salt, role === 'admin' ? 'admin' : 'user', avatar || null, now, now);
+  return userPayload(getUser(id));
+}
+
+function updateUser(id, { username, role, password, avatar } = {}) {
+  const row = getUser(id);
+  if (!row) return null;
+  const sets = ['updated_at = ?'];
+  const args = [nowIso()];
+  if (username != null) {
+    const name = String(username).trim();
+    if (!name) throw new Error('用户名不能为空');
+    const dup = getUserByName(name);
+    if (dup && dup.id !== id) throw new Error('用户名已存在');
+    sets.push('username = ?');
+    args.push(name);
+  }
+  if (role != null) {
+    sets.push('role = ?');
+    args.push(role === 'admin' ? 'admin' : 'user');
+  }
+  if (avatar != null) {
+    sets.push('avatar = ?');
+    args.push(avatar || null);
+  }
+  if (password) {
+    if (String(password).length < 6) throw new Error('密码至少 6 位');
+    const salt = randomBytes(16).toString('hex');
+    sets.push('pass_hash = ?', 'salt = ?');
+    args.push(hashPassword(password, salt), salt);
+  }
+  args.push(id);
+  db.prepare(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`).run(...args);
+  return userPayload(getUser(id));
+}
+
+function updateUserPassword(id, newPassword) {
+  return updateUser(id, { password: newPassword });
+}
+
+function deleteUser(id) {
+  if (!getUser(id)) return { ok: false, reason: 'not_found' };
+  db.prepare('DELETE FROM users WHERE id = ?').run(id);
+  return { ok: true };
+}
+
+function listUsers() {
+  return db.prepare('SELECT * FROM users ORDER BY created_at ASC, rowid ASC').all().map(userPayload);
+}
+
+// 计时窗口以下为原设置区
+
 // ---------------------------------------------------------------- 短码
 const CODE_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
 
@@ -522,8 +636,11 @@ function getExperimentPayload(id) {
   return experimentPayload(getExperiment(id));
 }
 
-function listExperiments() {
-  return db.prepare('SELECT * FROM experiments ORDER BY created_at ASC, rowid ASC').all().map(experimentPayload);
+function listExperiments(ownerId) {
+  const rows = ownerId
+    ? db.prepare('SELECT * FROM experiments WHERE owner_id = ? ORDER BY created_at ASC, rowid ASC').all(ownerId)
+    : db.prepare('SELECT * FROM experiments ORDER BY created_at ASC, rowid ASC').all();
+  return rows.map(experimentPayload);
 }
 
 // 统计有多少份问卷是从该模板插入过题目的（仅提示用：插入即复制，模板可自由删除）
@@ -536,16 +653,17 @@ function countQuestionnairesUsingExperiment(id) {
   return n;
 }
 
-function createExperiment({ name, timing, items, copyFrom }) {
+function createExperiment({ name, timing, items, copyFrom, ownerId }) {
   const source = copyFrom ? getExperimentPayload(copyFrom) : null;
   const id = makeCode('experiments');
   const now = nowIso();
-  db.prepare('INSERT INTO experiments (id, name, timing_json, items_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+  db.prepare('INSERT INTO experiments (id, name, timing_json, items_json, owner_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
     .run(
       id,
       String(name),
       JSON.stringify(normalizeTiming(source ? source.timing : timing)),
       JSON.stringify(normalizeItems(source ? source.items : items || [])),
+      ownerId || null,
       now,
       now
     );
@@ -590,17 +708,19 @@ function getQuestionnairePayload(id, opts) {
   return questionnairePayload(getQuestionnaire(id), opts);
 }
 
-function listQuestionnaires() {
-  return db.prepare('SELECT * FROM questionnaires ORDER BY created_at DESC, rowid DESC').all()
-    .map((r) => questionnairePayload(r, { withItems: false }));
+function listQuestionnaires(ownerId) {
+  const rows = ownerId
+    ? db.prepare('SELECT * FROM questionnaires WHERE owner_id = ? ORDER BY created_at DESC, rowid DESC').all(ownerId)
+    : db.prepare('SELECT * FROM questionnaires ORDER BY created_at DESC, rowid DESC').all();
+  return rows.map((r) => questionnairePayload(r, { withItems: false }));
 }
 
-function createQuestionnaire({ title, timing, items }) {
+function createQuestionnaire({ title, timing, items, ownerId }) {
   const id = makeCode('questionnaires');
   const now = nowIso();
   const list = Array.isArray(items) && items.length ? items : defaultQuestionnaireItems();
-  db.prepare('INSERT INTO questionnaires (id, title, timing_json, items_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(id, String(title || '未命名问卷'), JSON.stringify(normalizeTiming(timing)), JSON.stringify(normalizeItems(list)), now, now);
+  db.prepare('INSERT INTO questionnaires (id, title, timing_json, items_json, owner_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(id, String(title || '未命名问卷'), JSON.stringify(normalizeTiming(timing)), JSON.stringify(normalizeItems(list)), ownerId || null, now, now);
   return getQuestionnairePayload(id);
 }
 
@@ -611,13 +731,14 @@ function updateQuestionnaire(id, { title, timing, items }) {
   return getQuestionnairePayload(id);
 }
 
-function copyQuestionnaire(sourceId, title) {
+function copyQuestionnaire(sourceId, title, ownerId) {
   const src = getQuestionnairePayload(sourceId);
   if (!src) return null;
   return createQuestionnaire({
     title: String(title || '').trim() || `${src.title}（副本）`,
     timing: src.timing,
-    items: src.items
+    items: src.items,
+    ownerId
   });
 }
 
@@ -643,6 +764,32 @@ function deleteQuestionnaire(id, { force = false } = {}) {
     throw err;
   }
   return { ok: true };
+}
+
+// 批量删除会话（数据页勾选删除）：连带清空消息与作答记录；只删属于该问卷的会话
+function deleteSessions(questionnaireId, ids) {
+  const wanted = (Array.isArray(ids) ? ids : []).map(String).filter(Boolean);
+  if (!wanted.length) return { ok: true, deleted: 0 };
+  db.exec('BEGIN');
+  try {
+    const check = db.prepare('SELECT id FROM sessions WHERE id = ? AND questionnaire_id = ?');
+    const delMsg = db.prepare('DELETE FROM messages WHERE session_id = ?');
+    const delResp = db.prepare('DELETE FROM responses WHERE session_id = ?');
+    const delSess = db.prepare('DELETE FROM sessions WHERE id = ?');
+    let deleted = 0;
+    for (const sid of wanted) {
+      if (!check.get(sid, questionnaireId)) continue;
+      delMsg.run(sid);
+      delResp.run(sid);
+      delSess.run(sid);
+      deleted += 1;
+    }
+    db.exec('COMMIT');
+    return { ok: true, deleted };
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
 }
 
 // ---------------------------------------------------------------- 会话
@@ -856,10 +1003,20 @@ function initSeed() {
 initSeed();
 
 function ensureSettings() {
-  if (!getSetting('admin_password')) setSetting('admin_password', 'admin123');
   if (getSetting('resume_window_hours') == null) setResumeWindowHours(RESUME_WINDOW_DEFAULT_HOURS);
 }
 ensureSettings();
+
+// 种子管理员：首次运行创建 admin（初始密码 admin123，登录后可在「个人设置」中修改；界面不展示）
+function ensureAdminUser() {
+  if (Number(db.prepare('SELECT COUNT(*) AS n FROM users').get().n) > 0) return;
+  createUser({ username: 'admin', password: 'admin123', role: 'admin' });
+  // 将已有实验 / 问卷归属到管理员
+  const admin = getUserByName('admin');
+  db.prepare("UPDATE experiments SET owner_id = ? WHERE owner_id IS NULL").run(admin.id);
+  db.prepare("UPDATE questionnaires SET owner_id = ? WHERE owner_id IS NULL").run(admin.id);
+}
+ensureAdminUser();
 
 // 首次运行：为两个实验各建一份预设问卷（插入模板 = 复制题目）
 function ensurePresetQuestionnaires() {
@@ -899,6 +1056,14 @@ module.exports = {
   setSetting,
   getResumeWindowHours,
   setResumeWindowHours,
+  getUser,
+  getUserByName,
+  verifyPassword,
+  createUser,
+  updateUser,
+  updateUserPassword,
+  deleteUser,
+  listUsers,
   getExperiment,
   getExperimentPayload,
   listExperiments,
@@ -912,6 +1077,7 @@ module.exports = {
   updateQuestionnaire,
   copyQuestionnaire,
   deleteQuestionnaire,
+  deleteSessions,
   countSessionsByQuestionnaire,
   getSession,
   nextSessionSeq,
