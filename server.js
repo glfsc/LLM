@@ -10,10 +10,12 @@
 
 const http = require('node:http');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const store = require('./db');
 const { buildXlsx } = require('./xlsx');
+const qrcode = require('./vendor/qrcode');
 
 const PORT = Number(process.env.PORT) || 3000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -1112,6 +1114,125 @@ function handleAdminQuestionnaireExport(req, res, url) {
   res.end(buf);
 }
 
+// ---------------------------------------------------------------- 局域网预实验 · 连接页与二维码
+
+// 枚举本机局域网 IPv4：排除回环/链路本地（169.254.*）与重复项，
+// 常见私网网段优先（192.168 > 10 > 172.16-31），用于手机同 WiFi 直连。
+function lanAddresses() {
+  const seen = new Set();
+  const list = [];
+  for (const ifaces of Object.values(os.networkInterfaces())) {
+    for (const ni of ifaces || []) {
+      if (ni.family !== 'IPv4' || ni.internal || seen.has(ni.address)) continue;
+      seen.add(ni.address);
+      if (/^169\.254\./.test(ni.address)) continue;
+      list.push(ni.address);
+    }
+  }
+  const rank = (ip) => (/^192\.168\./.test(ip) ? 0 : /^10\./.test(ip) ? 1 : /^172\.(1[6-9]|2\d|3[01])\./.test(ip) ? 2 : 3);
+  return list.sort((a, b) => rank(a) - rank(b));
+}
+
+function entryUrl(ip) {
+  return `http://${ip || 'localhost'}:${PORT}/`;
+}
+
+function makeQr(text) {
+  const qr = qrcode(0, 'M');
+  qr.addData(text);
+  qr.make();
+  return qr;
+}
+
+function qrSvgFor(text, cellSize = 6, margin = 2) {
+  return makeQr(text).createSvgTag({ cellSize, margin, scalable: true });
+}
+
+// 控制台二维码：用半块字符（▀▄█）把两个模块行压进一个字符行，宽度翻倍近似方比例
+function qrAsciiFor(text) {
+  const qr = makeQr(text);
+  const n = qr.getModuleCount();
+  const quiet = 2;
+  const total = n + quiet * 2;
+  const dark = (x, y) => x >= quiet && x < quiet + n && y >= quiet && y < quiet + n && qr.isDark(y - quiet, x - quiet);
+  const lines = [];
+  for (let y = 0; y < total; y += 2) {
+    let line = '';
+    for (let x = 0; x < total; x++) {
+      const top = dark(x, y);
+      const bottom = dark(x, y + 1);
+      line += top && bottom ? '██' : top ? '▀▀' : bottom ? '▄▄' : '  ';
+    }
+    lines.push(line);
+  }
+  return lines.join('\n');
+}
+
+function buildConnectHtml() {
+  const urls = lanAddresses().map(entryUrl);
+  const primary = urls[0] || entryUrl('');
+  const altItems = urls.slice(1).map((u) => `<li><code>${u}</code></li>`).join('');
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>手机连接 · 预实验入口</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+         background: #f5f6f8; color: #1f2329; min-height: 100vh; display: flex; justify-content: center; padding: 32px 16px; }
+  .card { background: #fff; border-radius: 16px; box-shadow: 0 4px 24px rgba(31,35,41,.08);
+          max-width: 420px; width: 100%; padding: 32px 24px; height: fit-content; }
+  h1 { font-size: 20px; text-align: center; margin-bottom: 4px; }
+  .sub { text-align: center; color: #86909c; font-size: 13px; margin-bottom: 20px; }
+  .qr { display: flex; justify-content: center; margin: 8px 0 16px; }
+  .qr svg { width: 240px; height: 240px; }
+  .url { text-align: center; margin-bottom: 20px; }
+  .url code { background: #f2f3f5; border-radius: 8px; padding: 8px 14px; font-size: 15px; word-break: break-all; }
+  h2 { font-size: 14px; margin: 16px 0 8px; color: #4e5969; }
+  ul.tips { list-style: none; }
+  ul.tips li { font-size: 13px; color: #4e5969; line-height: 1.7; padding-left: 18px; position: relative; }
+  ul.tips li::before { content: "·"; position: absolute; left: 6px; font-weight: 700; }
+  .alt { font-size: 12px; color: #86909c; margin-top: 4px; }
+  .admin { margin-top: 20px; padding-top: 16px; border-top: 1px solid #e5e6eb; font-size: 12px; color: #86909c; text-align: center; }
+  .admin a { color: #165dff; text-decoration: none; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>手机扫码进入实验</h1>
+    <p class="sub">请确保手机与这台电脑连接同一个 WiFi（或电脑开的热点）</p>
+    <div class="qr">${qrSvgFor(primary)}</div>
+    <div class="url"><code>${primary}</code></div>
+    <ul class="tips">
+      <li>用手机「相机」扫码，选择浏览器打开；微信扫一扫若无法打开，请改用相机。</li>
+      <li>打不开时检查：手机是否在用流量（需关闭并连 WiFi）；路由器是否开启了「AP 隔离」。</li>
+      <li>没有共同 WiFi 时：电脑开启「移动热点」，手机连上热点后再扫码即可。</li>
+      ${altItems ? `<li>若上方地址无法访问，可尝试备选地址：<ul class="alt">${altItems}</ul></li>` : ''}
+    </ul>
+    <div class="admin">电脑端编辑/数据入口：<a href="/admin">http://localhost:${PORT}/admin</a>（本机打开）</div>
+  </div>
+</body>
+</html>`;
+}
+
+function handleConnect(res) {
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+  res.end(buildConnectHtml());
+}
+
+function handleQrSvg(res, url) {
+  const target = (url.searchParams.get('u') || '').trim();
+  if (!target || target.length > 512 || !/^https?:\/\//.test(target)) {
+    res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('bad request');
+    return;
+  }
+  res.writeHead(200, { 'Content-Type': 'image/svg+xml; charset=utf-8', 'Cache-Control': 'no-store' });
+  res.end(qrSvgFor(target, 8, 2));
+}
+
 // ---------------------------------------------------------------- 路由
 const server = http.createServer(async (req, res) => {
   try {
@@ -1119,6 +1240,10 @@ const server = http.createServer(async (req, res) => {
     const pathname = decodeURIComponent(url.pathname);
 
     if (pathname === '/api/health' && req.method === 'GET') return sendJson(res, 200, { ok: true });
+
+    // 预实验 · 局域网连接页与二维码
+    if (pathname === '/connect' && req.method === 'GET') return handleConnect(res);
+    if (pathname === '/qr.svg' && req.method === 'GET') return handleQrSvg(res, url);
 
     // 被试端
     if (pathname === '/api/bootstrap' && req.method === 'GET') return handleBootstrap(req, res, url);
@@ -1169,6 +1294,20 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log('实验平台已启动');
-  console.log(`  登录入口：  http://localhost:${PORT}/`);
+  const urls = lanAddresses().map(entryUrl);
+  const primary = urls[0] || entryUrl('');
+  console.log('实验平台已启动（局域网预实验模式）');
+  console.log(`  电脑端管理入口：http://localhost:${PORT}/admin`);
+  console.log(`  手机入口（同一 WiFi 扫码）：${primary}`);
+  if (urls.length > 1) console.log(`  备选地址：${urls.slice(1).join('   ')}`);
+  console.log('');
+  console.log(qrAsciiFor(primary));
+  console.log('');
+  console.log('  ↑ 用手机相机扫码进入；手机需与本机在同一 WiFi 或热点。');
+  console.log('  停止服务：关闭本窗口（进行中的被试会话数据已实时落库，不会丢失）。');
+  if (process.env.OPEN_CONNECT === '1') {
+    try {
+      require('node:child_process').exec(`start "" "http://localhost:${PORT}/connect"`, { windowsHide: true });
+    } catch { /* 自动打开浏览器失败不影响服务 */ }
+  }
 });
