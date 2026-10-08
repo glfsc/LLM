@@ -26,6 +26,9 @@ screenshots/*
 # 设计预览走查截图（design/ 下的方案与预览页保留）
 design/shots/
 
+# 内部文档（需求、方案、实施报告等，不入库）
+documents/
+
 # 工具/临时目录
 .tmp/
 .zcode/

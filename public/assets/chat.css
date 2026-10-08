@@ -23,7 +23,17 @@
 
 * { box-sizing: border-box; }
 html, body { height: 100%; }
-body { margin: 0; font-family: var(--font); color: var(--fg); background: #fff; -webkit-font-smoothing: antialiased; }
+body {
+  margin: 0; font-family: var(--font); color: var(--fg); background: #fff; -webkit-font-smoothing: antialiased;
+  /* 防「选中 → 复制 → 搜索」：内容区不可选中；输入框 / 文本域例外，否则被试没法改自己的答案。
+     注：网页无法阻止系统级截屏（Win+Shift+S / 手机截屏 / 拍照），只能挡住网页内这条路径。 */
+  -webkit-user-select: none; user-select: none;
+  -webkit-touch-callout: none;
+}
+input, textarea, [contenteditable="true"] {
+  -webkit-user-select: text; user-select: text; -webkit-touch-callout: default;
+}
+@media print { body { visibility: hidden !important; } }   /* 防「打印成 PDF」导出内容 */
 .hidden { display: none !important; }
 
 #app { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
@@ -53,16 +63,48 @@ body { margin: 0; font-family: var(--font); color: var(--fg); background: #fff; 
 .chat-stream {
   max-width: 860px; margin: 0 auto; padding: 20px 20px 60px;
   display: flex; flex-direction: column; gap: 14px;
+  contain: layout style;      /* 流式输出时把重排限制在消息流内部，减少掉帧 */
 }
 /* 消息出现只做淡入，不做位移（避免流式输出时整行“飘入”感） */
 .msg { display: flex; animation: fade-in .16s ease both; }
 .msg.user { justify-content: flex-end; }
 .msg.user .bubble {
   background: var(--bubble); border-radius: 16px; padding: 11px 15px; max-width: 78%;
-  font-size: 14px; line-height: 1.75; white-space: pre-wrap; word-break: break-word;
+  font-size: 14px; font-weight: 500; line-height: 1.75; word-break: break-word;
 }
-.msg.ai .ai-body { max-width: 94%; }
-.msg.ai .ai-text { font-size: 14.5px; line-height: 1.9; color: var(--fg-soft); white-space: pre-wrap; word-break: break-word; }
+/* 占满整行（扣掉左侧圈圈图标）：宽度不能跟着内容走，否则思考面板流式输出时会边写边变宽 */
+.msg.ai { align-items: flex-start; gap: 10px; }
+.msg.ai .ai-body { max-width: calc(100% - 32px); flex: 1 1 auto; min-width: 0; }
+/* 对话形态：每条 AI 消息左侧一个系统圈圈（与顶栏品牌标识同构） */
+.ai-avatar {
+  flex: 0 0 auto; width: 22px; height: 22px; border-radius: 50%;
+  background: var(--accent); position: relative; margin-top: 2px;
+}
+.ai-avatar::after { content: ""; position: absolute; inset: 7px; border-radius: 50%; background: #fff; }
+.msg.ai .ai-text { font-size: 14px; font-weight: 500; line-height: 1.9; color: var(--fg-soft); word-break: break-word; }
+/* ---------------------------------------------------------------- 富文本正文（.rich）
+   管理端「类 Word」编辑器能用的格式，在这里一一落地：六级标题、加粗 / 斜体 / 下划线 / 删除线、
+   字号 / 字体色 / 背景色（内联样式直通）、对齐、有序 / 无序列表、引用、分割线。
+   正文容器加了 .rich，块级样式只作用在正文里，不影响界面本身。 */
+.rich { word-break: break-word; }
+.rich > :last-child { margin-bottom: 0; }
+.rich p { margin: 0 0 .72em; }
+.rich h1, .rich h2, .rich h3, .rich h4, .rich h5, .rich h6 { margin: .2em 0 .6em; line-height: 1.5; font-weight: 600; color: var(--fg); }
+/* 标题字号与编辑器（admin.css 的 .rich-edit h1-h6）逐档对齐：所见即所得 */
+.rich h1 { font-size: 20px; }
+.rich h2 { font-size: 17.5px; }
+.rich h3 { font-size: 16px; }
+.rich h4 { font-size: 15px; }
+.rich h5 { font-size: 14px; }
+.rich h6 { font-size: 13px; color: var(--fg-soft); }
+.rich ul, .rich ol { margin: 0 0 .72em; padding-left: 1.45em; }
+.rich li { margin: .18em 0; }
+.rich blockquote {
+  margin: 0 0 .72em; padding: 2px 0 2px 12px;
+  border-left: 3px solid var(--border-strong); color: var(--muted);
+}
+.rich hr { border: 0; border-top: 1px solid var(--border); margin: .9em 0; }
+.rich a { color: inherit; text-decoration: underline; }
 /* 流式光标：文本尾部的行内元素，始终紧跟最后一个字 */
 .type-cursor {
   display: inline-block; width: 2px; height: 15px; margin-left: 1px;
@@ -78,10 +120,75 @@ body { margin: 0; font-family: var(--font); color: var(--fg); background: #fff; 
 .typing span:nth-child(2) { animation-delay: .18s; }
 .typing span:nth-child(3) { animation-delay: .36s; }
 
+/* ---------------------------------------------------------------- 深度思考面板
+   与正文同一行内：头部（徽标 + 用时 + 箭头）→ 可折叠思考内容 → 分割线 → 正文。
+   思考内容比正文字号更小、颜色更灰、缩进更多。 */
+.think { display: flex; flex-direction: column; }
+.think-head {
+  display: inline-flex; align-items: center; gap: 7px; text-align: left;
+  font: inherit; font-size: 13px; line-height: 1.6; color: var(--muted);
+  background: none; border: 0; padding: 1px 0; cursor: pointer; user-select: none;
+  transition: color .16s ease;
+}
+.think-head:hover { color: var(--fg-soft); }
+.think-label { font-variant-numeric: tabular-nums; }
+/* 折叠时箭头向右 ›，展开时向下 ∨ */
+.think-head .chev { width: 13px; height: 13px; flex: 0 0 auto; transform: rotate(-90deg); transition: transform .22s var(--ease-out); }
+.think.open .think-head .chev { transform: rotate(0deg); }
+.think-spark { width: 14px; height: 14px; flex: 0 0 auto; }
+.think-body { display: none; }
+.think.open .think-body { display: block; }
+.think-inner {
+  margin: 9px 0 0 10px;                      /* 比正文多一层左缩进 */
+  padding: 13px 16px 13px 18px;
+  border: 1px solid var(--border); border-left: 2px solid var(--border-strong); border-radius: 12px;
+  background: var(--surface);
+  font-size: 13px; line-height: 1.85; color: #8a8a91;   /* 正文 14px / #3a3a3f */
+  white-space: pre-wrap; word-break: break-word;
+}
+.think-divider { border-top: 1px solid var(--border); margin: 13px 0 12px; }
+
+/* ---------------------------------------------------------------- 退出重进卡片 / 时间已到
+   重进时先给一张确认卡片；时间已到则直接停止作答（作答能力销毁），只提示可以点顶部「重做」。 */
+.resume-card {
+  border: 1px solid var(--border-strong); border-radius: 16px; background: #fff;
+  padding: 16px 18px; box-shadow: var(--shadow-soft); animation: card-in .16s var(--ease-out) both;
+}
+.resume-title { font-size: 15.5px; font-weight: 600; margin-bottom: 8px; }
+.resume-text { font-size: 13.5px; line-height: 1.85; color: var(--fg-soft); margin-bottom: 14px; }
+.resume-actions { display: flex; gap: 10px; }
+.resume-actions .primary-btn, .resume-actions .ghost-btn { padding: 9px 20px; }
+.qcard.window-closed, .qmsg.window-closed { opacity: .94; }
+/* 时间已到：控件全部停用、提交入口撤掉，只留一句「请点重做」的提示 */
+.qcard.stopped { background: var(--surface); }
+.qcard.stopped .qcard-body { opacity: .72; }
+.qstopped-hint { flex: 1 1 100%; font-size: 12px; line-height: 1.7; color: var(--warn-fg); }
+
+/* ---------------------------------------------------------------- 消息式题面（文本题 / 两段文本题组）
+   题干就是一条 AI 消息；题号、倒计时、字数提示收在气泡下方的一行小字里，
+   作答在底部常驻输入框完成，提交后回答以「用户气泡」出现在下方。 */
+.qmsg { display: flex; flex-direction: column; }
+.qmsg.done { opacity: .92; }
+.qmsg-meta {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-top: 8px; min-height: 22px;
+}
+.qmsg-meta .qnum { padding: 2px 9px; }
+.qmsg-note { font-size: 11.5px; color: var(--muted); }
+.qmsg .qcard-timer { font-size: 11px; padding: 2px 9px; }
+/* 已答题的用户气泡（作答回显）——与卡片一起受顶栏「隐藏 / 显示已答题」控制 */
+.msg.user.answered.answered-hidden { display: none; }
+
+/* ---------------------------------------------------------------- 阅读确认页（内联）
+   不再是全屏遮罩：内容照常留在聊天流里，确认按钮在下方，上面的反馈/材料仍可回看。 */
+.confirm-inline { border-left: 3px solid var(--border-strong); }
+.confirm-inline .qcard-body { padding-bottom: 2px; }
+.confirm-inline .qcard-foot { justify-content: flex-end; }
+
 /* ---------------------------------------------------------------- 题目卡片（一问一答） */
 .qcard {
   border: 1px solid var(--border); border-radius: 16px; background: #fff;
-  padding: 15px 17px; animation: rise-in .34s var(--ease-out) both;
+  padding: 15px 17px; animation: card-in .16s var(--ease-out) both;
 }
 .qcard.pending { border-color: var(--border-strong); box-shadow: var(--shadow-soft); }
 .qcard.locked { background: var(--surface); }
@@ -90,7 +197,7 @@ body { margin: 0; font-family: var(--font); color: var(--fg); background: #fff; 
   flex: 0 0 auto; font-size: 11.5px; font-weight: 600; color: var(--fg-soft);
   background: var(--bubble); border-radius: 999px; padding: 3px 10px;
 }
-.qtitle { flex: 1 1 auto; min-width: 0; font-size: 14.5px; font-weight: 600; line-height: 1.65; }
+.qtitle { flex: 1 1 auto; min-width: 0; font-size: 15.5px; font-weight: 600; line-height: 1.65; }
 .qcard-toggle { flex: 0 0 auto; }
 /* 题目右上角倒计时：门控期间显示「N 秒后可提交」，门控结束后显示作答倒计时「剩余 N 秒」 */
 .qcard-timer {
@@ -103,8 +210,14 @@ body { margin: 0; font-family: var(--font); color: var(--fg); background: #fff; 
   flex: 0 0 auto; font-size: 11px; font-weight: 600; color: var(--ok-fg);
   background: var(--ok-bg); border-radius: 999px; padding: 3px 9px;
 }
-.qtext { font-size: 13.5px; line-height: 1.85; color: var(--fg-soft); white-space: pre-wrap; margin-bottom: 12px; }
-.qcard.done { background: var(--surface); border-color: var(--border); box-shadow: none; }
+.qtext { font-size: 14px; font-weight: 500; line-height: 1.85; color: var(--fg-soft); margin-bottom: 12px; }
+.qcard.done { background: var(--surface); border-color: var(--border); box-shadow: none; opacity: .82; }
+/* 输入框驱动的题：作答回显（卡片内原本没有输入控件） */
+.qcard-echo {
+  font-size: 14px; font-weight: 500; line-height: 1.85; color: var(--fg-soft);
+  word-break: break-word;
+  background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 11px 14px;
+}
 .qcard.done .qcard-head { margin-bottom: 8px; }
 .qcard.done.collapsed { padding: 11px 17px; }
 .qcard.done.collapsed .qcard-body { display: none; }
@@ -123,7 +236,7 @@ body { margin: 0; font-family: var(--font); color: var(--fg); background: #fff; 
 .subs { display: flex; flex-direction: column; gap: 18px; }
 .subs.row { flex-direction: row; gap: 16px; }
 .subs.row .sub-control { flex: 1 1 0; min-width: 0; }
-.sub-title { font-size: 13.5px; font-weight: 600; color: var(--fg); margin-bottom: 9px; }
+.sub-title { font-size: 14.5px; font-weight: 600; color: var(--fg); margin-bottom: 9px; }
 .sub-note { font-size: 11.5px; font-weight: 400; color: var(--muted); margin-left: 4px; }
 .sub-anchor { font-size: 11.5px; color: var(--muted); margin-top: 7px; }
 .sub-count { font-size: 11.5px; color: var(--muted); text-align: right; margin-top: 5px; }
@@ -152,7 +265,7 @@ body { margin: 0; font-family: var(--font); color: var(--fg); background: #fff; 
 /* 门控期间控件照常可用：只有提交按钮置灰（见 .primary-btn:disabled） */
 
 .answer-input {
-  width: 100%; font: inherit; font-size: 14.5px; line-height: 1.85; color: var(--fg);
+  width: 100%; font: inherit; font-size: 14px; line-height: 1.85; color: var(--fg);
   background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
   padding: 11px 14px; outline: none; resize: none; overflow: hidden;
   transition: border-color .18s ease, background .18s ease, height .12s ease;
@@ -187,13 +300,17 @@ body { margin: 0; font-family: var(--font); color: var(--fg); background: #fff; 
 }
 .page-screen.visible { opacity: 1; }
 .page-card { max-width: 720px; margin: 0 auto; padding: 56px 24px 60px; animation: rise-in .4s var(--ease-out) both; }
-.page-card h2 { font-size: 19px; margin: 0 0 18px; }
-.page-text { font-size: 14px; line-height: 1.95; color: var(--fg-soft); white-space: pre-wrap; word-break: break-word; }
+.page-card h2 { font-size: 21px; margin: 0 0 18px; }
+.page-text { font-size: 14px; font-weight: 500; line-height: 1.95; color: var(--fg-soft); word-break: break-word; }
 .page-check {
   display: flex; align-items: flex-start; gap: 10px; margin: 26px 0 0;
   font-size: 13.5px; line-height: 1.7; color: var(--fg-soft); cursor: pointer;
 }
 .page-check input { width: 16px; height: 16px; margin-top: 2px; accent-color: #111213; }
+/* 知情同意页的「含编号」形态：勾选同意之后、进入按钮之前，填写编号才能进入 */
+.page-id { margin: 20px 0 0; }
+.page-id label { display: block; font-size: 13.5px; font-weight: 600; color: var(--fg); margin-bottom: 8px; }
+.page-id .answer-input { max-width: 340px; }
 .page-hint { font-size: 12.5px; color: var(--muted); margin: 0 0 14px; }
 /* 勾选与按钮同属一块：按钮紧随勾选项、整行宽度，勾选后方可点击 */
 .page-go {
@@ -208,6 +325,8 @@ body { margin: 0; font-family: var(--font); color: var(--fg); background: #fff; 
 @keyframes blink { 50% { opacity: 0; } }
 @keyframes bounce { 0%, 60%, 100% { transform: translateY(0); opacity: .5; } 30% { transform: translateY(-3px); opacity: 1; } }
 @keyframes rise-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+/* 新题进入：纯位移过渡（合成层完成，不触发重绘）——原来的「先透明再浮现」会造成一闪 */
+@keyframes card-in { from { transform: translateY(7px); } to { transform: none; } }
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
 
 /* ---------------------------------------------------------------- 应用内确认弹窗 */
@@ -218,7 +337,8 @@ body { margin: 0; font-family: var(--font); color: var(--fg); background: #fff; 
 }
 .confirm-mask.visible { opacity: 1; }
 .confirm-card {
-  width: min(92vw, 360px); background: #fff; border-radius: 18px; padding: 22px 20px 18px;
+  width: min(92vw, 360px); max-height: calc(100dvh - 48px); overflow: auto;   /* 绝不超过可视区 */
+  background: #fff; border-radius: 18px; padding: 22px 20px 18px;
   box-shadow: 0 18px 60px rgba(0, 0, 0, 0.22);
   transform: translateY(10px) scale(.98); transition: transform .2s var(--ease-out);
 }
@@ -229,12 +349,29 @@ body { margin: 0; font-family: var(--font); color: var(--fg); background: #fff; 
 .confirm-actions .ghost-btn { padding: 9px 16px; }
 .confirm-go { width: auto; margin: 0; padding: 9px 22px; font-size: 13.5px; }
 
-/* ---------------------------------------------------------------- 材料分割线：相邻系统消息之间的高亮虚线 */
-.msg-divider {
-  border-top: 2px dashed #a6a6ae;
-  margin: 2px 0;
-  user-select: none;
+
+/* ---------------------------------------------------------------- 底部常驻输入框
+   文本题在这里输入并发送；其他题型（选择题、题组、全屏页）输入框仍在，但发不出去。 */
+.composer { flex: 0 0 auto; border-top: 1px solid var(--border); background: #fff; }
+.composer-inner {
+  max-width: 860px; margin: 0 auto; padding: 12px 20px 0;
+  display: flex; align-items: flex-end; gap: 10px;
 }
+.composer-input {
+  flex: 1 1 auto; font: inherit; font-size: 14px; line-height: 1.7; color: var(--fg);
+  background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+  padding: 11px 14px; outline: none; resize: none; overflow: hidden; max-height: 168px;
+  transition: border-color .18s ease, background .18s ease;
+}
+.composer-input:focus { border-color: var(--border-strong); background: #fff; }
+.composer-input:disabled { background: #f7f7f8; color: var(--faint); cursor: not-allowed; }
+.composer-send { border-radius: 14px; padding: 11px 20px; }
+.composer-hint {
+  max-width: 860px; margin: 0 auto; padding: 7px 20px 11px;
+  font-size: 11.5px; line-height: 1.6; color: var(--muted); min-height: 30px;
+}
+
+/* ---------------------------------------------------------------- 切屏提醒浮层 */
 
 /* ---------------------------------------------------------------- 手机适配 */
 @media (max-width: 640px) {
