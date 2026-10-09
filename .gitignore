@@ -31,6 +31,3 @@ documents/
 .zcode/
 # Office 临时锁文件
 ~$*
-
-# 预实验便携包产物
-dist/

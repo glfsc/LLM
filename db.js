@@ -1273,8 +1273,7 @@ ensurePresetQuestionnaires();
 
 // 归属修复：预设问卷在 ensureAdminUser 的归属迁移「之后」才创建，会以 owner_id = NULL 入库；
 // 而列表按 owner_id 过滤，NULL 不匹配任何账号，导致这些问卷对所有用户都不可见。
-// 这里把仍无归属的实验 / 问卷统一挂到管理员名下。幂等，同时可修复既有库
-// （含已分发的便携包首次建库）。
+// 这里把仍无归属的实验 / 问卷统一挂到管理员名下。幂等，同时可修复既有库。
 function ensureOwnershipAssigned() {
   const admin = getUserByName('admin')
     || db.prepare("SELECT * FROM users WHERE role = 'admin' ORDER BY created_at ASC, rowid ASC LIMIT 1").get()

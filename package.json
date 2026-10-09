@@ -13,7 +13,6 @@
     "presets": "node scripts/seed-presets.js",
     "thinking": "node scripts/seed-thinking.js",
     "reset-db": "node scripts/reset-db.js",
-    "portable": "node scripts/build-portable.js",
     "sync-groups": "node scripts/sync-group-content.js"
   },
   "engines": {
