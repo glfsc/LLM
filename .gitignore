@@ -15,9 +15,6 @@ npm-debug.log*
 .DS_Store
 Thumbs.db
 
-# 运行时上传（问卷实验题图片等，不入库）
-uploads/
-
 # 开发/自检过程截图不入库（仅保留 v3-* 文档定稿截图）
 screenshots/*
 !screenshots/v5-*
@@ -26,8 +23,14 @@ screenshots/*
 # 设计预览走查截图（design/ 下的方案与预览页保留）
 design/shots/
 
+# 内部文档（需求、方案、实施报告等，不入库）
+documents/
+
 # 工具/临时目录
 .tmp/
 .zcode/
 # Office 临时锁文件
 ~$*
+
+# 预实验便携包产物
+dist/

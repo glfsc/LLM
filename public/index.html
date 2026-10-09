@@ -85,6 +85,13 @@
       display: flex; align-items: center; justify-content: space-between;
       margin-top: 14px; font-size: 12.5px;
     }
+    /* 「记住账号密码」勾选项：与字段同一套字号，勾选后 30 天免登录 */
+    .remember-row {
+      display: flex; align-items: center; gap: 8px; margin: -2px 0 14px;
+      font-size: 12.5px; color: var(--muted); cursor: pointer; user-select: none;
+    }
+    .remember-row input { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; margin: 0; }
+    .remember-row:hover { color: var(--fg); }
     .link-btn {
       font: inherit; font-size: 12.5px; color: var(--muted);
       background: none; border: 0; padding: 0; cursor: pointer;
@@ -120,8 +127,12 @@
         <h2 class="card-title">账号登录</h2>
         <p class="card-sub">登录后进入实验与问卷管理。</p>
         <form id="login-form" autocomplete="off">
-          <label class="field"><span>账号</span><input id="login-username" type="text" autocomplete="username"></label>
-          <label class="field"><span>密码</span><input id="login-password" type="password" autocomplete="current-password"></label>
+          <label class="field"><span>账号</span><input id="login-username" type="text" autocomplete="off"></label>
+          <label class="field"><span>密码</span><input id="login-password" type="password" autocomplete="new-password"></label>
+          <label class="remember-row">
+            <input id="login-remember" type="checkbox">
+            <span>记住账号密码（30 天内免登录）</span>
+          </label>
           <p id="login-error" class="err hidden"></p>
           <button id="login-btn" class="go" type="submit">登录</button>
         </form>
@@ -198,16 +209,68 @@
       return data;
     }
 
+    // 「记住账号密码」：勾选后把账号密码与 30 天 token 存在本机（localStorage），重开浏览器免登录。
+    // 也正因为要自己记，登录框的 autocomplete 关掉了——浏览器自带的填充会填成另一个账号。
+    var REMEMBER_KEY = 'expchat_login_remember';       // { username, password, expiresAt }
+    var TOKEN_REMEMBER_KEY = 'expchat_admin_token_remember';  // { token, username, expiresAt }
+
+    function readRemember() {
+      try {
+        var rec = JSON.parse(localStorage.getItem(REMEMBER_KEY) || 'null');
+        if (!rec || !rec.username) return null;
+        if (Number(rec.expiresAt) && Number(rec.expiresAt) < Date.now()) { localStorage.removeItem(REMEMBER_KEY); return null; }
+        return rec;
+      } catch (e) { return null; }
+    }
+    function clearRemember() {
+      try { localStorage.removeItem(REMEMBER_KEY); localStorage.removeItem(TOKEN_REMEMBER_KEY); } catch (e) { /* 忽略 */ }
+    }
+    function saveRemember(username, password) {
+      var expiresAt = Date.now() + 30 * 24 * 60 * 60 * 1000;
+      try {
+        localStorage.setItem(REMEMBER_KEY, JSON.stringify({ username: username, password: password, expiresAt: expiresAt }));
+      } catch (e) { /* 忽略 */ }
+    }
+    // 预填：优先「记住的账号密码」→ 其次「上次登录的账号」；并清掉浏览器可能自动填进来的别的账号
+    function prefillLogin() {
+      var rec = readRemember();
+      var last = '';
+      try { last = localStorage.getItem('expchat_last_user') || ''; } catch (e) { /* 忽略 */ }
+      var userEl = $('login-username');
+      var pwdEl = $('login-password');
+      var want = rec ? rec.username : last;
+      if (want && userEl.value !== want) userEl.value = want;
+      if (rec && rec.password && pwdEl.value !== rec.password) pwdEl.value = rec.password;
+      $('login-remember').checked = !!rec;
+    }
+    window.addEventListener('load', function () {
+      prefillLogin();
+      // 浏览器自动填充可能晚一拍，再覆盖一次
+      setTimeout(prefillLogin, 300);
+    });
+
     $('login-form').addEventListener('submit', async function (e) {
       e.preventDefault();
       var username = $('login-username').value.trim();
       var password = $('login-password').value;
+      var remember = $('login-remember').checked;
       if (!username || !password) { showErr('login-error', '请输入账号和密码'); return; }
       hideErr('login-error');
       $('login-btn').disabled = true;
       try {
-        var res = await post('/api/auth/login', { username: username, password: password });
+        var res = await post('/api/auth/login', { username: username, password: password, remember: remember });
         sessionStorage.setItem('expchat_admin_token', res.token);
+        try { localStorage.setItem('expchat_last_user', username); } catch (e) { /* 忽略 */ }
+        if (remember) {
+          saveRemember(username, password);
+          try {
+            localStorage.setItem(TOKEN_REMEMBER_KEY, JSON.stringify({
+              token: res.token, username: username, expiresAt: Date.now() + (Number(res.ttlMs) || 30 * 24 * 60 * 60 * 1000)
+            }));
+          } catch (e) { /* 忽略 */ }
+        } else {
+          clearRemember();
+        }
         location.href = '/admin';
       } catch (err) {
         showErr('login-error', err.message);

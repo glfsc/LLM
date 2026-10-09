@@ -15,7 +15,7 @@
           <span class="brand-dot" aria-hidden="true"></span>
           <span class="brand-name">智能评估系统</span>
         </div>
-        <button id="btn-collapse-all" class="ghost-btn" type="button">显示已答题</button>
+        <button id="btn-collapse-all" class="ghost-btn" type="button">隐藏已答题</button>
         <button id="btn-redo" class="ghost-btn" type="button">重做</button>
       </div>
     </header>
@@ -23,17 +23,31 @@
     <main id="chat-scroll" class="chat-scroll">
       <div id="chat-stream" class="chat-stream" aria-live="polite"></div>
     </main>
+
+    <!-- 常驻输入框：文本题在这里输入并发送；其他题型可见但发不出去 -->
+    <footer class="composer" id="composer">
+      <div class="composer-inner">
+        <textarea id="composer-input" class="composer-input" rows="1" placeholder="输入你的回答…"></textarea>
+        <button id="composer-send" class="primary-btn composer-send" type="button" disabled>发送</button>
+      </div>
+      <p id="composer-hint" class="composer-hint"></p>
+    </footer>
   </div>
 
   <!-- 全屏页面：知情同意页（gate）/ 结束说明页（debrief） -->
   <div id="page-screen" class="page-screen hidden">
     <div class="page-card">
       <h2 id="page-title"></h2>
-      <div id="page-text" class="page-text"></div>
+      <div id="page-text" class="page-text rich"></div>
       <label id="page-check-wrap" class="page-check">
         <input id="page-check" type="checkbox">
         <span id="page-check-label"></span>
       </label>
+      <!-- 知情同意页（含编号）形态：填写编号后才能点进入按钮 -->
+      <div id="page-id-wrap" class="page-id hidden">
+        <label id="page-id-label" for="page-id-input">被试编号</label>
+        <input id="page-id-input" class="answer-input" type="text" autocomplete="off" autocapitalize="off" spellcheck="false">
+      </div>
       <p id="page-hint" class="page-hint hidden"></p>
       <button id="page-btn" class="page-go" type="button">继续</button>
     </div>
@@ -51,6 +65,17 @@
     </div>
   </div>
 
+  <!-- 切屏提醒：离开实验界面后回来时居中弹出（与「重做」确认同款样式，但各自独立） -->
+  <div id="leave-mask" class="confirm-mask hidden">
+    <div class="confirm-card">
+      <h3 id="leave-title">请勿离开实验界面</h3>
+      <p id="leave-text" class="confirm-text"></p>
+      <div class="confirm-actions">
+        <button id="leave-ok" class="page-go confirm-go" type="button">我知道了</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 异常提示页 -->
   <div id="error-screen" class="page-screen hidden">
     <div class="page-card">
@@ -59,6 +84,7 @@
     </div>
   </div>
 
+  <script src="/assets/richtext.js"></script>
   <script src="/assets/chat.js"></script>
 </body>
 </html>

@@ -20,19 +20,36 @@ const $segMenu = $('seg-menu');
 const $segOutline = $('seg-outline');
 
 const TOKEN_KEY = 'expchat_admin_token';
+const TOKEN_REMEMBER_KEY = 'expchat_admin_token_remember';   // { token, username, expiresAt }：勾了「记住密码」才有
+
+// 「记住密码」= 登录页勾选后签发的 30 天 token（存 localStorage，重开浏览器仍免登录）
+function loadRememberedToken() {
+  try {
+    const rec = JSON.parse(localStorage.getItem(TOKEN_REMEMBER_KEY) || 'null');
+    if (!rec || !rec.token) return '';
+    if (Number(rec.expiresAt) && Number(rec.expiresAt) < Date.now()) { localStorage.removeItem(TOKEN_REMEMBER_KEY); return ''; }
+    return rec.token;
+  } catch { return ''; }
+}
+function clearTokens() {
+  sessionStorage.removeItem(TOKEN_KEY);
+  try { localStorage.removeItem(TOKEN_REMEMBER_KEY); } catch { /* 忽略 */ }
+}
+
+const initialToken = sessionStorage.getItem(TOKEN_KEY) || loadRememberedToken();
+if (initialToken) { try { sessionStorage.setItem(TOKEN_KEY, initialToken); } catch { /* 忽略 */ } }
 
 const state = {
-  token: sessionStorage.getItem(TOKEN_KEY) || '',
+  token: initialToken,
   user: null,             // 当前登录用户 { id, username, role, avatar }
-  meta: null,             // { itemTypes, itemTypeLabels, itemLimits, timingMeta, itemDefaults, defaultQuestionnaireItems, resumeWindowHours }
+  meta: null,             // { itemTypes, itemTypeLabels, itemVariants, itemLimits, limitMeta, limitDefaults, itemDefaults, ... }
   experiments: [],
   questionnaires: [],
   editingExp: null,       // 编辑中的实验模板（本地副本，保存时提交）
   editingQ: null,         // 编辑中的问卷
   selected: null,         // 当前选中的题目 id
   sidebarMode: 'menu',    // menu | outline
-  previewSpeed: 1,        // 试填 / 预览的演示倍速（1 = 与正式实验一致）
-  trial: null,            // { list, idx, answers }
+  previewSpeed: 1,        // 手机预览的演示倍速（1 = 与正式实验一致）
   dragId: null,
   view: 'exp-list'
 };
@@ -40,8 +57,8 @@ const state = {
 const TYPE = () => state.meta.itemTypes;
 const TYPE_LABEL = (t) => (state.meta.itemTypeLabels[t] || t);
 const TYPE_LIMITS = (t) => (state.meta.itemLimits[t] || []);
-const TIMING_META = () => state.meta.timingMeta;
-const TIMING_KEYS = () => state.meta.timingKeys;
+const LIMIT_META = () => state.meta.limitMeta;
+const LIMIT_DEFAULTS = () => state.meta.limitDefaults;
 
 /* ---------------------------------------------------------------- 基础工具 */
 
@@ -114,12 +131,6 @@ function formatDuration(sec) {
   return m > 0 ? `${m} 分 ${s} 秒` : `${s} 秒`;
 }
 
-function setHint(node, message, isError = false) {
-  if (!node) return;
-  node.textContent = message;
-  node.classList.toggle('err', Boolean(isError));
-}
-
 function sectionHead(title, hint) {
   const section = el('div', 'section');
   const head = el('div', 'section-head');
@@ -130,16 +141,21 @@ function sectionHead(title, hint) {
 }
 
 // 文本域自动增高：高度跟随内容（下限为 rows 对应高度），避免固定高度内部滚动（issue 9）
+// 也允许手动往下拖：拖高后把当时的高度记成下限，继续输入不会被自动增高顶回去（issue 3）
 function autoGrowTextarea(textarea, minRows) {
   const minHeight = Math.max(1, Number(minRows) || 1) * 22 + 22;
   const resize = () => {
     textarea.style.height = 'auto';
-    textarea.style.height = `${Math.max(textarea.scrollHeight, minHeight)}px`;
+    const floor = Math.max(minHeight, Number(textarea.dataset.minH) || 0);
+    textarea.style.height = `${Math.max(textarea.scrollHeight, floor)}px`;
   };
-  textarea.style.overflow = 'hidden';
-  textarea.style.resize = 'none';
+  textarea.style.overflow = 'auto';
+  const applyResize = (v) => { textarea.dataset.minH = String(Math.max(minHeight, Number(v) || 0)); resize(); };
   textarea.addEventListener('input', resize);
-  window.setTimeout(resize, 0);
+  textarea.addEventListener('mouseup', () => {
+    if (textarea.scrollHeight < textarea.clientHeight) applyResize(textarea.clientHeight);
+  });
+  window.setTimeout(() => { applyResize(textarea.dataset.minH); }, 0);
   return resize;
 }
 
@@ -158,6 +174,257 @@ function makeField(labelText, value, rows) {
   input.value = value == null ? '' : String(value);
   wrap.appendChild(input);
   return { wrap, input };
+}
+
+/* ---------------------------------------------------------------- 富文本编辑控件（类 Word）
+   正文一律用它编辑：正文 / 一至六级标题、字号、加粗 / 斜体 / 下划线 / 删除线、字体颜色、背景色、
+   对齐、清除格式；从 Word 或网页粘贴保留格式（mso-* 之类垃圾样式在 richtext.js 里被丢掉）。
+   被试端渲染的就是这里清洗后的 HTML——同一份 richtext.js。 */
+function makeRichField(labelText, htmlValue, opts = {}) {
+  // 注意：这里必须是 div，不能用 <label> —— label 会把点击转发给内部第一个表单控件（工具条的下拉），
+  // 导致点正文区域编辑器拿不到焦点、输入不进去。
+  const wrap = el('div', 'field rich-field');
+  wrap.appendChild(el('span', '', labelText));
+  const box = el('div', 'rich-box');
+  const bar = el('div', 'rich-bar');
+
+  const editor = el('div', 'rich-edit');
+  editor.contentEditable = 'true';
+  editor.spellcheck = false;
+  editor.innerHTML = RichText.sanitizeHtml(htmlValue || '');
+
+  let lastHtml = typeof opts.initialHtml === 'string' ? opts.initialHtml : null;
+  const sync = () => {
+    const html = RichText.sanitizeHtml(editor.innerHTML);
+    editor.dataset.empty = html ? '0' : '1';
+    if (html === lastHtml) return;
+    lastHtml = html;
+    if (opts.onChange) opts.onChange(html, RichText.htmlToText(html));
+  };
+
+  const exec = (cmd, value) => {
+    editor.focus();
+    try { document.execCommand(cmd, false, value); } catch { /* 忽略 */ }
+    sync();
+  };
+  const mkBtn = (label, title, fn, cls) => {
+    const b = el('button', 'rich-btn' + (cls ? ' ' + cls : ''), label);
+    b.type = 'button';
+    b.title = title;
+    // 别让按钮抢走选区，否则「选中文字再加粗」就失效了
+    b.addEventListener('mousedown', (e) => e.preventDefault());
+    b.addEventListener('click', (e) => { e.preventDefault(); fn(); });
+    return b;
+  };
+
+  const blockSel = el('select', 'rich-select');
+  blockSel.title = '段落样式（把第一行设为标题就用它）';
+  for (const [v, t] of [['p', '正文'], ['h1', '标题 1'], ['h2', '标题 2'], ['h3', '标题 3'], ['h4', '标题 4'], ['h5', '标题 5'], ['h6', '标题 6']]) {
+    const o = el('option', '', t);
+    o.value = v;
+    blockSel.appendChild(o);
+  }
+  blockSel.addEventListener('mousedown', (e) => e.stopPropagation());
+  blockSel.addEventListener('change', () => exec('formatBlock', blockSel.value));
+
+  // 精确字号：先给选区套 span（保留行内结构）；跨段落时报废，退化为「对涉及的整段生效」（和 Word 一致）
+  const BLOCK_SEL = 'P,H1,H2,H3,H4,H5,H6,LI,BLOCKQUOTE,DIV';
+  const applyFontSize = (value) => {
+    const sel = window.getSelection();
+    const saved = sel && sel.rangeCount ? sel.getRangeAt(0).cloneRange() : null;
+    editor.focus();
+    // focus 有时会把程序设置的选区清掉（变成光标）——这种情况下把原选区放回去
+    if (saved && sel && (!sel.rangeCount || (sel.getRangeAt(0).collapsed && !saved.collapsed))) {
+      try { sel.removeAllRanges(); sel.addRange(saved); } catch { /* 忽略 */ }
+    }
+    if (!sel || !sel.rangeCount) return;
+    const range = sel.getRangeAt(0);
+    if (value === 'body') { clearFontSize(range); sync(); return; }
+    clearFontSize(range);                      // 先清掉旧字号，避免一层层套 span
+    if (!range.collapsed) {
+      const span = document.createElement('span');
+      span.style.fontSize = value;
+      try {
+        range.surroundContents(span);
+        sync();
+        return;
+      } catch { /* 选区跨块：往下走，按块处理 */ }
+    }
+    const blocks = [];
+    const walker = document.createTreeWalker(editor, NodeFilter.SHOW_ELEMENT);
+    while (walker.nextNode()) {
+      const n = walker.currentNode;
+      if (!n.matches(BLOCK_SEL)) continue;
+      if (!range.collapsed ? range.intersectsNode(n) : n.contains(range.startContainer)) blocks.push(n);
+    }
+    if (!blocks.length) {
+      // 光标停在行内元素里：往上找最近的块
+      let node = range.startContainer;
+      while (node && node !== editor && !(node.nodeType === 1 && node.matches(BLOCK_SEL))) node = node.parentNode;
+      if (node && node !== editor) blocks.push(node);
+    }
+    if (!blocks.length) return;                      // 找不到就不动（绝不改编辑器本身）
+    blocks.forEach((b) => { b.style.fontSize = value; });
+    sync();
+  };
+  // 「正文（默认）」= 去掉字号样式，回到容器默认字号（14px）。
+  // 光标折叠时 intersectsNode 可能命中不到，这里补一条「沿祖先链找到所在块」的分支。
+  const clearFontSize = (range) => {
+    const hit = (n) => {
+      try { return range.intersectsNode(n); } catch { return false; }
+    };
+    const targets = new Set();
+    const walker = document.createTreeWalker(editor, NodeFilter.SHOW_ELEMENT);
+    while (walker.nextNode()) {
+      const n = walker.currentNode;
+      if (!n.style || !n.style.fontSize) continue;
+      if (hit(n)) targets.add(n);
+    }
+    if (range.collapsed) {
+      let node = range.startContainer;
+      if (node && node.nodeType !== 1) node = node.parentNode;
+      while (node && node !== editor) {
+        if (node.style && node.style.fontSize) targets.add(node);
+        node = node.parentNode;
+      }
+    }
+    targets.forEach((n) => {
+      n.style.fontSize = '';
+      if (!n.getAttribute('style')) n.removeAttribute('style');
+    });
+  };
+
+  // 字号：只给 Word 那套中文号数（正文那档标出来，并且是默认值）
+  const sizeSel = el('select', 'rich-select');
+  sizeSel.title = '字号（「正文」= 默认字号，不写入任何字号样式）；光标移到文字上会显示它当前是哪一号';
+  // 档位表来自 RichText（与「粘贴时识别字号」共用同一张表，避免两处漂移）
+  // 「正文（默认 14px）」= 不写入字号（回落编辑器默认 14px）；其余按 Word 号数换算（pt × 4/3）
+  {
+    const o = el('option', '', '正文（默认 14px）');
+    o.value = 'body';
+    sizeSel.appendChild(o);
+    for (const p of RichText.FONT_SIZE_PRESETS) {
+      const op = el('option', '', p.label);
+      op.value = `${p.px}px`;
+      sizeSel.appendChild(op);
+    }
+  }
+  sizeSel.value = 'body';
+  sizeSel.addEventListener('mousedown', (e) => e.stopPropagation());
+  sizeSel.addEventListener('change', () => { applyFontSize(sizeSel.value); syncSizeSelToCaret(); });
+  // 光标 / 选区一动，就把「当前字号」回显到下拉里（这样粘贴进来的字号能看出是哪一号）
+  const syncSizeSelToCaret = () => {
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount) { sizeSel.value = 'body'; return; }
+    const range = sel.getRangeAt(0);
+    if (!editor.contains(range.startContainer)) return;
+    let node = range.startContainer;
+    if (node && node.nodeType !== 1) node = node.parentNode;
+    let px = 0;
+    while (node && node !== editor) {
+      if (node.style && node.style.fontSize) { px = parseFloat(node.style.fontSize); break; }
+      node = node.parentNode;
+    }
+    if (!px) {
+      // 没有内联字号 → 看容器实际算出来的（标题 / 正文各自的默认字号）
+      const probe = range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement;
+      px = probe ? parseFloat(getComputedStyle(probe).fontSize) : 0;
+    }
+    const preset = px ? RichText.fontPresetOf(px) : null;
+    sizeSel.value = preset && preset.exact ? `${preset.px}px` : 'body';
+  };
+  // 只在本编辑器里监听光标变化（其它字段不动这个下拉）
+  document.addEventListener('selectionchange', () => {
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount) return;
+    let node = sel.getRangeAt(0).startContainer;
+    if (node && node.nodeType !== 1) node = node.parentNode;
+    if (!node || !editor.contains(node)) return;
+    syncSizeSelToCaret();
+  });
+
+  bar.append(blockSel, sizeSel);
+  bar.append(
+    mkBtn('B', '加粗（Ctrl+B）', () => exec('bold'), 'b'),
+    mkBtn('I', '斜体（Ctrl+I）', () => exec('italic'), 'i'),
+    mkBtn('U', '下划线（Ctrl+U）', () => exec('underline'), 'u'),
+    mkBtn('S', '删除线', () => exec('strikeThrough'), 'strike')
+  );
+
+  const fg = el('input', 'rich-color');
+  fg.type = 'color';
+  fg.value = '#111213';
+  fg.title = '字体颜色';
+  fg.addEventListener('input', () => exec('foreColor', fg.value));
+  const bg = el('input', 'rich-color');
+  bg.type = 'color';
+  bg.value = '#fff3bf';
+  bg.title = '字体背景色';
+  bg.addEventListener('input', () => {
+    editor.focus();
+    let ok = false;
+    try { ok = document.execCommand('hiliteColor', false, bg.value); } catch { ok = false; }
+    if (!ok) { try { document.execCommand('backColor', false, bg.value); } catch { /* 忽略 */ } }
+    sync();
+  });
+  // 颜色按钮：点按钮任意位置 = 应用当前预选色；点内部的小色块 = 打开取色器调整预选色
+  const colorBtn = (input, tag, title, apply) => {
+    const wrap = el('button', 'rich-color-wrap');
+    wrap.type = 'button';
+    wrap.title = `${title}：点按钮直接应用当前颜色；点左侧色块可换颜色`;
+    wrap.append(input, el('span', 'rich-color-tag', tag));
+    wrap.addEventListener('mousedown', (e) => e.preventDefault());     // 别抢走选区
+    wrap.addEventListener('click', (e) => {
+      if (e.target === input) return;                                  // 点色块 → 只开取色器
+      e.preventDefault();
+      apply(input.value);
+    });
+    input.addEventListener('mousedown', (e) => e.stopPropagation());
+    return wrap;
+  };
+  const fgWrap = colorBtn(fg, 'A', '字体颜色', (v) => exec('foreColor', v));
+  const bgWrap = colorBtn(bg, '底色', '字体背景色', (v) => {
+    editor.focus();
+    let ok = false;
+    try { ok = document.execCommand('hiliteColor', false, v); } catch { ok = false; }
+    if (!ok) { try { document.execCommand('backColor', false, v); } catch { /* 忽略 */ } }
+    sync();
+  });
+  bar.append(fgWrap, bgWrap);
+
+  bar.append(
+    mkBtn('左', '左对齐', () => exec('justifyLeft')),
+    mkBtn('中', '居中', () => exec('justifyCenter')),
+    mkBtn('清除格式', '清除选中文字的格式（回到正文默认）', () => exec('removeFormat'))
+  );
+
+  const onPaste = (e) => {
+    const dt = e.clipboardData;
+    if (!dt) return;
+    const html = dt.getData('text/html');
+    const text = dt.getData('text/plain');
+    e.preventDefault();
+    const clean = html ? RichText.cleanWordPaste(html) : RichText.plainPasteToHtml(text);
+    if (!clean) return;
+    editor.focus();
+    try { document.execCommand('insertHTML', false, clean); } catch { /* 忽略 */ }
+    sync();
+  };
+  editor.addEventListener('paste', onPaste);
+  editor.addEventListener('input', sync);
+  editor.addEventListener('blur', sync);
+  editor.addEventListener('focus', () => {
+    try {
+      document.execCommand('styleWithCSS', false, true);
+      document.execCommand('defaultParagraphSeparator', false, 'p');
+    } catch { /* 忽略 */ }
+  });
+
+  box.append(bar, editor);
+  if (opts.hint) box.appendChild(el('p', 'field-hint', opts.hint));
+  wrap.appendChild(box);
+  sync();
+  return { wrap, editor, sync, setHtml: (html) => { editor.innerHTML = RichText.sanitizeHtml(html || ''); lastHtml = null; sync(); } };
 }
 
 function makeNumberField(labelText, value, min, max, hint) {
@@ -248,14 +515,14 @@ async function enterAdmin() {
 async function boot() {
   if (!state.token) { location.replace('/'); return; }
   try { await enterAdmin(); } catch (err) {
-    if (err.status === 401) { state.token = ''; sessionStorage.removeItem(TOKEN_KEY); location.replace('/'); }
+    if (err.status === 401) { state.token = ''; clearTokens(); location.replace('/'); }
   }
 }
 
 function maybeSessionExpired(err) {
   if (err.status !== 401) return false;
   state.token = '';
-  sessionStorage.removeItem(TOKEN_KEY);
+  clearTokens();
   location.reload();
   return true;
 }
@@ -286,9 +553,14 @@ function currentEditing() {
 
 function handleRoute() {
   if ($('admin-view').classList.contains('hidden')) return;
-  if (!location.hash) { location.replace('#/exp'); return; }
+  // 切页：先释放上一个编辑页的资源（进度轮询 / 预览会话）
+  if (editorShellDispose) {
+    try { editorShellDispose(); } catch { /* 忽略 */ }
+    editorShellDispose = null;
+  }
+  if (!location.hash) { location.replace('#/q'); return; }
   const route = parseHash();
-  if (!route) { location.replace('#/exp'); return; }
+  if (!route) { location.replace('#/q'); return; }
 
   document.querySelectorAll('.sidebar-item').forEach((item) => {
     item.classList.toggle('active', item.dataset.nav === route.section);
@@ -323,13 +595,11 @@ window.addEventListener('hashchange', handleRoute);
 document.querySelectorAll('.sidebar-item').forEach((a) => {
   a.addEventListener('click', (e) => {
     e.preventDefault();
-    state.trial = null;
     location.hash = a.dataset.nav === 'exp' ? '#/exp' : '#/q';
   });
 });
 
 $('btn-settings').addEventListener('click', () => {
-  state.trial = null;
   location.hash = '#/settings';
 });
 
@@ -371,6 +641,7 @@ function applyLayout(l) {
   document.body.classList.toggle('side-collapsed', !!l.collapsed);
   const btn = $('btn-side-collapse');
   if (btn) btn.textContent = l.collapsed ? '»' : '«';
+  if (typeof fitPhoneScale === 'function') fitPhoneScale();   // 拖动改动手机栏宽度时同步缩放
 }
 function startDrag(ev, which) {
   ev.preventDefault();
@@ -404,27 +675,239 @@ function initLayout() {
   });
 }
 
+// 大纲：层级树（高级包含低级）+ 折叠箭头 + 跟随编辑区滚动的高亮
+// 层级 0 = 默认（顶层）；1–4 = 依次缩进。「紧跟其后、层级更深」的题目视为下属。
+const outlineCollapsed = new Set();      // 大纲里被折叠的题目 id（内存态，刷新页面即展开）
+let outlineActiveId = null;              // 大纲里当前高亮的那一行（滚动跟随 / 点击都改它）
+let outlineSyncing = false;
+let outlineSyncRaf = null;
+
+function outlineHasChildren(items, i) {
+  return i + 1 < items.length && levelRank(itemLevel(items[i + 1])) < levelRank(itemLevel(items[i]));
+}
+// 折叠之后仍然可见的行（被折叠父题的下属全部隐藏）
+function outlineVisibleIndexes(items) {
+  const rows = [];
+  let hideLowerThan = null;
+  for (let i = 0; i < items.length; i += 1) {
+    const rank = levelRank(itemLevel(items[i]));
+    if (hideLowerThan != null && rank < hideLowerThan) continue;      // 更小的级别 = 下属 → 藏起来
+    hideLowerThan = null;
+    rows.push(i);
+    if (outlineCollapsed.has(items[i].id) && outlineHasChildren(items, i)) hideLowerThan = rank;
+  }
+  return rows;
+}
+// 某题的全部上级（用于「滚动到某题时自动展开它的上级」）
+function outlineAncestors(items, index) {
+  const chain = [];
+  let rank = levelRank(itemLevel(items[index]));
+  for (let i = index - 1; i >= 0 && rank < 4; i -= 1) {
+    const up = levelRank(itemLevel(items[i]));
+    if (up > rank) { chain.push(items[i]); rank = up; }
+  }
+  return chain;
+}
+// 编辑区滚到某道题的「开头」：
+//   ① 只滚编辑区自身（不用 scrollIntoView —— 它会把外层 .admin-main 一起滚，整页一移，右边手机栏就只剩最下面一条）
+//   ② 顶部要让开粘性操作条（否则题卡顶被压在操作条下面，看着像「跳到了题目下面」）
+//   ③ 窄屏（≤980px）编辑区不自己滚（overflow: visible），这时改滚整页
+//   ④ 默认平滑下滑（smooth），点一下就「滑」过去而不是瞬间闪过去
+// 只把某一行「保持在可视区内」：超出才动，且动得最少（用户手动滚大纲时不会被拽回去）
+function keepRowVisible(container, node, gap) {
+  if (!container || !node) return;
+  const gapPx = gap == null ? 10 : gap;
+  const cRect = container.getBoundingClientRect();
+  const nRect = node.getBoundingClientRect();
+  if (nRect.top < cRect.top + gapPx) container.scrollTop += nRect.top - cRect.top - gapPx;
+  else if (nRect.bottom > cRect.bottom - gapPx) container.scrollTop += nRect.bottom - cRect.bottom + gapPx;
+}
+function editorStickyPad() {
+  const bar = document.querySelector('.editor-scroll .editor-actionbar');
+  return (bar ? bar.getBoundingClientRect().height : 0) + 10;
+}
+// 平滑滚动：不用浏览器自带 behavior:'smooth'（长距离时它的时长不可控，几万像素要滑好几秒，
+// 途中大纲高亮会一直跟着路过中间那些题）。这里自己做一段短缓动：150–300ms，落点精确。
+let editorScrollAnim = null;
+function animateScrollTop(el, target) {
+  if (!el) return 0;
+  if (editorScrollAnim) { window.cancelAnimationFrame(editorScrollAnim.raf); editorScrollAnim = null; }
+  const from = el.scrollTop;
+  const dist = target - from;
+  const dur = Math.max(150, Math.min(300, 130 + Math.abs(dist) / 60));
+  if (Math.abs(dist) < 2) { el.scrollTop = target; return 0; }
+  const t0 = performance.now();
+  const ease = (t) => 1 - Math.pow(1 - t, 3);
+  const step = () => {
+    const p = Math.min(1, (performance.now() - t0) / dur);
+    el.scrollTop = from + dist * ease(p);
+    if (p < 1) editorScrollAnim = { raf: window.requestAnimationFrame(step) };
+    else { editorScrollAnim = null; el.scrollTop = target; }
+  };
+  editorScrollAnim = { raf: window.requestAnimationFrame(step) };
+  return dur;
+}
+// 动画结束后按最终布局校正落点：只留最后一次（连点几下不再排出好几个迟到的校正，越点越晃）
+let editorScrollFix = null;
+function cancelEditorScrollFix() {
+  if (editorScrollFix) { window.clearTimeout(editorScrollFix); editorScrollFix = null; }
+}
+// 用户一动手就停掉正在跑的滚动动画与待校正，并解除高亮钉住（立刻恢复「滚到哪高亮哪」）
+function cancelEditorScrollAnim() {
+  if (editorScrollAnim) { window.cancelAnimationFrame(editorScrollAnim.raf); editorScrollAnim = null; }
+  cancelEditorScrollFix();
+  outlinePin = null;
+}
+function scrollEditorTo(node, smooth = true) {
+  const sc = document.querySelector('.editor-scroll');
+  if (!sc || !node) return 0;
+  const pad = editorStickyPad();
+  // 目标位置：把这道题的开头放到「粘性操作条下面」
+  const targetOf = (el) => {
+    const delta = node.getBoundingClientRect().top - el.getBoundingClientRect().top - pad;
+    return Math.max(0, Math.min(el.scrollHeight - el.clientHeight, el.scrollTop + delta));
+  };
+  // 选中态 / 「就地插入」行会让上方内容高度变化 → 动画结束后按最终布局校正一次（瞬时 ±几像素，不再是第二段动画）
+  const correctLater = (el, dur) => {
+    cancelEditorScrollFix();
+    editorScrollFix = window.setTimeout(() => {
+      editorScrollFix = null;
+      const d = node.getBoundingClientRect().top - el.getBoundingClientRect().top - pad;
+      if (Math.abs(d) > 4) el.scrollTop = Math.max(0, Math.min(el.scrollHeight - el.clientHeight, el.scrollTop + d));
+    }, (dur || 200) + 60);
+  };
+  if (sc.scrollHeight > sc.clientHeight + 1) {
+    if (!smooth) { cancelEditorScrollFix(); sc.scrollTop = targetOf(sc); return 0; }
+    const dur = animateScrollTop(sc, targetOf(sc));
+    correctLater(sc, dur);
+    return dur;
+  }
+  // 编辑区不滚（窄屏堆叠）：滚整页
+  const docEl = document.scrollingElement || document.documentElement;
+  if (smooth) {
+    const dur = animateScrollTop(docEl, targetOf(docEl));
+    correctLater(docEl, dur);
+    return dur;
+  }
+  cancelEditorScrollFix();
+  for (let i = 0; i < 2; i += 1) {
+    const d2 = node.getBoundingClientRect().top - (pad + 8);
+    if (Math.abs(d2) < 2) break;
+    window.scrollTo(0, Math.max(0, window.scrollY + d2));
+  }
+  return 0;
+}
+// 程序化滚动（平滑）期间把大纲高亮钉在目标题上：否则滚动途中跟随逻辑会把高亮甩到中途的题
+let outlinePin = null;
+let outlinePinTimer = null;
+function pinOutlineHighlight(id, ms = 900) {
+  outlinePin = { id, until: Date.now() + ms };
+  // 钉住结束后自动重算一次：万一这期间用户滚过（高亮被钉住没跟），这里补上
+  window.clearTimeout(outlinePinTimer);
+  outlinePinTimer = window.setTimeout(() => { outlinePin = null; syncOutlineActive(); }, ms + 30);
+}
+
+// 大纲高亮：只有「高亮的那一行」真的换了才碰 DOM。
+// 滚动跟随时每帧都会走到这里，连点大纲切换题目时也不该全表扫一遍。
+let outlineActiveRow = null;
+function paintOutlineActive(id) {
+  const next = id ? $sidebarOutline.querySelector(`.ol-item[data-id="${id}"]`) : null;
+  if (next !== outlineActiveRow) {
+    if (outlineActiveRow) outlineActiveRow.classList.remove('on');
+    if (next) next.classList.add('on');
+    outlineActiveRow = next;
+  }
+  return next;
+}
+
+// 编辑区滚到哪一题，大纲里对应那一行就背景高亮（必要时自动展开它的上级）
+function syncOutlineActive() {
+  if (outlineSyncing || state.sidebarMode !== 'outline' || !$sidebarOutline) return;
+  const sc = document.querySelector('.editor-scroll');
+  if (!sc) return;
+  // 平滑滚动进行中：高亮钉在目标题上（等滚完了再恢复按位置跟随），
+  // 钉住期间不必扫位置——滚动每帧都会走到这里，省掉整列测量。
+  let activeId = null;
+  if (outlinePin && Date.now() < outlinePin.until) {
+    activeId = outlinePin.id;
+  } else {
+    outlinePin = null;
+    const top = sc.getBoundingClientRect().top;
+    const topGap = editorStickyPad();      // 粘性操作条以下的区域才算「可见顶部」
+    for (const card of sc.querySelectorAll('.qcard[data-id]')) {
+      if (card.getBoundingClientRect().bottom - top > topGap) { activeId = card.dataset.id; break; }
+    }
+  }
+  const target = currentEditing();
+  if (activeId && target) {
+    const idx = target.items.findIndex((x) => x.id === activeId);
+    if (idx >= 0) {
+      let changed = false;
+      for (const parent of outlineAncestors(target.items, idx)) {
+        if (outlineCollapsed.delete(parent.id)) changed = true;
+      }
+      if (changed) {
+        outlineSyncing = true;
+        try { renderOutline(); } finally { outlineSyncing = false; }
+        // 不 return：重画后继续往下走，把高亮落到当前这一题上
+        // （重画时 outlineSyncing 为真，里面那次 syncOutlineActive 会跳过）
+      }
+    }
+  }
+  outlineActiveId = activeId;
+  const activeRow = paintOutlineActive(activeId);
+  // 只「保持可见」：不把这一行硬拽到顶部 —— 否则用户手动滚大纲会被一次次拽回去（像是滚不动）
+  if (activeRow) keepRowVisible($sidebarOutline, activeRow, 10);
+}
+// 点大纲 / 点题卡共用的一条路：选中该题 → 就地更新选中态（含「就地插入」行）→ 平滑滑到它的开头。
+// 滑动期间把大纲高亮钉在这一行上（否则跟随逻辑会把高亮甩到路过的题），滑动时长由滚动动画给出。
+function focusItem(id) {
+  const target = currentEditing();
+  if (!target || !target.items.some((x) => x.id === id)) return;
+  state.selected = id;
+  outlineActiveId = id;
+  if (editorCtx && typeof editorCtx.select === 'function') editorCtx.select(id);
+  const card = document.querySelector(`.qcard[data-id="${id}"]`);
+  const dur = card ? scrollEditorTo(card, true) : 0;
+  pinOutlineHighlight(id, dur + 140);
+  syncOutlineActive();       // 立刻把高亮落到这一行；钉住期间跟随逻辑不会把它甩走
+}
+
+// 用户自己滚动 / 点按编辑区时，立即停掉程序化滚动动画（不和用户抢）
+document.addEventListener('wheel', cancelEditorScrollAnim, { capture: true, passive: true });
+document.addEventListener('touchstart', cancelEditorScrollAnim, { capture: true, passive: true });
+document.addEventListener('mousedown', (e) => { if (e.target && e.target.closest && e.target.closest('.editor-scroll')) cancelEditorScrollAnim(); }, true);
+
+// 捕获阶段的 scroll 不冒泡，但用 capture 能收到所有后代的滚动（编辑区每次渲染都是新元素）
+document.addEventListener('scroll', () => {
+  if (outlineSyncRaf) return;
+  outlineSyncRaf = window.requestAnimationFrame(() => { outlineSyncRaf = null; syncOutlineActive(); });
+}, true);
+
 function renderOutline() {
   const target = currentEditing();
   if (!target || !$sidebarOutline) return;
+  const items = target.items;
   const outlineScroll = $sidebarOutline.scrollTop;
   $sidebarOutline.innerHTML = '';
+  outlineActiveRow = null;          // 整表重画：原来记着的高亮行已随旧 DOM 一起丢掉
 
   for (const [label, anchor] of [
     [state.view === 'exp-editor' ? '模板信息' : '问卷信息', 'sec-basic'],
-    ['计时默认值', 'sec-timing'],
-    [`题目编排（${target.items.length} 道）`, 'sec-items']
+    [`题目编排（${questionCount(items)} 道）`, 'sec-items']
   ]) {
     const sec = el('div', 'ol-sec', label);
     sec.onclick = () => {
       const node = $(anchor);
-      if (node) node.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      if (node) scrollEditorTo(node);
     };
     $sidebarOutline.appendChild(sec);
   }
 
+  const qnos = questionNos(items);
   let lastBand = null;
-  target.items.forEach((it, idx) => {
+  for (const idx of outlineVisibleIndexes(items)) {
+    const it = items[idx];
     if (it.fromTemplateId && it.fromTemplateId !== lastBand) {
       lastBand = it.fromTemplateId;
       const band = el('div', 'ol-band');
@@ -432,30 +915,108 @@ function renderOutline() {
       $sidebarOutline.appendChild(band);
     } else if (!it.fromTemplateId) lastBand = null;
 
-    const row = el('div', 'ol-item' + (state.selected === it.id ? ' on' : ''));
-    row.appendChild(el('span', 'ol-num', String(idx + 1)));
+    const lv = itemLevel(it);
+    const qno = qnos.get(it.id);
+    const row = el('div', 'ol-item d' + levelDepth(lv) + (qno ? '' : ' no-q'));
+    row.dataset.id = it.id;
+
+    // 有下属（紧跟其后、层级更深的题目）→ 左边给折叠箭头
+    if (outlineHasChildren(items, idx)) {
+      const folded = outlineCollapsed.has(it.id);
+      const fold = el('button', 'ol-fold', folded ? '▸' : '▾');
+      fold.type = 'button';
+      fold.title = folded ? '展开下属题目' : '折叠下属题目';
+      fold.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (folded) outlineCollapsed.delete(it.id); else outlineCollapsed.add(it.id);
+        renderOutline();
+      });
+      row.appendChild(fold);
+    } else {
+      row.appendChild(el('span', 'ol-fold-space'));
+    }
+
+    row.appendChild(el('span', 'ol-num', qno ? String(qno) : '·'));
     row.appendChild(el('span', 'ic', TYPE_ICON(it.type)));
     row.appendChild(el('span', 'tx', it.title || '（未命名）'));
-    const n = limitBadges(it, target.timing).length;
+    row.appendChild(el('span', 'ol-lv', lv === 0 ? '默认' : lv + ' 级'));
+    const n = limitBadges(it).length;
     if (n) row.appendChild(el('span', 'lm', String(n)));
-    row.title = `${TYPE_LABEL(it.type)} · ${it.title || ''}`;
-    row.onclick = () => {
-      state.selected = it.id;
-      const card = document.querySelector(`.qcard[data-id="${it.id}"]`);
-      if (card) { card.classList.remove('collapsed'); }
-      renderEditorView();
-      const card2 = document.querySelector(`.qcard[data-id="${it.id}"]`);
-      if (card2) card2.scrollIntoView({ block: 'center', behavior: 'smooth' });
-      const on = document.querySelector('.ol-item.on');
-      if (on) on.scrollIntoView({ block: 'nearest' });
-    };
+    row.title = `${TYPE_LABEL(it.type)} · ${lv === 0 ? '默认层级' : lv + ' 级'} · ${it.title || ''}`;
+    // 点大纲：选中该题并「平滑滑」到该题开头（不是瞬间跳过去）。
+    // 只就地更新选中态与高亮，不整列重建题卡、也不重画大纲——否则点一下就要为每道题重造一次正文编辑器。
+    row.onclick = () => focusItem(it.id);
     $sidebarOutline.appendChild(row);
-  });
+  }
   $sidebarOutline.scrollTop = outlineScroll;
+  syncOutlineActive();
 }
 
 function TYPE_ICON(type) {
-  return { message: '▤', gate: '⛨', debrief: '◎', group: '▦', rating: '☆', single: '◉', multi: '☑', text: '▭', rank: '↕' }[type] || '·';
+  return { message: '▤', gate: '⛨', confirm: '▣', debrief: '◎', group: '▦', rating: '☆', single: '◉', multi: '☑', text: '▭', rank: '↕' }[type] || '·';
+}
+
+/* ---------------------------------------------------------------- 「插入题目」二级选择
+   一级列出题型；鼠标悬停到有二级形态的题型（目前只有知情同意页）时，右侧展开二级栏再选。
+   触屏没有 hover，所以点一级项同样能展开。 */
+
+let openInsertPicker = null;
+document.addEventListener('click', (e) => {
+  if (openInsertPicker && !openInsertPicker.contains(e.target)) {
+    openInsertPicker.close();
+    openInsertPicker = null;
+  }
+});
+
+function buildInsertPicker(labelText, onPick) {
+  const wrap = el('div', 'ins-picker');
+  const btn = el('button', 'mini-btn', labelText || '＋ 插入题目');
+  btn.type = 'button';
+  const panel = el('div', 'ins-panel hidden');
+  const sub = el('div', 'ins-sub hidden');
+  const variantsOf = (t) => (state.meta.itemVariants || {})[t] || null;
+
+  const close = () => { panel.classList.add('hidden'); sub.classList.add('hidden'); };
+  const openSub = (type, row) => {
+    const variants = variantsOf(type);
+    if (!variants) { sub.classList.add('hidden'); return; }
+    sub.innerHTML = '';
+    for (const v of variants) {
+      const b = el('button', 'ins-item', v.label);
+      b.type = 'button';
+      b.onclick = (e) => { e.stopPropagation(); close(); onPick(v.key, v.label); };
+      sub.appendChild(b);
+    }
+    sub.style.top = `${row.offsetTop}px`;
+    sub.classList.remove('hidden');
+  };
+
+  for (const t of TYPE()) {
+    const hasSub = !!variantsOf(t);
+    const row = el('button', 'ins-item' + (hasSub ? ' has-sub' : ''), `${TYPE_ICON(t)} ${TYPE_LABEL(t)}`);
+    row.type = 'button';
+    if (hasSub) {
+      row.addEventListener('mouseenter', () => openSub(t, row));
+      row.onclick = (e) => { e.stopPropagation(); openSub(t, row); };
+    } else {
+      row.addEventListener('mouseenter', () => sub.classList.add('hidden'));
+      row.onclick = (e) => { e.stopPropagation(); close(); onPick(t, TYPE_LABEL(t)); };
+    }
+    panel.appendChild(row);
+  }
+
+  btn.onclick = (e) => {
+    e.stopPropagation();
+    const willOpen = panel.classList.contains('hidden');
+    close();
+    if (willOpen) { panel.classList.remove('hidden'); openInsertPicker = wrap; }
+    else openInsertPicker = null;
+  };
+  wrap.close = close;
+  // 二级栏挂在一级面板内部：这样它的定位基准是一级面板，紧贴其右缘（挂在外层会以按钮为基准而重叠）
+  panel.appendChild(sub);
+  wrap.append(btn, panel);
+  return wrap;
 }
 
 /* ---------------------------------------------------------------- 数据加载 */
@@ -467,19 +1028,63 @@ async function reloadQuestionnaires() {
   state.questionnaires = (await api('/api/admin/questionnaires')).questionnaires;
 }
 
-/* ---------------------------------------------------------------- 计时限制 */
+/* ---------------------------------------------------------------- 题目参数 */
 
-function effLimit(item, key, timing) {
+// 生效的参数值：题目配了就用题目的，没配回落到内置默认值（与服务端 effLimit 同逻辑）
+function effLimit(item, key) {
   const v = item.limits ? item.limits[key] : undefined;
   if (v !== undefined && v !== null) return Number(v) || 0;
-  return Number((timing || {})[key]) || 0;
+  return Number(LIMIT_DEFAULTS()[key]) || 0;
 }
 
-function limitBadges(item, timing) {
+/* ---------------------------------------------------------------- 「题目」口径（与服务端 units.qno 一致）
+   只有需要被试作答的题型才计入题号：消息 / 知情同意页 / 确认页 / 结束说明都只是页面，不占题号。 */
+
+function questionTypes() {
+  const fromMeta = state.meta && state.meta.questionTypes;
+  return Array.isArray(fromMeta) && fromMeta.length
+    ? fromMeta
+    : ['group', 'rating', 'single', 'multi', 'text', 'rank'];
+}
+function isQuestionType(type) { return questionTypes().includes(type); }
+function questionNos(list) {
+  const map = new Map();
+  let n = 0;
+  for (const it of list) {
+    if (!isQuestionType(it.type)) continue;
+    n += 1;
+    map.set(it.id, n);
+  }
+  return map;
+}
+function questionCount(list) {
+  return list.reduce((n, it) => n + (isQuestionType(it.type) ? 1 : 0), 0);
+}
+// 层级（只影响管理端大纲，被试端无感知）：
+//   1 = 最高级（不缩进，适合当"消息反馈公平性"这类小标题）、2/3/4 依次降低、0 = 最低级（默认，缩进最深）。
+//   排序（从大到小）：1 → 2 → 3 → 4 → 0。
+function itemLevel(item) {
+  return Math.min(4, Math.max(0, Math.round(Number(item && item.level) || 0)));
+}
+// 「大小」序：1 最大（4）、0 最小（0）—— 用于判断从属关系（紧跟其后、更小的算下属）
+function levelRank(level) {
+  const lv = Math.min(4, Math.max(0, Math.round(Number(level) || 0)));
+  return lv === 0 ? 0 : 5 - lv;
+}
+// 缩进档位：1 级 0 档（最靠左）… 4 级 3 档、0 级 4 档（最深）
+function levelDepth(level) {
+  const lv = Math.min(4, Math.max(0, Math.round(Number(level) || 0)));
+  return lv === 0 ? 4 : lv - 1;
+}
+
+function limitBadges(item) {
   const out = [];
   for (const k of TYPE_LIMITS(item.type)) {
-    const v = effLimit(item, k, timing);
-    if (v > 0) out.push(`${TIMING_META()[k].label} ${v}s${item.limits[k] != null ? '' : '（默认）'}`);
+    if (item.limits[k] == null) continue;                 // 未添加的参数不显示徽标
+    const meta = LIMIT_META()[k];
+    if (k === 'refresh') { out.push(meta.label); continue; }
+    const v = effLimit(item, k);
+    if (v > 0) out.push(`${meta.label} ${v}${meta.unit === '秒' ? 's' : ''}`);
   }
   return out;
 }
@@ -488,6 +1093,7 @@ function itemSummary(item) {
   switch (item.type) {
     case 'message': return (item.text || '').split('\n')[0].slice(0, 64) || '（空 · 被试端跳过）';
     case 'gate': return '进入实验前的伦理门槛，勾选后开始';
+    case 'confirm': return (item.text || '').split('\n')[0].slice(0, 64) || '读完点确认继续';
     case 'debrief': return (item.text || '').split('\n')[0].slice(0, 64);
     case 'rating': return `${item.min}–${item.max} 分 · ${item.anchor || '无锚点'}`;
     case 'single': case 'multi': return `${(item.options || []).length} 个选项${item.correct ? ' · 正确答案 ' + 'ABCDEFGH'[item.correct - 1] : ''}`;
@@ -502,11 +1108,215 @@ function itemSummary(item) {
 
 /* ---------------------------------------------------------------- 题目编辑器 */
 
-function buildItemEditor(list, timing, opts = {}) {
+// 新建消息默认带上「思考过程」参数（可删）：「思考中提示」从此是题目上的一个显式参数，
+// 没写思考稿、也没显式配时长时，被试端不会再凭空冒出「正在思考」。
+function applyNewItemDefaults(item) {
+  if (!item) return item;
+  // 大纲标题留空 = 自动取正文首行（正文才是被试看到的内容，标题只服务于管理端列表 / 大纲）
+  item.title = '';
+  item.html = item.html || '';
+  if (item.type === 'message' && item.thinking == null && !item.__thinkingOn) {
+    item.__thinkingOn = true;
+    if (!item.limits) item.limits = {};
+    if (item.limits.thinkMs == null) item.limits.thinkMs = 8000;
+  }
+  return item;
+}
+
+// 层级控件（题卡右上角、折叠按钮左边）：下拉可选，也可以双击输入数字。
+// 0 = 默认（与顶层同级）；1–4 = 依次缩进。无效输入（a / 9 / 空）一律不改动、保持原值。
+function buildLevelControl(item, rerender) {
+  const wrap = el('span', 'lv-ctl');
+  wrap.appendChild(el('span', 'lv-label', '层级'));
+  const input = el('input', 'lv-input');
+  input.type = 'text';
+  input.inputMode = 'numeric';
+  input.value = String(itemLevel(item));
+  input.title = '题目层级：1 = 最高级（不缩进，适合当小标题）、2/3/4 依次降低、0 = 最低级（默认，缩进最深）。只影响管理端大纲，被试端无感知';
+  const commit = (raw) => {
+    const text = String(raw == null ? '' : raw).trim();
+    if (!/^\d+$/.test(text)) { input.value = String(itemLevel(item)); return; }   // 非数字（如 a）→ 保持原值
+    const n = Number(text);
+    if (n < 0 || n > 4) { input.value = String(itemLevel(item)); return; }        // 越界（如 9）→ 保持原值
+    if (n > 0) item.level = n; else delete item.level;
+    input.value = String(n);
+    renderOutline();
+  };
+  input.addEventListener('mousedown', (e) => e.stopPropagation());
+  input.addEventListener('click', (e) => e.stopPropagation());
+  input.addEventListener('change', () => commit(input.value));
+  input.addEventListener('blur', () => commit(input.value));
+  input.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') { commit(input.value); input.blur(); }
+    if (e.key === 'Escape') { input.value = String(itemLevel(item)); input.blur(); }
+  });
+  input.addEventListener('dblclick', (e) => { e.stopPropagation(); input.select(); });
+
+  const caret = el('button', 'mini-btn lv-caret', '▾');
+  caret.type = 'button';
+  caret.title = '选择层级';
+  const panel = el('div', 'lv-panel hidden');
+  // 从高到低：1 级 … 4 级，最后是 0（默认·最低级）
+  for (const lv of [1, 2, 3, 4, 0]) {
+    const text = lv === 0 ? '0 · 默认（最低级）' : lv + ' 级' + (lv === 1 ? '（最高级）' : '');
+    const b = el('button', 'mini-btn', text);
+    b.type = 'button';
+    b.onclick = (e) => { e.stopPropagation(); panel.classList.add('hidden'); commit(String(lv)); };
+    panel.appendChild(b);
+  }
+  caret.addEventListener('mousedown', (e) => e.stopPropagation());
+  caret.onclick = (e) => { e.stopPropagation(); panel.classList.toggle('hidden'); };
+  wrap.append(input, caret, panel);
+  return wrap;
+}
+
+function buildItemEditor(list, opts = {}) {
   const wrap = el('div');
   let onChange = opts.onChange || (() => {});
 
   function rerender() { render(); }
+
+  // 头部工具条上的小按钮（点它别把「选中该题」也一起触发）
+  function miniTool(label, title, fn) {
+    const b = el('button', 'mini-btn', label);
+    b.title = title;
+    b.onclick = (ev) => { ev.stopPropagation(); fn(); };
+    return b;
+  }
+
+  // 选中题卡正下方的「插入题目」入口。它跟着选中项走，所以单独建：
+  // 点大纲 / 点题卡时只把这一行搬过去（先撤掉旧的），不必重建整列题卡。
+  function buildInsertRow(item) {
+    const ins = el('div', 'insert-row');
+    // ① 插入单题
+    ins.appendChild(el('span', 'lbl', '在此题下方插入题目：'));
+    ins.appendChild(buildInsertPicker('＋ 选择题型', (key, label) => {
+      const base = JSON.parse(JSON.stringify(state.meta.itemDefaults[key] || { type: key }));
+      const created = applyNewItemDefaults({ ...base, id: `new${Date.now().toString(36)}`, limits: {}, collapsed: false, title: base.title || label || TYPE_LABEL(key) });
+      list.splice(list.indexOf(item) + 1, 0, created);
+      state.selected = created.id;
+      toast('已在该题下方插入：' + (label || TYPE_LABEL(key)));
+      render();
+    }));
+    // ② 插入整组实验模板（与「+ 插入整组」等价，但落在选中题下方）
+    if (state.experiments.length) {
+      ins.appendChild(el('span', 'lbl', '　或插入实验模板：'));
+      const tsel = el('select', 'add-select');
+      for (const e of state.experiments) {
+        const o = el('option', '', e.name);
+        o.value = e.id;
+        tsel.appendChild(o);
+      }
+      const tbtn = el('button', 'mini-btn', '+ 插入整组');
+      tbtn.onclick = async () => {
+        const exp = state.experiments.find((x) => x.id === tsel.value);
+        if (!exp) return;
+        const full = (await api(`/api/admin/experiment?id=${encodeURIComponent(exp.id)}`)).experiment;
+        const stamp = Date.now().toString(36);
+        const copies = full.items.map((it2, i) => ({
+          ...JSON.parse(JSON.stringify(it2)),
+          id: `${stamp}_${i}_${it2.id}`,
+          fromTemplateId: full.id,
+          fromTemplateName: full.name
+        }));
+        list.splice(list.indexOf(item) + 1, 0, ...copies);
+        state.selected = null;
+        toast(`已在下方插入模板「${full.name}」的 ${copies.length} 道题`);
+        render();
+      };
+      ins.append(tsel, tbtn);
+    }
+    return ins;
+  }
+
+  // 单张题卡。结构没变时复用它（整列重建会为每道题重造一次正文编辑器，几十道题连点几下就卡）。
+  function buildCard(item, qnos) {
+    const card = el('div', 'qcard' + (state.selected === item.id ? ' selected' : '') + (item.collapsed ? ' collapsed' : ''));
+    card.dataset.id = item.id;
+
+    const head = el('div', 'qcard-head');
+    const handle = el('span', 'drag', '⠿');
+    handle.title = '拖动排序';
+    handle.draggable = true;
+    handle.addEventListener('dragstart', (e) => {
+      state.dragId = item.id;
+      card.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', item.id);
+    });
+    handle.addEventListener('dragend', () => {
+      state.dragId = null;
+      card.classList.remove('dragging');
+      wrap.querySelectorAll('.drop-before,.drop-after').forEach((n) => n.classList.remove('drop-before', 'drop-after'));
+    });
+    card.addEventListener('dragover', (e) => {
+      if (!state.dragId || state.dragId === item.id) return;
+      e.preventDefault();
+      const r = card.getBoundingClientRect();
+      const after = e.clientY > r.top + r.height / 2;
+      card.classList.toggle('drop-before', !after);
+      card.classList.toggle('drop-after', after);
+    });
+    card.addEventListener('dragleave', () => card.classList.remove('drop-before', 'drop-after'));
+    card.addEventListener('drop', (e) => {
+      e.preventDefault();
+      const r = card.getBoundingClientRect();
+      const after = e.clientY > r.top + r.height / 2;
+      moveItem(list, state.dragId, item.id, after);
+      state.dragId = null;
+      toast('已调整顺序');
+      render();
+    });
+
+    head.appendChild(handle);
+    const qno = qnos.get(item.id);
+    if (qno) head.appendChild(el('span', 'qnum', `第 ${qno} 题`));
+    head.appendChild(el('span', 'qtype', `${TYPE_ICON(item.type)} ${TYPE_LABEL(item.type)}`));
+    head.appendChild(el('span', 'qtitle', item.title || '（未命名）'));
+    const badges = el('div', 'qbadges');
+    for (const b of limitBadges(item)) badges.appendChild(el('span', 'qbadge limit', b));
+    head.appendChild(badges);
+
+    const tools = el('div', 'qtools');
+    tools.append(
+      buildLevelControl(item, render),
+      miniTool(item.collapsed ? '展开' : '折叠', '折叠 / 展开该题', () => { item.collapsed = !item.collapsed; render(); }),
+      miniTool('复制', '复制该题', () => { const c = JSON.parse(JSON.stringify(item)); c.id = `copy${Date.now()}`; delete c.fromTemplateId; delete c.fromTemplateName; list.splice(list.indexOf(item) + 1, 0, c); toast('已复制'); render(); }),
+      miniTool('删除', '删除该题', () => { list.splice(list.indexOf(item), 1); if (state.selected === item.id) state.selected = null; render(); })
+    );
+    head.appendChild(tools);
+    card.appendChild(head);
+
+    if (item.collapsed) {
+      card.appendChild(el('p', 'qsum', itemSummary(item)));
+    } else {
+      const body = el('div', 'qbody');
+      body.appendChild(buildItemFields(item, rerender));
+      card.appendChild(body);
+    }
+
+    // 点题卡头部 = 与点大纲同一条路：选中 + 平滑滑到开头 + 大纲高亮跟着过去
+    head.addEventListener('click', () => focusItem(item.id));
+    return card;
+  }
+
+  // 只更新「选中态」：切 .selected、把「就地插入」行搬过去、必要时展开这一张卡。
+  // O(1) 更新——旧实现每次点大纲都整列重建（每道题重造一次正文编辑器 + 重画两遍大纲），连点几下就卡。
+  function select(id) {
+    const item = list.find((x) => x.id === id);
+    if (!item) return false;
+    if (item.collapsed) {
+      item.collapsed = false;
+      const old = wrap.querySelector(`.qcard[data-id="${id}"]`);
+      if (old) old.replaceWith(buildCard(item, questionNos(list)));
+    }
+    wrap.querySelectorAll('.qcard').forEach((c) => c.classList.toggle('selected', c.dataset.id === id));
+    wrap.querySelectorAll('.insert-row').forEach((n) => n.remove());
+    const card = wrap.querySelector(`.qcard[data-id="${id}"]`);
+    if (card) card.insertAdjacentElement('afterend', buildInsertRow(item));
+    return true;
+  }
 
   function render() {
     // 保留滚动位置：增删 / 选择 / 拖动后的重渲染不做视觉跳动
@@ -514,8 +1324,9 @@ function buildItemEditor(list, timing, opts = {}) {
     const scrollTop = sc ? sc.scrollTop : 0;
     wrap.innerHTML = '';
     let lastBand = null;
+    const qnos = questionNos(list);
 
-    list.forEach((item, index) => {
+    list.forEach((item) => {
       if (item.fromTemplateId && item.fromTemplateId !== lastBand) {
         lastBand = item.fromTemplateId;
         const band = el('div', 'group-band');
@@ -532,154 +1343,23 @@ function buildItemEditor(list, timing, opts = {}) {
         wrap.appendChild(band);
       } else if (!item.fromTemplateId) lastBand = null;
 
-      const card = el('div', 'qcard' + (state.selected === item.id ? ' selected' : '') + (item.collapsed ? ' collapsed' : ''));
-      card.dataset.id = item.id;
-
-      const head = el('div', 'qcard-head');
-      const handle = el('span', 'drag', '⠿');
-      handle.title = '拖动排序';
-      handle.draggable = true;
-      handle.addEventListener('dragstart', (e) => {
-        state.dragId = item.id;
-        card.classList.add('dragging');
-        e.dataTransfer.effectAllowed = 'move';
-        e.dataTransfer.setData('text/plain', item.id);
-      });
-      handle.addEventListener('dragend', () => {
-        state.dragId = null;
-        card.classList.remove('dragging');
-        wrap.querySelectorAll('.drop-before,.drop-after').forEach((n) => n.classList.remove('drop-before', 'drop-after'));
-      });
-      card.addEventListener('dragover', (e) => {
-        if (!state.dragId || state.dragId === item.id) return;
-        e.preventDefault();
-        const r = card.getBoundingClientRect();
-        const after = e.clientY > r.top + r.height / 2;
-        card.classList.toggle('drop-before', !after);
-        card.classList.toggle('drop-after', after);
-      });
-      card.addEventListener('dragleave', () => card.classList.remove('drop-before', 'drop-after'));
-      card.addEventListener('drop', (e) => {
-        e.preventDefault();
-        const r = card.getBoundingClientRect();
-        const after = e.clientY > r.top + r.height / 2;
-        moveItem(list, state.dragId, item.id, after);
-        state.dragId = null;
-        toast('已调整顺序');
-        render();
-      });
-
-      head.appendChild(handle);
-      head.appendChild(el('span', 'qnum', `第 ${index + 1} 题`));
-      head.appendChild(el('span', 'qtype', `${TYPE_ICON(item.type)} ${TYPE_LABEL(item.type)}`));
-      head.appendChild(el('span', 'qtitle', item.title || '（未命名）'));
-      const badges = el('div', 'qbadges');
-      for (const b of limitBadges(item, timing)) badges.appendChild(el('span', 'qbadge limit', b));
-      head.appendChild(badges);
-
-      const tools = el('div', 'qtools');
-      const mk = (label, title, fn) => {
-        const b = el('button', 'mini-btn', label);
-        b.title = title;
-        b.onclick = (ev) => { ev.stopPropagation(); fn(); };
-        return b;
-      };
-      tools.append(
-        mk(item.collapsed ? '展开' : '折叠', '折叠 / 展开该题', () => { item.collapsed = !item.collapsed; render(); }),
-        mk('复制', '复制该题', () => { const c = JSON.parse(JSON.stringify(item)); c.id = `copy${Date.now()}`; delete c.fromTemplateId; delete c.fromTemplateName; list.splice(list.indexOf(item) + 1, 0, c); toast('已复制'); render(); }),
-        mk('删除', '删除该题', () => { list.splice(list.indexOf(item), 1); if (state.selected === item.id) state.selected = null; render(); })
-      );
-      head.appendChild(tools);
-      card.appendChild(head);
-
-      if (item.collapsed) {
-        card.appendChild(el('p', 'qsum', itemSummary(item)));
-      } else {
-        const body = el('div', 'qbody');
-        body.appendChild(buildItemFields(item, timing, rerender));
-        card.appendChild(body);
-      }
-
-      head.addEventListener('click', () => {
-        state.selected = item.id;
-        item.collapsed = false;
-        render();
-      });
-      wrap.appendChild(card);
+      wrap.appendChild(buildCard(item, qnos));
 
       // 选中该题时，在其正下方给出「插入题目」入口（参考问卷星 / Notion 的就地插入）
-      if (state.selected === item.id) {
-        const ins = el('div', 'insert-row');
-        // ① 插入单题
-        ins.appendChild(el('span', 'lbl', '在此题下方插入题目：'));
-        const sel = el('select', 'add-select');
-        for (const t of TYPE()) {
-          const o = el('option', '', `${TYPE_ICON(t)} ${TYPE_LABEL(t)}`);
-          o.value = t;
-          sel.appendChild(o);
-        }
-        const btn = el('button', 'mini-btn', '+ 插入');
-        btn.onclick = () => {
-          const base = JSON.parse(JSON.stringify(state.meta.itemDefaults[sel.value] || { type: sel.value }));
-          const created = { ...base, id: `new${Date.now().toString(36)}`, limits: {}, collapsed: false, title: base.title || TYPE_LABEL(sel.value) };
-          list.splice(list.indexOf(item) + 1, 0, created);
-          state.selected = created.id;
-          toast('已在该题下方插入：' + TYPE_LABEL(sel.value));
-          render();
-        };
-        ins.append(sel, btn);
-        // ② 插入整组实验模板（与「+ 插入整组」等价，但落在选中题下方）
-        if (state.experiments.length) {
-          ins.appendChild(el('span', 'lbl', '　或插入实验模板：'));
-          const tsel = el('select', 'add-select');
-          for (const e of state.experiments) {
-            const o = el('option', '', e.name);
-            o.value = e.id;
-            tsel.appendChild(o);
-          }
-          const tbtn = el('button', 'mini-btn', '+ 插入整组');
-          tbtn.onclick = async () => {
-            const exp = state.experiments.find((x) => x.id === tsel.value);
-            if (!exp) return;
-            const full = (await api(`/api/admin/experiment?id=${encodeURIComponent(exp.id)}`)).experiment;
-            const stamp = Date.now().toString(36);
-            const copies = full.items.map((it2, i) => ({
-              ...JSON.parse(JSON.stringify(it2)),
-              id: `${stamp}_${i}_${it2.id}`,
-              fromTemplateId: full.id,
-              fromTemplateName: full.name
-            }));
-            list.splice(list.indexOf(item) + 1, 0, ...copies);
-            Object.assign(timing, full.timing);
-            state.selected = null;
-            toast(`已在下方插入模板「${full.name}」的 ${copies.length} 道题`);
-            render();
-          };
-          ins.append(tsel, tbtn);
-        }
-        wrap.appendChild(ins);
-      }
+      if (state.selected === item.id) wrap.appendChild(buildInsertRow(item));
     });
 
     // 插入区
     const addRow = el('div', 'add-row');
     addRow.appendChild(el('span', 'lbl', '插入题目：'));
-    const sel = el('select', 'add-select');
-    for (const t of TYPE()) {
-      const o = el('option', '', `${TYPE_ICON(t)} ${TYPE_LABEL(t)}`);
-      o.value = t;
-      sel.appendChild(o);
-    }
-    const addBtn = el('button', 'mini-btn', '+ 插入');
-    addBtn.onclick = () => {
-      const base = JSON.parse(JSON.stringify(state.meta.itemDefaults[sel.value] || { type: sel.value }));
-      const item = { ...base, id: `new${Date.now().toString(36)}`, limits: {}, collapsed: false, title: base.title || TYPE_LABEL(sel.value) };
+    addRow.appendChild(buildInsertPicker('＋ 选择题型', (key, label) => {
+      const base = JSON.parse(JSON.stringify(state.meta.itemDefaults[key] || { type: key }));
+      const item = applyNewItemDefaults({ ...base, id: `new${Date.now().toString(36)}`, limits: {}, collapsed: false, title: base.title || label || TYPE_LABEL(key) });
       insertItem(list, item);
       state.selected = item.id;
-      toast('已插入：' + TYPE_LABEL(sel.value));
+      toast('已插入：' + (label || TYPE_LABEL(key)));
       render();
-    };
-    addRow.append(sel, addBtn);
+    }));
 
     // 批量插入打分题（量表就是多道打分题）
     addRow.appendChild(el('span', 'lbl', '　批量打分题：'));
@@ -692,16 +1372,19 @@ function buildItemEditor(list, timing, opts = {}) {
       const n = Math.max(1, Math.min(30, Number(num.value) || 1));
       const items = [];
       for (let i = 0; i < n; i += 1) {
-        items.push({
+        // 题干进正文（title 置空后由正文首行自动回填），与「插入题目」的默认项同一口径
+        const text = `打分题 ${i + 1}`;
+        items.push(applyNewItemDefaults({
           id: `rate${Date.now().toString(36)}${i}`,
           type: 'rating',
-          title: `打分题 ${i + 1}`,
+          title: text,
+          html: RichText.textToHtml(text),
           min: 1,
           max: 5,
           anchor: '1 = 完全不同意　·　5 = 完全同意',
           limits: {},
           collapsed: false
-        });
+        }));
       }
       insertItem(list, ...items);
       toast(`已插入 ${n} 道打分题`);
@@ -730,8 +1413,6 @@ function buildItemEditor(list, timing, opts = {}) {
           fromTemplateName: full.name
         }));
         insertItem(list, ...copies);
-        // 首次插入时把模板的计时默认值也带入（问卷默认值仍为 0 时）
-        Object.assign(timing, full.timing);
         toast(`已插入模板「${full.name}」的 ${copies.length} 道题（可逐条修改）`);
         render();
       };
@@ -743,7 +1424,7 @@ function buildItemEditor(list, timing, opts = {}) {
   }
 
   render();
-  return { wrap, render };
+  return { wrap, render, select };
 }
 
 function moveItem(list, dragId, targetId, after) {
@@ -770,33 +1451,69 @@ function insertItem(list, ...items) {
   list.splice(Math.max(at, min), 0, ...items);
 }
 
-function buildItemFields(item, timing, rerender) {
+function buildItemFields(item, rerender) {
   const frag = document.createDocumentFragment();
-  const onInput = () => renderPhoneOnly();
+  const onInput = () => markPreviewStale();
+  let syncClearNote = null;      // 「呈现前清空」的说明行：正文变化时也要重算（空正文 = 清屏不会生效）
 
-  frag.appendChild(makeField('题目标题（仅管理端显示）', item.title, 1).wrap);
-  const titleInput = frag.lastChild.querySelector('input');
-  titleInput.addEventListener('input', () => {
-    item.title = titleInput.value;
+  const syncCardTitle = () => {
     const card = document.querySelector(`.qcard[data-id="${item.id}"] .qtitle`);
     if (card) card.textContent = item.title || '（未命名）';
-    onInput();
+  };
+
+  // 大纲标题：只用于管理端列表 / 大纲（被试看不到这一项）；留空 = 自动取正文首行
+  const ttlField = makeField('大纲标题（仅管理端列表 / 大纲显示；留空 = 自动取正文首行）', item.title, 2);
+  const titleInput = ttlField.input;
+  titleInput.addEventListener('input', () => { item.title = titleInput.value; syncCardTitle(); onInput(); });
+  frag.appendChild(ttlField.wrap);
+
+  // 正文（被试可见）：类 Word 编辑。第一行想当标题，就选中它、在工具条点「标题 1」。
+  const BODY_LABEL = {
+    message: '消息正文（被试可见；留空则该题自动跳过）',
+    gate: '正文（含标题；被试勾选同意后才能开始）',
+    confirm: '正文（含标题；被试读完点按钮继续）',
+    debrief: '正文（含标题；实验结束后的说明）',
+    group: '题组正文（含标题与题组说明）'
+  };
+  // 正文区不再有任何说明文字（历史上的「被试端逐字流式呈现…」这类提示全部去掉）
+  const rich = makeRichField(BODY_LABEL[item.type] || '题干 / 正文（被试可见）', item.html, {
+    hint: '',
+    onChange: (html) => {
+      item.html = html;
+      item.text = RichText.htmlToText(html);      // 让「正文为空」的判定跟着更新
+      if (syncClearNote) syncClearNote();
+      if (!String(item.title || '').trim()) {
+        item.title = RichText.firstLine(html, 40);
+        titleInput.value = item.title;
+        syncCardTitle();
+      }
+      onInput();
+    }
   });
+  frag.appendChild(rich.wrap);
 
   if (item.type === 'message') {
-    const f = makeField('消息正文（逐字呈现；留空则该题自动跳过）', item.text || '', 6);
-    f.input.addEventListener('input', () => { item.text = f.input.value; onInput(); });
-    frag.appendChild(f.wrap);
+    // 思考过程是消息题的一个参数（正文区下方「参数」里），不在这里编辑
+  } else if (item.type === 'confirm') {
+    const b = makeField('按钮文案', item.button || '', 1);
+    b.input.addEventListener('input', () => { item.button = b.input.value; onInput(); });
+    frag.appendChild(b.wrap);
   } else if (item.type === 'gate') {
-    for (const [label, key, rows] of [['正文', 'text', 6], ['勾选文案', 'check', 1], ['按钮文案', 'button', 1]]) {
+    // 形态（仅勾选 / 需填编号）在「插入题目」时已经选定，这里不再重复给一个下拉：
+    // 需要换形态就删掉这一题、用另一种形态重新插入。
+    // 「需填编号」形态的说明也不再显示（插入时已选过形态，字段名/提示语本身够清楚）
+    for (const [label, key, rows] of [['勾选文案（正文下方的同意项）', 'check', 2], ['按钮文案', 'button', 1]]) {
       const f = makeField(label, item[key] || '', rows);
       f.input.addEventListener('input', () => { item[key] = f.input.value; onInput(); });
       frag.appendChild(f.wrap);
     }
-  } else if (item.type === 'debrief') {
-    const f = makeField('正文', item.text || '', 6);
-    f.input.addEventListener('input', () => { item.text = f.input.value; onInput(); });
-    frag.appendChild(f.wrap);
+    if (item.variant === 'id') {
+      for (const [label, key] of [['编号字段名（页面上显示）', 'idLabel'], ['编号输入框提示语', 'idPlaceholder']]) {
+        const f = makeField(label, item[key] || '', 1);
+        f.input.addEventListener('input', () => { item[key] = f.input.value; onInput(); });
+        frag.appendChild(f.wrap);
+      }
+    }
   } else if (item.type === 'rating') {
     const row = el('div', 'grid2');
     const min = makeNumberField('最低分', item.min, 0, 10);
@@ -804,7 +1521,7 @@ function buildItemFields(item, timing, rerender) {
     const max = makeNumberField('最高分', item.max, 1, 12);
     max.input.addEventListener('input', () => { item.max = Number(max.input.value) || 1; onInput(); });
     row.append(min.wrap, max.wrap);
-    const anchor = makeField('锚点文字', item.anchor || '', 1);
+    const anchor = makeField('锚点文字', item.anchor || '', 2);
     anchor.input.addEventListener('input', () => { item.anchor = anchor.input.value; onInput(); });
     frag.append(row, anchor.wrap);
   } else if (item.type === 'single' || item.type === 'multi') {
@@ -833,7 +1550,7 @@ function buildItemFields(item, timing, rerender) {
     const maxLen = makeNumberField('字数上限（0 = 不限）', item.maxLen || 0, 0, 5000);
     maxLen.input.addEventListener('input', () => { item.maxLen = Number(maxLen.input.value) || 0; onInput(); });
     row.append(rows.wrap, maxLen.wrap);
-    const ph = makeField('输入框提示语', item.placeholder || '', 1);
+    const ph = makeField('输入框提示语', item.placeholder || '', 2);
     ph.input.addEventListener('input', () => { item.placeholder = ph.input.value; onInput(); });
     const req = el('label', 'inline-check');
     const cb = el('input');
@@ -845,8 +1562,6 @@ function buildItemFields(item, timing, rerender) {
   }
 
   if (item.type === 'group') {
-    const t = makeField('题组说明（可选，写在题组标题下方）', item.text || '', 2);
-    t.input.addEventListener('input', () => { item.text = t.input.value; onInput(); });
     const layout = el('label', 'field');
     layout.appendChild(el('span', '', '子题排布'));
     const lsel = el('select');
@@ -858,7 +1573,7 @@ function buildItemFields(item, timing, rerender) {
     lsel.value = item.layout === 'row' ? 'row' : 'column';
     lsel.addEventListener('change', () => { item.layout = lsel.value; onInput(); });
     layout.appendChild(lsel);
-    frag.append(t.wrap, layout);
+    frag.appendChild(layout);
 
     const subsWrap = el('div', 'subs-editor');
     const rebuild = () => {
@@ -885,7 +1600,7 @@ function buildItemFields(item, timing, rerender) {
         head.appendChild(tools);
         box.appendChild(head);
 
-        const ttl = makeField('子题题干', sub.title || '', 1);
+        const ttl = makeField('子题题干', sub.title || '', 2);
         ttl.input.addEventListener('input', () => { sub.title = ttl.input.value; onInput(); });
         box.appendChild(ttl.wrap);
         box.appendChild(buildSubFields(sub, onInput));
@@ -916,8 +1631,9 @@ function buildItemFields(item, timing, rerender) {
     frag.appendChild(subsWrap);
   }
 
-  const limits = buildLimitsBox(item, timing, onInput);
-  if (limits) frag.appendChild(limits);
+  // 「呈现前清空」那行的说明要跟着正文变（正文空了 → 清屏不生效），所以把登记函数交下去
+  const params = buildParamSection(item, onInput, rerender, (fn) => { syncClearNote = fn; });
+  if (params) frag.appendChild(params);
   return frag;
 }
 
@@ -932,7 +1648,7 @@ function buildSubFields(sub, onInput) {
     const maxLen = makeNumberField('字数上限（0 = 不限）', sub.maxLen || 0, 0, 5000);
     maxLen.input.addEventListener('input', () => { sub.maxLen = Number(maxLen.input.value) || 0; onInput(); });
     row.append(rows.wrap, maxLen.wrap);
-    const ph = makeField('输入框提示语', sub.placeholder || '', 1);
+    const ph = makeField('输入框提示语', sub.placeholder || '', 2);
     ph.input.addEventListener('input', () => { sub.placeholder = ph.input.value; onInput(); });
     const req = el('label', 'inline-check');
     const cb = el('input');
@@ -948,7 +1664,7 @@ function buildSubFields(sub, onInput) {
     const max = makeNumberField('最高分', sub.max, 1, 12);
     max.input.addEventListener('input', () => { sub.max = Number(max.input.value) || 1; onInput(); });
     row.append(min.wrap, max.wrap);
-    const anchor = makeField('锚点文字', sub.anchor || '', 1);
+    const anchor = makeField('锚点文字', sub.anchor || '', 2);
     anchor.input.addEventListener('input', () => { sub.anchor = anchor.input.value; onInput(); });
     frag.append(row, anchor.wrap);
   } else if (sub.type === 'single' || sub.type === 'multi' || sub.type === 'rank') {
@@ -964,54 +1680,278 @@ function buildSubFields(sub, onInput) {
   return frag;
 }
 
-function buildLimitsBox(item, timing, onInput) {
-  const keys = TYPE_LIMITS(item.type);
-  if (!keys.length) return null;
-  const box = el('div', 'limits');
-  box.appendChild(el('p', 'limits-title', '计时限制（勾选即启用；未勾选的按问卷默认值生效）'));
-  for (const k of keys) {
-    const meta = TIMING_META()[k];
-    const row = el('div', 'limit-row');
-    const label = el('label');
-    const cb = el('input');
+/* ---------------------------------------------------------------- 题目参数区
+   与题目同框、横线分隔、下方标注「参数」。没有添加任何参数时该区域不出现，
+   只留一个「＋ 添加参数」入口；添加后按行列出（名称 + 值 + 删除），支持增删改。
+   思考过程是消息题的一个特殊参数（内容项、被试可见），也在这里添加。 */
+
+// 参数预设：常用组合，选了直接填入数值、仍可微调。只是「一组命名好的数值」，不引入新存储。
+const PARAM_PRESETS = [
+  { key: 'thinkMs', label: '思考面板 8 秒', value: 8000 },
+  { key: 'thinkMs', label: '思考面板 5 秒', value: 5000 },
+  { key: 'thinkMs', label: '思考面板 12 秒', value: 12000 },
+  { key: 'typeMs', label: '流式输出 · 标准', value: 11 },
+  { key: 'typeMs', label: '流式输出 · 慢', value: 30 },
+  { key: 'typeMs', label: '流式输出 · 整段直出', value: 0 },
+  { key: 'wait', label: '强制阅读 40 秒', value: 40 },
+  { key: 'wait', label: '强制阅读 10 秒', value: 10 },
+  { key: 'minSubmit', label: '创作窗口 · 最短 180 秒', value: 180 },
+  { key: 'maxAnswer', label: '创作窗口 · 最长 300 秒', value: 300 }
+];
+
+// 参数行：名称 + 数值 + 单位 + 删除（refresh 是开关，没有数值）
+// onSyncClearNote：把「呈现前清空」那行的说明同步函数交回题目编辑器——
+// 正文一改（空 ↔ 非空）就要重算那句话，所以它得由 buildItemFields 持有。
+function buildParamRow(item, key, onInput, rerender, onSyncClearNote) {
+  const meta = LIMIT_META()[key];
+  const spec = (state.meta.limitSpec || {})[key] || { min: 0, max: 86400 };
+  const row = el('div', 'param-row');
+  row.appendChild(el('span', 'param-name', meta.label));
+  if (key === 'refresh') {
+    // 开关用真正的勾选框：之前固定显示「已启用」但存的是默认值 0，导致清屏点永远不生效（issue 7）
+    const cb = el('input', 'param-check');
     cb.type = 'checkbox';
-    cb.checked = item.limits[k] != null;
-    label.append(cb, el('span', '', `${meta.label}（${meta.unit}）`));
-    const num = el('input');
+    cb.checked = Number(item.limits[key]) === 1;
+    cb.title = meta.hint;
+    // 勾上之后把「生效条件」写清楚：这一步很关键 —— 被试端会跳过正文为空的消息，
+    // 而且预览 / 真机用的都是**已经同步过的**那份题目，改完不刷新就看不到效果。
+    const note = el('p', 'param-note param-clear-note', '');
+    const syncNote = () => {
+      const on = Number(item.limits.refresh) === 1;
+      if (!on) { note.classList.add('hidden'); note.textContent = ''; return; }
+      const blankMsg = item.type === 'message' && !String(item.text || '').trim();
+      note.classList.remove('hidden');
+      note.classList.toggle('warn', blankMsg);
+      note.textContent = blankMsg
+        ? '⚠ 这条消息的正文是空的 —— 被试端会跳过它，清屏不会生效。请先写正文，或把「呈现前清空」配到题目上。'
+        : '已开启：被试端进入这里之前会把聊天流整体清空（含之前所有消息与已作答的题）。'
+          + '注意：预览用的是「点刷新预览那一刻」的题目、真机用的是已保存的问卷 —— 改完请点「⟳ 刷新预览」或保存问卷，否则看不到效果。';
+    };
+    cb.addEventListener('change', () => { item.limits[key] = cb.checked ? 1 : 0; syncNote(); onInput(); });
+    row.appendChild(cb);
+    row.appendChild(el('span', 'param-unit', '呈现前清空'));
+    row.appendChild(note);
+    if (onSyncClearNote) onSyncClearNote(syncNote);
+    syncNote();
+  } else {
+    const num = el('input', 'param-num');
     num.type = 'number';
-    num.min = '0';
-    num.value = item.limits[k] != null ? item.limits[k] : effLimit({ limits: {} }, k, timing);
-    num.disabled = !cb.checked;
+    num.min = String(spec.min);
+    num.max = String(spec.max);
+    num.value = String(item.limits[key]);
     num.title = meta.hint;
-    cb.addEventListener('change', () => {
-      if (cb.checked) item.limits[k] = Number(num.value) || 0;
-      else delete item.limits[k];
-      num.disabled = !cb.checked;
-      num.value = item.limits[k] != null ? item.limits[k] : effLimit({ limits: {} }, k, timing);
-      onInput();
-    });
     num.addEventListener('input', () => {
-      if (!cb.checked) return;
-      item.limits[k] = Number(num.value) || 0;
+      const raw = Number(num.value) || 0;
+      item.limits[key] = Math.min(spec.max, Math.max(spec.min, raw));
       onInput();
     });
-    const inherit = el('span', 'inherit', `默认 ${effLimit({ limits: {} }, k, timing)}s`);
-    row.append(label, num, inherit);
-    box.appendChild(row);
+    row.appendChild(num);
+    row.appendChild(el('span', 'param-unit', meta.unit));
   }
-  box.appendChild(el('p', 'limits-note', '「最短提交 / 最长作答」加在相邻题目上且数值相同时，它们共用一个作答窗口（用于「创作」这类跨多题的环节）。'));
-  return box;
+  const del = el('button', 'mini-btn', '删除');
+  del.type = 'button';
+  del.onclick = () => { delete item.limits[key]; rerender(); };
+  row.appendChild(del);
+  return row;
 }
+
+// 思考过程行：内容项（被试可见），不是数值；行内含「思考时长」（毫秒）——
+// 就是 thinkMs 参数本身，所以不再需要单独添加「AI 思考时长」。
+function buildThinkingRow(item, onInput, rerender) {
+  const row = el('div', 'param-row param-row-think');
+  const head = el('div', 'param-head');
+  head.appendChild(el('span', 'param-name', '思考过程（被试可见）'));
+  const del = el('button', 'mini-btn', '删除');
+  del.type = 'button';
+  del.onclick = () => {
+    delete item.thinking;
+    delete item.__thinkingOn;
+    if (item.limits) delete item.limits.thinkMs;   // 删掉这个参数 = 被试端不再有思考提示
+    rerender();
+  };
+  head.appendChild(del);
+  row.appendChild(head);
+  const ta = el('textarea', 'param-think');
+  ta.rows = 6;
+  ta.placeholder = '以「AI 的内心推演」口吻写：先复述任务要求，再对照评价标准逐条推演，最后收敛到下方正文的结论。\n留空则不显示思考面板（若配了时长，只显示一段「正在思考」提示）。';
+  ta.value = item.thinking || '';
+  autoGrowTextarea(ta, 6);
+  ta.addEventListener('input', () => { item.thinking = ta.value; onInput(); });
+  row.appendChild(ta);
+
+  const spec = (state.meta.limitSpec || {}).thinkMs || { min: 0, max: 10000 };
+  const msToSec = (ms) => Math.round((Number(ms) || 0) / 100) / 10;      // 毫秒 → 秒，保留一位小数
+  const secToMs = (sec) => Math.min(spec.max, Math.max(spec.min, Math.round((Number(sec) || 0) * 10) * 100));
+  const durRow = el('div', 'param-think-dur');
+  durRow.appendChild(el('span', 'param-unit', '思考时长'));
+  const dur = el('input', 'param-num');
+  dur.type = 'number';
+  dur.min = '0';
+  dur.max = String(spec.max / 1000);
+  dur.step = '0.1';
+  dur.title = '思考面板 / 「正在思考」提示的时长（秒，最多一位小数，例如 0.5）。0 = 不显示';
+  dur.value = String(msToSec(item.limits && item.limits.thinkMs != null ? item.limits.thinkMs : effLimit(item, 'thinkMs')));
+  const writeDur = (sec) => {
+    const v = secToMs(sec);
+    if (!item.limits) item.limits = {};
+    item.limits.thinkMs = v;
+    dur.value = String(msToSec(v));
+    onInput();
+  };
+  dur.addEventListener('input', () => { if (dur.value !== '') writeDur(dur.value); });
+  // 失焦回显「当前生效值」：没配过 thinkMs 时回落默认（与输入框初始化同一口径，别显示成 0）
+  dur.addEventListener('blur', () => {
+    dur.value = String(msToSec(item.limits && item.limits.thinkMs != null ? item.limits.thinkMs : effLimit(item, 'thinkMs')));
+  });
+  durRow.appendChild(dur);
+  durRow.appendChild(el('span', 'param-unit', '秒'));
+  for (const [label, v] of [['0.5 秒', 500], ['5 秒', 5000], ['8 秒', 8000], ['12 秒', 12000]]) {
+    const b = el('button', 'mini-btn', label);
+    b.type = 'button';
+    b.onclick = () => writeDur(v / 1000);
+    durRow.appendChild(b);
+  }
+  row.appendChild(durRow);
+  row.appendChild(el('p', 'param-note', '被试端在正文之前以可折叠面板逐字呈现，输出完自动折叠、点击可回看；没写思考稿时只显示短暂的「正在思考」提示（0 = 完全跳过）。'));
+  return row;
+}
+
+// 「＋ 添加参数」：一级列可用参数，下面列常用预设
+function buildAddParam(item, onInput, rerender) {
+  const keys = TYPE_LIMITS(item.type);
+  const canThink = item.type === 'message';
+  const thinkingOn = canThink && (item.thinking != null || item.__thinkingOn);
+  const wrap = el('div', 'param-add');
+  const btn = el('button', 'mini-btn', '＋ 添加参数');
+  btn.type = 'button';
+  const panel = el('div', 'param-panel hidden');
+
+  const close = () => panel.classList.add('hidden');
+  const pick = (key, value) => {
+    if (key === 'thinking') item.__thinkingOn = true;      // 允许「先添加、再写内容」，标记不落库
+    else item.limits[key] = value;
+    close();
+    rerender();
+  };
+
+  for (const k of keys) {
+    if (item.limits[k] != null) continue;                       // 已添加的不再列出
+    if (k === 'thinkMs' && thinkingOn) continue;                // 时长已在「思考过程」行里
+    const meta = LIMIT_META()[k];
+    // refresh 是开关：添加即启用（默认值 0 会让清屏点永远不生效）
+    const def = k === 'refresh' ? 1 : (Number(LIMIT_DEFAULTS()[k]) || 0);
+    const b = el('button', 'param-opt', `${meta.label}（${meta.unit}）`);
+    b.type = 'button';
+    b.title = meta.hint;
+    b.onclick = (e) => { e.stopPropagation(); pick(k, def); };
+    panel.appendChild(b);
+  }
+  if (canThink && item.thinking == null && !item.__thinkingOn) {
+    const b = el('button', 'param-opt', '思考过程（被试可见）');
+    b.type = 'button';
+    b.title = '在反馈正文之前先输出一段「AI 的思考过程」，输出完自动折叠；行内含思考时长';
+    b.onclick = (e) => { e.stopPropagation(); pick('thinking'); };
+    panel.appendChild(b);
+  }
+  const usable = PARAM_PRESETS.filter((p) => keys.includes(p.key) && item.limits[p.key] == null && !(thinkingOn && p.key === 'thinkMs'));
+  if (usable.length) {
+    panel.appendChild(el('p', 'param-group', '常用预设'));
+    for (const p of usable) {
+      const b = el('button', 'param-opt param-opt-preset', p.label);
+      b.type = 'button';
+      b.onclick = (e) => { e.stopPropagation(); pick(p.key, p.value); };
+      panel.appendChild(b);
+    }
+  }
+  if (!panel.childElementCount) {
+    panel.appendChild(el('p', 'param-group', '该题型没有可添加的参数'));
+  }
+
+  btn.onclick = (e) => {
+    e.stopPropagation();
+    panel.classList.toggle('hidden');
+    if (!panel.classList.contains('hidden')) openParamPanel = wrap;
+  };
+  wrap.close = close;
+  wrap.append(btn, panel);
+  return wrap;
+}
+
+// 参数区整体：无参数时只返回「＋ 添加参数」；有参数时补横线 + 区域名 + 各行
+function buildParamSection(item, onInput, rerender, onSyncClearNote) {
+  const keys = TYPE_LIMITS(item.type);
+  const canThink = item.type === 'message';
+  if (!keys.length && !canThink) return null;
+
+  const wrap = el('div', 'params');
+  const activeKeys = keys.filter((k) => item.limits[k] != null);
+  const hasThinking = canThink && (item.thinking != null || item.__thinkingOn);
+  if (activeKeys.length || hasThinking) {
+    const band = el('div', 'param-band');
+    band.append(el('span', 'label', '参数'), el('span', 'line'));
+    wrap.appendChild(band);
+    for (const k of activeKeys) wrap.appendChild(buildParamRow(item, k, onInput, rerender, onSyncClearNote));
+    if (hasThinking) wrap.appendChild(buildThinkingRow(item, onInput, rerender));
+  }
+  wrap.appendChild(buildAddParam(item, onInput, rerender));
+  return wrap;
+}
+
+// 点击别处收起「添加参数」面板（全局只装一次监听）
+let openParamPanel = null;
+document.addEventListener('click', (e) => {
+  if (openParamPanel && !openParamPanel.contains(e.target)) {
+    openParamPanel.close();
+    openParamPanel = null;
+  }
+});
 
 /* ---------------------------------------------------------------- 编辑页骨架 + 手机预览 */
 
 let editorCtx = null;
+let previewCtl = null;          // 手机预览：{ url, markStale }（由 editorShell 装配）
+let editorShellDispose = null;  // 当前编辑页的清理函数（切页时调用：停轮询 + 销毁预览会话）
 
-function renderEditorView() {
-  if (editorCtx && editorCtx.refresh) editorCtx.refresh();
-  renderOutline();
+// 编辑内容变化时：提示「预览需要刷新」，而不是实时重渲染
+// （预览是真页面、真会话，重渲染会把正在试填的进度打断）
+function markPreviewStale() {
+  if (previewCtl && previewCtl.markStale) previewCtl.markStale();
 }
 
+// 手机预览缩放：真机 393 × 852 等比缩放到手机栏的可用空间
+// （内部仍是真机视口 → 预览与真机是 1:1 的布局，只是整体缩小以便一屏看全）
+// 关键：宽屏下可用高度按「主区域底边」算（不是窗口高）——否则手机壳会把主区域撑出可滚动高度，
+// 一旦发生滚动，手机栏就被顶出视口，只剩最下面一条（用户报的「手机界面无法模拟」）。
+const PHONE_W = 393;
+const PHONE_H = 852;
+function fitPhoneScale() {
+  const col = document.querySelector('.phone-col');
+  const holder = col && col.querySelector('.phone-holder');
+  const phone = holder && holder.querySelector('.phone');
+  if (!col || !holder || !phone) return;
+  const cols = document.querySelector('.editor-cols');
+  const stacked = !!(cols && getComputedStyle(cols).flexDirection === 'column');   // 窄屏：上下堆叠，整页滚动
+  const availW = Math.max(240, col.clientWidth);
+  let availH;
+  if (stacked) {
+    availH = Math.max(320, window.innerHeight - 90);
+  } else {
+    const main = document.querySelector('.admin-main');
+    const mainRect = (main || document.documentElement).getBoundingClientRect();
+    const bottom = Math.min(window.innerHeight, mainRect.bottom);
+    availH = Math.max(300, bottom - holder.getBoundingClientRect().top - 14);
+  }
+  const scale = Math.min(1, availW / PHONE_W, availH / PHONE_H);
+  phone.style.setProperty('--phone-scale', String(scale));
+  holder.style.width = `${Math.round(PHONE_W * scale)}px`;
+  holder.style.height = `${Math.round(PHONE_H * scale)}px`;
+  // 兜底：万一还有别的原因把主区域顶出滚动，把它归零（否则右侧手机栏会整体上移）
+  const main = document.querySelector('.admin-main');
+  if (main && main.scrollTop) main.scrollTop = 0;
+}
+window.addEventListener('resize', () => fitPhoneScale());
+
+// 编辑页骨架：头部（返回）+ 中间编辑区（顶部操作条：标题 + 保存）+ 右侧手机预览（真 iframe）
 function editorShell({ title, backHash, saveLabel, hint, body, phoneTitle, withTrial, onSave, isDirty }) {
   $main.className = 'admin-main editing';
   $main.innerHTML = '';
@@ -1021,7 +1961,6 @@ function editorShell({ title, backHash, saveLabel, hint, body, phoneTitle, withT
   // 未修改直接返回；有修改才弹确认（保存 / 不保存返回）
   back.onclick = () => {
     if (isDirty && !isDirty()) {
-      state.trial = null;
       location.hash = backHash;
       return;
     }
@@ -1033,7 +1972,6 @@ function editorShell({ title, backHash, saveLabel, hint, body, phoneTitle, withT
       hideCancel: true,
       onExtra: async () => {
         closeModal();
-        state.trial = null;
         location.hash = backHash;
       },
       onConfirm: async () => {
@@ -1041,18 +1979,23 @@ function editorShell({ title, backHash, saveLabel, hint, body, phoneTitle, withT
       }
     });
   };
-  head.append(back, el('h2', '', title));
-  const headRight = el('div', 'editor-head-right');
-  if (hint) headRight.appendChild(el('span', 'hint', hint));
-  const save = el('button', 'primary-btn', saveLabel);
-  save.type = 'button';
-  save.onclick = () => onSave && onSave({ exit: false });
-  headRight.appendChild(save);
-  head.appendChild(headRight);
+  head.append(back);                 // 标题与保存按钮移进中间列顶部（见下），头部只留返回
   $main.appendChild(head);
 
   const cols = el('div', 'editor-cols');
   const scroll = el('div', 'editor-scroll');
+  // 中间板块顶部的操作条：左边问卷标题、右边「保存问卷」。
+  // 不再钉在整页右上角——相对位置 = 手机预览的左上角 / 问卷标题的右边（issue 8）。
+  const actionBar = el('div', 'editor-actionbar');
+  actionBar.appendChild(el('span', 'editor-actionbar-title', title));
+  const barRight = el('div', 'editor-actionbar-right');
+  if (hint) barRight.appendChild(el('span', 'hint', hint));
+  const save = el('button', 'primary-btn', saveLabel);
+  save.type = 'button';
+  save.onclick = () => onSave && onSave({ exit: false });
+  barRight.appendChild(save);
+  actionBar.appendChild(barRight);
+  scroll.appendChild(actionBar);
   const bodyWrap = el('div');
   bodyWrap.appendChild(body);
   scroll.appendChild(bodyWrap);
@@ -1060,15 +2003,32 @@ function editorShell({ title, backHash, saveLabel, hint, body, phoneTitle, withT
 
   const col = el('div', 'phone-col');
   const bar = el('div', 'phone-bar');
-  const tag = el('span', 'pv-tag', '实时预览 · 跟随编辑');
-  bar.appendChild(tag);
+  bar.appendChild(el('span', 'pv-tag', '预览'));
+  const refreshBtn = el('button', 'mini-btn', '⟳ 刷新预览');
+  refreshBtn.type = 'button';
+  refreshBtn.title = '同步编辑内容并从头试填（预览不落库）';
+  bar.appendChild(refreshBtn);
+  // 重做：不等整页刷新，直接把这次模拟从头再走一遍（作废当前预览会话，回到知情同意页）
+  const redoPvBtn = el('button', 'mini-btn', '↺ 重做');
+  redoPvBtn.type = 'button';
+  redoPvBtn.title = '把这次模拟从头再走一遍（作废当前预览会话，回到知情同意页；题目内容不变）';
+  redoPvBtn.addEventListener('click', async () => {
+    warnIfStale();
+    const b = previewCtl.bridge();
+    if (!b) { toast('预览还没就绪，稍等一下再重做'); return; }
+    try {
+      if (b.restart) await b.restart();
+      else { const u = previewCtl.url || frame.src; if (u) frame.src = u; }   // 老版本桥：退化成重载
+      previewCtl.syncScrub();
+    } catch (err) {
+      toast(err.message || '重做失败，请重试');
+    }
+  });
+  bar.appendChild(redoPvBtn);
   if (withTrial) {
-    const trialBtn = el('button', 'mini-btn', '▶ 从头试填');
-    trialBtn.onclick = () => (state.trial ? exitTrial() : startTrial());
-    bar.appendChild(trialBtn);
-    // 演示倍速：试填与预览按真实节奏模拟，可加速查看（1× = 与正式实验完全一致）
+    // 倍速：弹字 / 思考面板 / 门控计时**一起**按倍速加速，切换时只改速度、不重建会话
     const speedSel = el('select', 'pv-speed');
-    for (const [v, label] of [['1', '1× 真实节奏'], ['5', '5× 加速'], ['20', '20× 快速']]) {
+    for (const [v, label] of [['1', '1× 真实节奏'], ['5', '5× 加速'], ['10', '10× 加速'], ['20', '20× 快速']]) {
       const o = el('option', '', label);
       o.value = v;
       speedSel.appendChild(o);
@@ -1076,656 +2036,189 @@ function editorShell({ title, backHash, saveLabel, hint, body, phoneTitle, withT
     speedSel.value = String(state.previewSpeed || 1);
     speedSel.addEventListener('change', () => {
       state.previewSpeed = Number(speedSel.value) || 1;
-      if (state.trial) renderTrial(); else toast('预览倍速：' + speedSel.value + '×');
+      applyPreviewSpeed(state.previewSpeed);        // 不重建会话：已填的作答、未提交的选择都保留
     });
     bar.appendChild(speedSel);
+    var previewSpeedSel = speedSel;
   }
   col.appendChild(bar);
   col.appendChild(el('p', 'phone-note', withTrial
-    ? '编辑左侧内容此处实时更新；点题卡任意处即选中该题。「从头试填」可在手机里完整走一遍（不保存）。'
-    : '编辑左侧内容此处实时更新。'));
+    ? '这里是真实的被试端页面（iframe）：所见、所点就是正式实验的样子。改完题目点「⟳ 刷新预览」同步；下面的进度条 / 题号框可直接跳到某道题开始试填。'
+    : '这里是真实的被试端页面（iframe）：所见、所点就是正式实验的样子。'));
+  // 进度条：拖动直接跳到第 N 题（题号与卡面一致；知情同意 / 确认页这类不占题号）
+  const scrubWrap = el('div', 'pv-scrub hidden');
+  const scrub = el('input', 'pv-scrub-range');
+  scrub.type = 'range';
+  scrub.min = '1';
+  scrub.max = '1';
+  scrub.value = '1';
+  const scrubLabel = el('span', 'pv-scrub-label', '第 1 / 1 题');
+  // 题号输入框：手输题号回车直接跳（等同拖进度条，方便跳到很靠后的题目）
+  const jumpInput = el('input', 'pv-scrub-jump');
+  jumpInput.type = 'number';
+  jumpInput.min = '1';
+  jumpInput.step = '1';
+  jumpInput.placeholder = '题号';
+  jumpInput.title = '输入题号后回车，直接跳到该题（等同拖动进度条）';
+  const doJumpByNumber = async () => {
+    warnIfStale();
+    const b = previewCtl.bridge();
+    if (!b) { toast('预览还没就绪，稍等一下再跳'); return; }
+    const total = Math.max(1, (b.totalQuestions ? b.totalQuestions() : b.total()) || 1);
+    const n = Math.round(Number(jumpInput.value));
+    if (!Number.isFinite(n) || n < 1 || n > total) {
+      toast(`请输入 1–${total} 之间的题号`);
+      jumpInput.value = '';
+      return;
+    }
+    try {
+      await seekToQuestion(b, n);      // 按题号跳：前 n-1 题合成已作答，直接停在第 n 题
+      jumpInput.value = '';
+      previewCtl.syncScrub();
+    } catch (err) {
+      toast(err.message || '跳转失败，请重试');
+    }
+  };
+  jumpInput.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') { e.preventDefault(); doJumpByNumber(); }
+    if (e.key === 'Escape') jumpInput.value = '';
+  });
+  jumpInput.addEventListener('blur', () => { if (String(jumpInput.value).trim() !== '') doJumpByNumber(); });
+  scrubWrap.append(scrub, scrubLabel, jumpInput);
+  if (withTrial) col.appendChild(scrubWrap);
+  // 手机壳：按真机尺寸（393 × 852）渲染，再用 transform 等比缩放塞进这一栏
+  const holder = el('div', 'phone-holder');
   const phone = el('div', 'phone');
-  const screen = el('div', 'screen');
-  const top = el('div', 'screen-top');
-  top.append(el('span', 'dot'), el('span', 'name', phoneTitle));
-  const tools = el('span', 'screen-tools hidden');
-  top.appendChild(tools);
-  const screenBody = el('div', 'screen-body');
-  screenBody.id = 'pv-body';
-  screen.append(top, screenBody);
-  phone.appendChild(screen);
-  col.appendChild(phone);
-  // 编辑栏与手机栏之间的分隔线：拖动调整手机栏宽度（双击复位）
+  const frame = document.createElement('iframe');
+  frame.className = 'phone-frame';
+  frame.title = '被试端预览';
+  phone.appendChild(frame);
+  holder.appendChild(phone);
+  col.appendChild(holder);
+
+  // 预览会话：把编辑器里（可能还没保存）的题目发给服务端建一个内存会话，iframe 就是这个会话的页面
+  const ctl = {
+    url: '',
+    markStale: () => {
+      if (!previewCtl.url) return;
+      refreshBtn.textContent = '⟳ 有改动，点此刷新';
+      refreshBtn.classList.add('stale');
+    },
+    // 预览页里暴露的桥（同源 iframe）：改倍速 / 拖进度都不重建会话
+    bridge: () => {
+      try { return frame.contentWindow && frame.contentWindow.__preview ? frame.contentWindow.__preview : null; } catch { return null; }
+    },
+    syncScrub: () => {
+      const b = previewCtl.bridge();
+      if (!b) return;
+      // 进度按「题号」报：分母是真实题数，当前值 = 当前是第几题（与卡面写法一致）
+      const total = Math.max(1, (b.totalQuestions ? b.totalQuestions() : b.total()) || 1);
+      const cur = Math.min(total, Math.max(1, (b.currentQno ? b.currentQno() : (b.answered() || 0) + 1) || 1));
+      scrub.max = String(total);
+      if (document.activeElement !== scrub) scrub.value = String(cur);
+      scrubLabel.textContent = `第 ${cur} / ${total} 题`;
+      const wasHidden = scrubWrap.classList.contains('hidden');
+      scrubWrap.classList.remove('hidden');
+      if (wasHidden) fitPhoneScale();      // 进度条出现会占掉一行高度 → 重新按可用高度缩放，别让手机被裁掉
+    }
+  };
+  previewCtl = ctl;
+  // 预览是「点刷新那一刻」的题目快照：有未同步的改动时提醒一句，
+  // 否则用户改了「呈现前清空」这类参数却以为已经生效（真机链接同理，用的是已保存的问卷）
+  const warnIfStale = () => {
+    if (refreshBtn.classList.contains('stale')) toast('预览还没同步改动：点「⟳ 刷新预览」后，改动（含「呈现前清空」）才会在预览里生效');
+  };
+
+  // 按题号跳（老版本桥只有 seek(单元序号)，这里做兼容）
+  const seekToQuestion = (b, qno) => (b.seekQuestion ? b.seekQuestion(qno) : b.seek(qno - 1));
+  // 倍速：优先走 iframe 里的桥（只改速度、不重建会话）；桥还没就绪就先记下来，等 iframe 加载完补发
+  let pendingSpeed = null;
+  const applyPreviewSpeed = (speed) => {
+    warnIfStale();
+    const b = previewCtl.bridge();
+    if (b && b.setSpeed) { b.setSpeed(speed).catch(() => toast('倍速设置失败')); return; }
+    if (!previewCtl.url) { pendingSpeed = speed; return; }        // 首次加载中：URL 已带 speed，无需重建
+    pendingSpeed = speed;                                          // iframe 正在换页：load 后补发，不重建
+  };
+  let scrubTimer = null;
+  scrub.addEventListener('input', () => { scrubLabel.textContent = `第 ${scrub.value} 题（松手后跳转）`; });
+  scrub.addEventListener('change', async () => {
+    warnIfStale();
+    const b = previewCtl.bridge();
+    if (!b) return;
+    try {
+      await seekToQuestion(b, Number(scrub.value));
+      previewCtl.syncScrub();
+    } catch (err) {
+      toast(err.message || '跳转失败');
+    }
+  });
+  frame.addEventListener('load', () => {
+    window.setTimeout(() => {
+      if (previewCtl !== ctl) return;         // 已离开编辑页：不再触碰预览
+      previewCtl.syncScrub();
+      // iframe 换页期间改过倍速：现在补发（只改速度，不重建会话）
+      if (pendingSpeed != null) {
+        const b = previewCtl.bridge();
+        const want = pendingSpeed;
+        pendingSpeed = null;
+        if (b && b.setSpeed) b.setSpeed(want).catch(() => toast('倍速设置失败'));
+      }
+    }, 400);
+    window.clearInterval(scrubTimer);
+    scrubTimer = window.setInterval(() => previewCtl.syncScrub(), 1500);
+  });
+  const reloadPreview = async () => {
+    refreshBtn.disabled = true;
+    try {
+      // 点「刷新预览」= 丢弃这一次模拟：先把旧预览会话销毁（不等 30 分钟空闲回收），再建新的
+      const oldUrl = previewCtl.url || '';
+      const oldId = (oldUrl.match(/preview=([^&]+)/) || [])[1];
+      if (oldId) api('/api/preview/destroy', { body: { previewId: decodeURIComponent(oldId) } }).catch(() => {});
+      const editing = currentEditing();
+      const items = ((editing && editing.items) || []).map(stripLocal);
+      const speed = previewSpeedSel ? Number(previewSpeedSel.value) : 1;
+      const res = await api('/api/admin/preview', { body: { items, speed: speed > 1 ? speed : 1 } });
+      pendingSpeed = null;
+      previewCtl.url = `${res.url}&speed=${speed > 1 ? speed : 1}`;   // 倍速随 URL 一起带上：首次加载就生效
+      frame.src = previewCtl.url;
+      refreshBtn.textContent = '⟳ 刷新预览';
+      refreshBtn.classList.remove('stale');
+    } catch (err) {
+      toast(err.message || '预览失败，请重试');
+    } finally {
+      refreshBtn.disabled = false;
+    }
+  };
+  refreshBtn.onclick = () => reloadPreview();
+  window.setTimeout(() => { fitPhoneScale(); reloadPreview(); }, 0);
+  requestAnimationFrame(fitPhoneScale);
+  // 编辑栏与手机栏之间的分隔线  // 编辑栏与手机栏之间的分隔线：拖动调整手机栏宽度（双击复位）
   const split = el('div', 'splitter');
   split.title = '拖动调整手机预览宽度 · 双击复位';
   split.addEventListener('mousedown', (e) => startDrag(e, 'phone'));
   split.addEventListener('dblclick', () => { saveLayout({ phone: LAYOUT_DEF.phone }); toast('手机栏宽度已复位'); });
   cols.append(split, col);
   $main.appendChild(cols);
+  // 编辑区内容渲染完之后同步一次大纲高亮（否则首次进入时大纲不会跟随定位）
+  requestAnimationFrame(() => syncOutlineActive());
 
-  return { saveBtn: save, screenBody, tag, scroll };
-}
-
-function phoneCtx(list, timing) {
-  return {
-    list,
-    timing,
-    body: $('pv-body'),
-    tag: document.querySelector('.pv-tag'),
-    trialBtn: document.querySelector('.phone-bar .mini-btn')
+  // 离开编辑页时释放资源：停止进度轮询 + 销毁这次预览会话（服务端还有 TTL/LRU 兜底）。
+  // 以前 scrubTimer 会一直空转，反复进出编辑页会累积一堆指向废 iframe 的定时器。
+  const dispose = () => {
+    window.clearInterval(scrubTimer);
+    scrubTimer = null;
+    const m = ((previewCtl && previewCtl.url) || '').match(/preview=([^&]+)/);
+    if (m) api('/api/preview/destroy', { body: { previewId: decodeURIComponent(m[1]) } }).catch(() => {});
+    if (previewCtl === ctl) previewCtl = null;
   };
+  editorShellDispose = dispose;
+
+  // setTitle：保存后不退出编辑页时，用来把顶部标题同步成新名字
+  const setTitle = (text) => { actionBar.querySelector('.editor-actionbar-title').textContent = text; };
+  return { saveBtn: save, scroll, reloadPreview, dispose, setTitle };
 }
-
-// 作答窗口提示（与真实被试端一致）
-function effWindowText(item, timing, prev) {
-  const mn = effLimit(item, "minSubmit", timing);
-  const mx = effLimit(item, "maxAnswer", timing);
-  const shared = prev && ["minSubmit", "maxAnswer"].every((k) => (prev.limits[k] ?? null) === (item.limits[k] ?? null) && item.limits[k] != null);
-  if (shared) return "与上一题共用同一个作答窗口";
-  if (!mn && !mx) return "";
-  return `${mn ? `${mn}s 后可提交` : ""}${mn && mx ? " · " : ""}${mx ? `${mx}s 到点自动提交` : ""}`;
-}
-
-// 手机预览渲染：消息（可打字机）/ 全屏页 / 题目卡片（含量表、题组、作答窗口标注）
-async function renderPhoneBody(ctx, { upTo, animateFrom, speed } = {}) {
-  const { body, list, timing } = ctx;
-  body.innerHTML = "";
-  const end = upTo == null ? list.length : Math.min(upTo, list.length);
-  let prevMsg = false;               // 上一条渲染的是消息 → 再渲染消息前插分割线
-  for (let i = 0; i < end; i += 1) {
-    const item = list[i];
-    const prev = i > 0 ? list[i - 1] : null;
-    if (item.type === "message") {
-      if (!String(item.text || "").trim()) {
-        body.appendChild(el("div", "pv-skip", `（${item.title || "消息"}为空 · 被试端跳过）`));
-        continue;
-      }
-      if (prevMsg) body.appendChild(el("div", "pv-divider"));
-      prevMsg = true;
-      const d = effLimit(item, "delay", timing);
-      if (d > 0) body.appendChild(el("div", "pv-tagline", `系统将在 ${d} 秒后发出 ↓`));
-      const node = el("div", "pv-msg");
-      body.appendChild(node);
-      if (animateFrom === i) {
-        await thinkingMock(body, speed);
-        await typewriteMock(node, item.text, speed);
-      } else {
-        node.textContent = item.text;
-      }
-    } else if (item.type === "gate") {
-      prevMsg = false;
-      const g = el("div", "screen-gate");
-      g.append(el("h3", "", item.title || "知情同意说明"), el("div", "txt", item.text || ""));
-      const c = el("div", "check");
-      c.append(el("span", "box"), el("span", "", item.check || "我已阅读"));
-      g.append(c, el("div", "go", item.button || "开始实验"));
-      body.appendChild(g);
-    } else if (item.type === "debrief") {
-      const g = el("div", "screen-gate");
-      g.append(el("h3", "", item.title || "实验说明"), el("div", "txt", item.text || ""));
-      body.appendChild(g);
-    } else if (item.type === "group") {
-      const card = el("div", "pv-qcard");
-      const head = el("div", "pv-qhead");
-      head.append(el("span", "pv-qnum", `第 ${previewQNo(list, i)} 题`), el("span", "pv-qtitle", item.title || ""));
-      card.appendChild(head);
-      if (item.text) card.appendChild(el("div", "pv-qtext", item.text));
-      const wrap = el("div", "pv-subs" + (item.layout === "row" ? " row" : ""));
-      for (const sub of item.subs || []) {
-        const box = el("div", "pv-sub");
-        box.appendChild(el("div", "pv-subtitle", sub.title || ""));
-        box.appendChild(previewControl(sub));
-        wrap.appendChild(box);
-      }
-      card.appendChild(wrap);
-      const win = effWindowText(item, timing, prev);
-      if (win) card.appendChild(el("div", "pv-limit", win));
-      const w = effLimit(item, "wait", timing);
-      if (w > 0) card.appendChild(el("div", "pv-limit", `需先停留 ${w} 秒才能作答`));
-      body.appendChild(card);
-    } else {
-      const card = el("div", "pv-qcard");
-      const head = el("div", "pv-qhead");
-      head.append(el("span", "pv-qnum", `第 ${previewQNo(list, i)} 题`), el("span", "pv-qtitle", item.title || ""));
-      card.appendChild(head);
-      card.appendChild(previewControl(item));
-      const w = effLimit(item, "wait", timing);
-      if (w > 0) card.appendChild(el("div", "pv-limit", `需先停留 ${w} 秒才能作答`));
-      const win = effWindowText(item, timing, prev);
-      if (win) card.appendChild(el("div", "pv-limit", win));
-      body.appendChild(card);
-    }
-  }
-}
-
-// 预览中的题号：只数「需要作答的题目」（与真实被试端一致）
-function previewQNo(list, index) {
-  let n = 0;
-  for (let i = 0; i <= index; i += 1) {
-    const t = list[i].type;
-    if (t !== 'message' && t !== 'gate' && t !== 'debrief') n += 1;
-  }
-  return n;
-}
-
-function previewControl(item) {
-  const box = el("div", "pv-ctrl");
-  if (item.type === "rating") {
-    const row = el("div", "pv-scale");
-    for (let v = Number(item.min) || 1; v <= (Number(item.max) || 5); v += 1) row.appendChild(el("span", "", String(v)));
-    box.appendChild(row);
-    if (item.anchor) box.appendChild(el("div", "pv-anchor", item.anchor));
-  } else if (item.type === "single" || item.type === "multi") {
-    const grid = el("div", "pv-opts" + (optList(item.options).length > 2 ? "" : " one"));
-    optList(item.options).forEach((o) => grid.appendChild(el("div", "pv-opt", o.label)));
-    box.appendChild(grid);
-  } else if (item.type === "rank") {
-    const grid = el("div", "pv-opts one");
-    optList(item.options, false).forEach((o) => grid.appendChild(el("div", "pv-opt", o.label)));
-    box.appendChild(grid);
-  } else if (item.type === "text") {
-    const input = el("div", "pv-input", item.placeholder || "请输入…");
-    const rows = Math.max(1, Number(item.rows) || 1);
-    if (rows > 1) input.style.minHeight = `${rows * 19}px`;
-    box.appendChild(input);
-    if (item.maxLen) box.appendChild(el("div", "pv-anchor", `最多 ${item.maxLen} 字`));
-  }
-  return box;
-}
-
-function renderPhoneOnly() {
-  const editing = currentEditing();
-  if (!editing) return;
-  const ctx = phoneCtx(editing.items, editing.timing);
-  if (!ctx.body) return;
-  if (state.trial) return;
-  if (ctx.tag) { ctx.tag.textContent = "实时预览 · 跟随编辑"; ctx.tag.classList.remove("trial"); }
-  if (ctx.trialBtn) ctx.trialBtn.textContent = "▶ 从头试填";
-  renderPhoneBody(ctx, { speed: state.previewSpeed || 1 });
-}
-
-/* ---------------------------------------------------------------- 预览模拟（思考 / 流式 / 计时） */
-// 与真实被试端一致的节奏：思考停顿 ~0.42s、正文 28ms/字、标点额外停顿；speed = 演示倍速
-const MOCK_PUNCT = "，。；：！？、,.!?;:";
-const MOCK_TYPE_MS = 30;        // 与被试端 TYPE_MS_DEFAULT 一致
-const MOCK_TYPE_MS_MIN = 26;    // 旧内容存了过快速度时的下限钳制
-function sleepMs(ms, speed) { return new Promise((r) => setTimeout(r, Math.max(0, ms / (speed || 1)))); }
-
-// 页面内滚动：打字过程中跟随底部；新题渲染后滚到该题顶部（见 mockScrollTop）
-function mockScroll(node) {
-  const screen = node.closest(".screen-body");
-  if (screen) screen.scrollTop = screen.scrollHeight;
-}
-
-async function typewriteMock(node, text, speed, typeMs) {
-  const raw = Number.isFinite(Number(typeMs)) ? Number(typeMs) : MOCK_TYPE_MS;
-  const base = raw > 0 ? Math.max(raw, MOCK_TYPE_MS_MIN) : 0;
-  if (base <= 0) { node.textContent = text; mockScroll(node); return; }
-  node.textContent = "";
-  node.classList.add("typing-mock");
-  for (let i = 0; i < text.length; i += 1) {
-    node.textContent += text[i];
-    await sleepMs(MOCK_PUNCT.includes(text[i]) ? base + 90 : base, speed);
-    if (i % 12 === 0) mockScroll(node);
-  }
-  node.classList.remove("typing-mock");
-  mockScroll(node);
-}
-
-// 「正在深度思考」动画：黑色圆圈旋转徽标 + 圆点（thinkMs 可覆盖，0 = 不显示）
-async function thinkingMock(body, speed, thinkMs) {
-  const ms = Number.isFinite(Number(thinkMs)) ? Number(thinkMs) : 420;
-  if (ms <= 0) return;
-  const row = el("div", "pv-msg pv-thinking");
-  const badge = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  badge.setAttribute("class", "pv-think-badge");
-  badge.setAttribute("viewBox", "0 0 24 24");
-  badge.setAttribute("fill", "none");
-  const c = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-  c.setAttribute("cx", "12");
-  c.setAttribute("cy", "12");
-  c.setAttribute("r", "9");
-  c.setAttribute("stroke", "#111213");
-  c.setAttribute("stroke-width", "2.6");
-  c.setAttribute("stroke-linecap", "round");
-  c.setAttribute("stroke-dasharray", "42 18");
-  badge.appendChild(c);
-  row.appendChild(badge);
-  row.appendChild(el("span", "", "正在深度思考..."));
-  const t = el("span", "typing");
-  t.append(el("span"), el("span"), el("span"));
-  row.appendChild(t);
-  body.appendChild(row);
-  mockScroll(row);
-  await sleepMs(ms, speed);
-  row.remove();
-}
-
-async function countdownMock(node, seconds, speed, label) {
-  if (!node || !seconds) return;
-  node.classList.remove('hidden');
-  for (let s = Math.max(1, Math.round(seconds)); s > 0; s -= 1) {
-    node.textContent = label.replace('{n}', String(s));
-    await sleepMs(1000, speed);
-  }
-  node.textContent = '';
-  node.classList.add('hidden');
-}
-
-
-/* ---------------------------------------------------------------- 从头试填（手机内交互，与正式被试端一致） */
-
-async function startTrial() {
-  const editing = currentEditing();
-  if (!editing) return;
-  state.trial = { list: editing.items, timing: editing.timing, idx: 0, results: {}, running: true, showAnswered: false };
-  toast('已进入试填：按真实节奏模拟（可调倍速）');
-  await renderTrial();
-}
-
-function exitTrial() {
-  state.trial = null;
-  toast('已退出试填');
-  const tools = document.querySelector('.screen-tools');
-  if (tools) { tools.innerHTML = ''; tools.classList.add('hidden'); }
-  renderPhoneOnly();
-}
-
-// 题号：只数需要作答的题目（与正式被试端一致）
-function previewQNo(list, index) {
-  let n = 0;
-  for (let i = 0; i <= index; i += 1) {
-    const t = list[i].type;
-    if (t !== 'message' && t !== 'gate' && t !== 'debrief') n += 1;
-  }
-  return n;
-}
-
-// 该题的呈现节奏：题目覆盖优先，否则问卷默认（毫秒）
-function trialRhythm(item, timing) {
-  return { thinkMs: effLimit(item, 'thinkMs', timing), typeMs: effLimit(item, 'typeMs', timing) };
-}
-
-// 把一个作答控件渲染成「可选」或「只读展示」；返回取值/回显方法
-// 选项归一化：题库里存的是纯文本数组（['表达不够精炼', …]），预览/试填统一转成 { value, label }
-const OPTION_LETTERS = 'ABCDEFGHIJKL';
-function optList(options, withLetter = true) {
-  return (Array.isArray(options) ? options : []).map((raw, i) => {
-    if (raw && typeof raw === 'object') return { value: raw.value != null ? raw.value : i + 1, label: String(raw.label ?? '') };
-    return { value: i + 1, label: withLetter ? `${OPTION_LETTERS[i] ?? i + 1}．${raw}` : String(raw ?? '') };
-  });
-}
-
-function trialControl(sub, value, active, onPick, withTitle = true) {
-  const box = el('div', 'trial-sub');
-  if (withTitle && sub.title) box.appendChild(el('div', 'trial-subtitle', sub.title));
-  const opts = optList(sub.options, sub.type !== 'rank');
-  const picked = new Set();
-  if (value != null) {
-    if (sub.type === 'multi') (Array.isArray(value) ? value : []).forEach((v) => picked.add(v));
-    else if (sub.type === 'rating' && value.value != null) picked.add(value.value);
-    else if (sub.type === 'single' && value.value != null) picked.add(value.value);
-  }
-  const echoOf = () => {
-    if (sub.type === 'text') return inp ? `${sub.title ? sub.title + '：' : ''}「${inp.value || '（空）'}」` : '';
-    if (sub.type === 'rating') return `${sub.title ? sub.title + '：' : ''}${[...picked][0]} 分`;
-    if (sub.type === 'rank') return `${sub.title ? sub.title + '：' : ''}${order.map((v, i) => `${i + 1}. ${(opts.find((o) => o.value === v) || {}).label}`).join('  ')}`;
-    return `${sub.title ? sub.title + '：' : ''}${[...picked].map((v) => (opts.find((o) => o.value === v) || {}).label).join('、')}`;
-  };
-  const payloadOf = () => {
-    if (sub.type === 'text') return { text: (inp.value || '').trim() };
-    if (sub.type === 'rating' || sub.type === 'single') return { value: [...picked][0] };
-    if (sub.type === 'multi') return { values: [...picked] };
-    if (sub.type === 'rank') return { order: [...order] };
-    return {};
-  };
-  const empty = () => {
-    if (sub.type === 'text') return sub.required !== false ? !(inp.value || '').trim() : false;
-    if (sub.type === 'rank') return false;
-    return picked.size === 0;
-  };
-
-  let inp = null;
-  let order = null;
-  if (sub.type === 'text') {
-    const rows = Math.max(1, Number(sub.rows) || 1);
-    inp = rows > 1 ? el('textarea') : el('input');
-    if (rows > 1) inp.rows = Math.min(6, rows);
-    else inp.type = 'text';
-    inp.placeholder = sub.placeholder || '请输入…';
-    inp.value = value && value.text ? value.text : '';
-    if (sub.maxLen > 0) inp.maxLength = Number(sub.maxLen);   // 硬上限：与被试端一致
-    if (!active) inp.setAttribute('readonly', 'readonly');
-    else inp.addEventListener('input', () => { if (count) refreshCount(); onPick && onPick(); });
-    box.appendChild(inp);
-    const count = sub.maxLen ? el('div', 'pv-count') : null;
-    const refreshCount = () => {
-      count.textContent = `${inp.value.length}/${sub.maxLen}`;
-      count.classList.toggle('near', inp.value.length >= Math.max(1, Number(sub.maxLen) - 20));
-    };
-    if (count) { refreshCount(); box.appendChild(count); }
-    if (sub.maxLen && !active && count) count.textContent = `${inp.value.length}/${sub.maxLen}`;
-  } else if (sub.type === 'rating') {
-    const row = el('div', 'trial-opts rating-row');
-    for (let v = Number(sub.min) || 1; v <= (Number(sub.max) || 5); v += 1) {
-      const btn = el('button', 'rating-btn', String(v));
-      btn.type = 'button';
-      if (picked.has(v)) btn.classList.add('selected');
-      if (!active) btn.disabled = true;
-      else btn.addEventListener('click', () => {
-        picked.clear();
-        picked.add(v);
-        row.querySelectorAll('.rating-btn').forEach((b) => b.classList.toggle('selected', b === btn));
-        onPick && onPick();
-      });
-      row.appendChild(btn);
-    }
-    box.appendChild(row);
-    if (sub.anchor) box.appendChild(el('div', 'pv-anchor', sub.anchor));
-  } else if (sub.type === 'single' || sub.type === 'multi') {
-    const multi = sub.type === 'multi';
-    const row = el('div', 'trial-opts' + (opts.length > 2 ? '' : ' one-col'));
-    opts.forEach((opt) => {
-      const btn = el('button', 'option-btn', opt.label);
-      btn.type = 'button';
-      if (picked.has(opt.value)) btn.classList.add('selected');
-      if (!active) btn.disabled = true;
-      else btn.addEventListener('click', () => {
-        if (multi) {
-          if (picked.has(opt.value)) picked.delete(opt.value);
-          else picked.add(opt.value);
-          btn.classList.toggle('selected', picked.has(opt.value));
-        } else {
-          picked.clear();
-          picked.add(opt.value);
-          row.querySelectorAll('.option-btn').forEach((b) => b.classList.toggle('selected', b === btn));
-        }
-        onPick && onPick();
-      });
-      row.appendChild(btn);
-    });
-    box.appendChild(row);
-  } else if (sub.type === 'rank') {
-    order = (value && Array.isArray(value.order) && value.order.length === opts.length)
-      ? [...value.order]
-      : opts.map((o) => o.value);
-    const list = el('div', 'rank-list');
-    const rebuild = () => {
-      list.innerHTML = '';
-      order.forEach((v, idx) => {
-        const row = el('div', 'rank-item');
-        row.appendChild(el('span', 'rank-seq', String(idx + 1)));
-        row.appendChild(el('span', 'rank-label', (opts.find((o) => o.value === v) || {}).label || ''));
-        const up = el('button', 'mini-btn', '↑');
-        up.type = 'button';
-        up.disabled = !active || idx === 0;
-        up.addEventListener('click', () => { [order[idx - 1], order[idx]] = [order[idx], order[idx - 1]]; rebuild(); onPick && onPick(); });
-        const down = el('button', 'mini-btn', '↓');
-        down.type = 'button';
-        down.disabled = !active || idx === order.length - 1;
-        down.addEventListener('click', () => { [order[idx + 1], order[idx]] = [order[idx], order[idx + 1]]; rebuild(); onPick && onPick(); });
-        row.append(up, down);
-        list.appendChild(row);
-      });
-    };
-    rebuild();
-    box.appendChild(list);
-  }
-  return { node: box, payloadOf, echoOf, empty };
-}
-
-// 题目卡片：active = 可交互；已提交卡片默认整体隐藏（与被试端一致），可单独显示
-function trialQuestionCard(ctx, item, index, active, result, handlers) {
-  const card = el('div', 'pv-qcard' + (active ? ' active' : ' done'));
-  const head = el('div', 'pv-qhead');
-  head.append(el('span', 'pv-qnum', `第 ${previewQNo(ctx.list, index)} 题`), el('span', 'pv-qtitle', item.title || ''));
-  if (!active) head.appendChild(el('span', 'pv-qdone', '✓ 已提交'));
-  const timer = el('span', 'pv-timer hidden');            // 右上角倒计时（issue 1）
-  head.appendChild(timer);
-  if (!active) {
-    const shown = !!(state.trial && state.trial.showAnswered);
-    const toggle = el('button', 'mini-btn pv-qtoggle', shown ? '隐藏' : '显示');
-    toggle.type = 'button';
-    toggle.addEventListener('click', () => {
-      const hidden = card.classList.toggle('answered-hidden');
-      toggle.textContent = hidden ? '显示' : '隐藏';
-    });
-    head.appendChild(toggle);
-    if (!shown) card.classList.add('answered-hidden');
-  }
-  card.appendChild(head);
-  if (item.text) card.appendChild(el('div', 'pv-qtext', item.text));
-  const controls = [];
-  const subs = item.type === 'group' ? (item.subs || []) : [item];
-  subs.forEach((sub, si) => {
-    const value = result ? (item.type === 'group' ? (result.answers || [])[si] : result) : null;
-    const ctl = trialControl(sub, value, active, () => handlers && handlers.onPick && handlers.onPick(), item.type === 'group');
-    controls.push(ctl);
-    card.appendChild(ctl.node);
-  });
-  if (active) {
-    const hint = el('div', 'pv-limit hidden');
-    const submit = el('button', 'pv-submit', item.type === 'group' ? '提交创作' : '确认提交');
-    submit.type = 'button';
-    submit.disabled = true;
-    submit.addEventListener('click', () => {
-      if (controls.some((c) => c.empty())) { hint.textContent = '请先完成必答内容'; hint.classList.remove('hidden'); return; }
-      const payload = item.type === 'group'
-        ? { answers: controls.map((c) => c.payloadOf()) }
-        : controls[0].payloadOf();
-      handlers.onSubmit(payload, controls.map((c) => c.echoOf()).join('\n'));
-    });
-    card.append(hint, submit);
-    handlers.refresh = () => { submit.disabled = controls.some((c) => c.empty()) || handlers.gated(); };
-    handlers.hint = hint;
-    handlers.submit = submit;
-    handlers.timer = timer;
-  }
-  return card;
-}
-
-// 全屏页面（知情同意 / 结束说明）在手机屏内直接交互
-function trialPageCard(item, active, handlers) {
-  const page = el('div', 'screen-gate');
-  page.append(el('h3', '', item.title || ''), el('div', 'txt', item.text || ''));
-  const isGate = item.type === 'gate';
-  const box = el('label', 'check');
-  box.append(el('span', 'box'), el('span', '', isGate ? (item.check || '我已阅读') : '已阅读'));
-  page.appendChild(box);
-  const btn = el('div', 'go', isGate ? (item.button || '开始实验') : '我已阅读');
-  if (!active) {
-    box.classList.add('done');
-    btn.classList.add('done-flag');
-    btn.textContent = '✓ 已完成';
-  } else {
-    let checked = !isGate;
-    btn.classList.add('disabled');
-    box.onclick = (e) => {
-      e.preventDefault();
-      checked = !checked;
-      box.classList.toggle('checked', checked);
-      btn.classList.toggle('disabled', !checked);
-    };
-    btn.onclick = () => { if (checked) handlers.onSubmit(isGate ? { consent: true } : { ack: true }); };
-  }
-  page.appendChild(btn);
-  return page;
-}
-
-async function renderTrial() {
-  const trial = state.trial;
-  const editing = currentEditing();
-  if (!trial || !editing) return;
-  const ctx = phoneCtx(trial.list, trial.timing);
-  if (!ctx.body) return;
-  const speed = state.previewSpeed || 1;
-  if (ctx.tag) { ctx.tag.textContent = '试填中 · 与正式被试端一致'; ctx.tag.classList.add('trial'); }
-  if (ctx.trialBtn) ctx.trialBtn.textContent = '■ 退出试填';
-
-  // 空消息在被试端不渲染（正式流程会跳过）：试填里也直接跳过，否则会卡在空白屏
-  while (trial.idx < trial.list.length) {
-    const it = trial.list[trial.idx];
-    if (it.type === 'message' && !String(it.text || '').trim()) {
-      trial.results[trial.idx] = {};
-      trial.idx += 1;
-      continue;
-    }
-    break;
-  }
-
-  ctx.body.innerHTML = '';
-  let activeCard = null;
-  let activeHandlers = null;
-  updateTrialTools(ctx, trial);
-  // 提交按钮的可用性：已作答 且 门控（阅读停留 / 最短提交）已到 —— 与正式被试端一致
-  const gateItem = trial.list[trial.idx];
-  const gateAnswerable = !!gateItem && !['message', 'gate', 'debrief'].includes(gateItem.type);
-  let gateDone = !gateAnswerable
-    || (effLimit(gateItem, 'wait', trial.timing) <= 0 && effLimit(gateItem, 'minSubmit', trial.timing) <= 0);
-
-  const advance = async (payload, echo) => {
-    trial.results[trial.idx] = payload || {};
-    trial.idx += 1;
-    trial.running = false;
-    await renderTrial();
-  };
-
-  for (let i = 0; i <= trial.idx && i < trial.list.length; i += 1) {
-    const item = trial.list[i];
-    const active = i === trial.idx;
-    if (item.type === 'message') {
-      if (!String(item.text || '').trim()) continue;
-      if (!active) { appendTrialDivider(ctx.body, item.type); ctx.body.appendChild(el('div', 'pv-msg', item.text)); continue; }
-      // 当前消息：延迟 → 等待（不显示剩余时间）；然后深度思考 + 流式
-      const delaySec = effLimit(item, 'delay', trial.timing);
-      if (delaySec > 0) {
-        const row = el('div', 'pv-msg pv-thinking');
-        const badge = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-        badge.setAttribute('class', 'pv-think-badge');
-        badge.setAttribute('viewBox', '0 0 24 24');
-        badge.setAttribute('fill', 'none');
-        const bc = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-        bc.setAttribute('cx', '12'); bc.setAttribute('cy', '12'); bc.setAttribute('r', '9');
-        bc.setAttribute('stroke', '#111213'); bc.setAttribute('stroke-width', '2.6');
-        bc.setAttribute('stroke-linecap', 'round'); bc.setAttribute('stroke-dasharray', '42 18');
-        badge.appendChild(bc);
-        row.appendChild(badge);
-        row.appendChild(el('span', '', '正在深度思考...'));
-        const dots = el('span', 'typing');
-        dots.append(el('span'), el('span'), el('span'));
-        row.appendChild(dots);
-        ctx.body.appendChild(row);
-        mockScrollTop(ctx.body, row);
-        await sleepMs(delaySec * 1000, speed);
-        row.remove();
-      }
-      appendTrialDivider(ctx.body, 'message');
-      const node = el('div', 'pv-msg');
-      ctx.body.appendChild(node);
-      const rhythm = trialRhythm(item, trial.timing);
-      if (rhythm.thinkMs > 0) await thinkingMock(ctx.body, speed, rhythm.thinkMs, node);
-      await typewriteMock(node, item.text, speed, rhythm.typeMs);
-      // 消息播完自动推进（与正式流程一致）
-      trial.idx += 1;
-      trial.results[i] = {};
-      await sleepMs(260, speed);
-      return renderTrial();
-    }
-    if (item.type === 'gate' || item.type === 'debrief') {
-      // 知情同意确认之后就与实验无关了：从屏内清掉（issue 4）；结束说明保留
-      if (!active && item.type === 'gate') continue;
-      const handlers = { onSubmit: (payload) => advance(payload) };
-      const page = trialPageCard(item, active, handlers);
-      ctx.body.appendChild(page);
-      if (active) activeCard = page;
-      continue;
-    }
-    // 题目卡片
-    const handlers = {
-      gated: () => !gateDone,
-      onPick: () => { if (handlers.refresh) handlers.refresh(); },
-      onSubmit: (payload, echo) => advance(payload, echo)
-    };
-    const card = trialQuestionCard(ctx, item, i, active, trial.results[i], handlers);
-    ctx.body.appendChild(card);
-    if (active) { activeCard = card; activeHandlers = handlers; }
-  }
-
-  if (trial.idx >= trial.list.length) {
-    ctx.body.appendChild(el('div', 'pv-done', '试填结束 · 数据未保存'));
-  }
-  mockScrollTop(ctx.body, activeCard);
-
-  // 当前题的计时门控：控件可填，仅提交按钮置灰；倒计时挂在卡片右上角，倒计时结束后切换为作答倒计时
-  const item = trial.list[trial.idx];
-  if (!item || item.type === 'message' || item.type === 'gate' || item.type === 'debrief') return;
-  const card = activeCard;
-  const hint = card.querySelector('.pv-limit');
-  const timer = card.querySelector('.pv-timer');
-  const wait = effLimit(item, 'wait', trial.timing);
-  const mn = effLimit(item, 'minSubmit', trial.timing);
-  const mx = effLimit(item, 'maxAnswer', trial.timing);
-
-  if (wait > 0) {
-    await countdownMock(timer, wait, speed, '阅读中 · {n} 秒后可提交');
-  }
-  if (trial.list[trial.idx] !== item) return;     // 期间已推进
-  if (mn > 0) {
-    await countdownMock(timer, mn, speed, '{n} 秒后可提交');
-  }
-  if (trial.list[trial.idx] !== item) return;     // 期间已推进
-  gateDone = true;
-  if (activeHandlers && activeHandlers.refresh) activeHandlers.refresh();
-  if (mx > 0) {
-    // 门控结束后切换为作答倒计时（试填不强制自动提交）
-    countdownMock(timer, mx, speed, '作答计时 · 剩余 {n} 秒');
-  }
-}
-
-// 试填中相邻材料消息之间的分割线（与被试端一致）
-function appendTrialDivider(body, upcomingType) {
-  const last = body.lastElementChild;
-  if (last && (last.classList.contains('pv-msg') || last.classList.contains('pv-divider'))) {
-    body.appendChild(el('div', 'pv-divider'));
-  }
-}
-
-// 试填顶栏工具：已答题(N) 显示/隐藏 + 重做
-function updateTrialTools(ctx, trial) {
-  const tools = document.querySelector('.screen-tools');
-  if (!tools) return;
-  const answerableCount = () => {
-    let n = 0;
-    for (let i = 0; i < trial.idx && i < trial.list.length; i += 1) {
-      const t = trial.list[i].type;
-      if (t !== 'message' && t !== 'gate' && t !== 'debrief') n += 1;
-    }
-    return n;
-  };
-  tools.innerHTML = '';
-  tools.classList.remove('hidden');
-  const bAns = el('button', 'mini-btn', `${trial.showAnswered ? '隐藏' : '显示'}已答题（${answerableCount()}）`);
-  bAns.type = 'button';
-  bAns.onclick = () => { trial.showAnswered = !trial.showAnswered; renderTrial(); };
-  const bRedo = el('button', 'mini-btn', '重做');
-  bRedo.type = 'button';
-  bRedo.onclick = () => {
-    trial.idx = 0;
-    trial.results = {};
-    trial.showAnswered = false;
-    renderTrial();
-  };
-  tools.append(bAns, bRedo);
-}
-
-function mockScrollTop(screenBody, node) {
-  if (!screenBody) return;
-  if (!node) { screenBody.scrollTop = screenBody.scrollHeight; return; }
-  // 新题滚到可视区顶部，便于从上往下阅读（issue 5）；用 rect 计算，避免 offsetParent 不是滚动容器
-  const top = node.getBoundingClientRect().top - screenBody.getBoundingClientRect().top + screenBody.scrollTop - 10;
-  screenBody.scrollTop = Math.max(0, top);
-}
-
 
 /* ---------------------------------------------------------------- 实验模板列表 */
 
@@ -1751,7 +2244,7 @@ function renderExpList() {
   const table = el('table', 'data-table');
   const thead = el('thead');
   const tr = el('tr');
-  for (const t of ['实验名称', '模板 ID', '题目数', '计时默认值', '被问卷引用', '操作']) tr.appendChild(el('th', '', t));
+  for (const t of ['实验名称', '模板 ID', '题目数', '被问卷引用', '操作']) tr.appendChild(el('th', '', t));
   thead.appendChild(tr);
   const tbody = el('tbody');
   for (const exp of state.experiments) {
@@ -1761,7 +2254,6 @@ function renderExpList() {
     row.appendChild(td1);
     row.appendChild(el('td', '', exp.id));
     row.appendChild(el('td', '', `${exp.itemCount} 道`));
-    row.appendChild(el('td', '', `${exp.timing.delay}/${exp.timing.wait}/${exp.timing.minSubmit}/${exp.timing.maxAnswer}s`));
     row.appendChild(el('td', '', `${exp.usedBy} 份`));
     const td6 = el('td');
     const actions = el('div', 'row-actions');
@@ -1793,10 +2285,9 @@ async function renderExpEditor(id) {
     $main.appendChild(el('p', 'data-empty', err.message || '实验不存在'));
     return;
   }
-  state.editingExp = { id: experiment.id, name: experiment.name, timing: { ...experiment.timing }, items: experiment.items.map((it) => ({ ...it, collapsed: false })) };
+  state.editingExp = { id: experiment.id, name: experiment.name, items: experiment.items.map((it) => ({ ...it, collapsed: false })) };
   state.selected = null;
-  state.trial = null;
-  state.expBaseline = JSON.stringify({ n: experiment.name, t: experiment.timing, i: experiment.items.map(stripLocal) });
+  state.expBaseline = JSON.stringify({ n: experiment.name, i: experiment.items.map(stripLocal) });
   setSidebarMode('outline');       // 题目已就绪，切到题目大纲
   renderExpEditorBody();
 }
@@ -1806,10 +2297,11 @@ const UNNAMED_EXP = '未命名实验';
 const UNNAMED_Q = '未命名问卷';
 
 function renderExpEditorBody() {
+  editorCtx = null;               // 页面重建期间先失效，构建完由 buildItemEditor 重新挂上
   const exp = state.editingExp;
   const body = el('div');
 
-  const secBasic = sectionHead('模板信息', '实验是可复用的题目模板：一套题目 + 计时默认值。问卷「插入实验」时整组复制其题目，复制后即可逐条修改。');
+  const secBasic = sectionHead('模板信息', '实验是可复用的题目模板：一套题目。问卷「插入实验」时整组复制其题目，复制后即可逐条修改。');
   secBasic.id = 'sec-basic';
   const nameField = makeField('实验名称', exp.name === UNNAMED_EXP ? '' : exp.name, 1);
   nameField.input.placeholder = '请填写实验名称';
@@ -1817,39 +2309,21 @@ function renderExpEditorBody() {
   secBasic.appendChild(nameField.wrap);
   body.appendChild(secBasic);
 
-  const secTiming = sectionHead('计时与呈现（全局默认值）', '门控按秒计（0 = 无限制）；呈现节奏按毫秒计。题目里勾选了具体项就以题目为准，未勾选的按这里生效。');
-  secTiming.id = 'sec-timing';
-  const gateGrid = el('div', 'grid2');
-  const rhythmGrid = el('div', 'grid2');
-  for (const key of TIMING_KEYS()) {
-    const meta = TIMING_META()[key];
-    const isRhythm = meta.group === 'rhythm';
-    const f = makeNumberField(`${meta.label}（${meta.unit}）`, exp.timing[key], 0, isRhythm ? 10000 : 86400, meta.hint);
-    f.input.addEventListener('input', () => {
-      exp.timing[key] = Number(f.input.value) || 0;
-      renderPhoneOnly();
-    });
-    (isRhythm ? rhythmGrid : gateGrid).appendChild(f.wrap);
-  }
-  secTiming.append(
-    el('p', 'section-hint', '作答门控（秒，默认 0 = 无限制）'), gateGrid,
-    el('p', 'section-hint', '呈现节奏（毫秒）'), rhythmGrid
-  );
-  body.appendChild(secTiming);
-
-  const secItems = sectionHead(`题目编排（${exp.items.length} 道 · 默认全部展开）`, '拖动左侧手柄排序；点题卡即选中并展开，点「折叠」收起。被试端按此顺序呈现。');
+  const secItems = sectionHead(`题目编排（${questionCount(exp.items)} 道 · 默认全部展开）`, '拖动左侧手柄排序；点题卡即选中并展开，点「折叠」收起。被试端按此顺序呈现。');
   secItems.id = 'sec-items';
-  const editor = buildItemEditor(exp.items, exp.timing, {
+  const editor = buildItemEditor(exp.items, {
     onChange: () => {
-      secItems.querySelector('.section-title').textContent = `题目编排（${exp.items.length} 道 · 默认全部展开）`;
-      renderPhoneOnly();
+      secItems.querySelector('.section-title').textContent = `题目编排（${questionCount(exp.items)} 道 · 默认全部展开）`;
+      markPreviewStale();
       renderOutline();
     }
   });
   secItems.appendChild(editor.wrap);
   body.appendChild(secItems);
+  editorCtx = editor;          // 关键：点大纲 / 点题卡时靠它就地更新选中态（否则编辑区不会跟着选中）
 
-  // 保存：名称必填；exit = 保存后返回列表（返回确认弹窗复用）
+  // 保存：名称必填。按钮保存留在编辑页（与问卷编辑器同一套行为）；
+  // 只有「返回列表」确认弹窗里的保存（opts.exit）才保存完直接回列表。
   const doSave = async (opts = {}) => {
     const name = (exp.name || '').trim();
     if (!name || name === UNNAMED_EXP) {
@@ -1862,14 +2336,14 @@ function renderExpEditorBody() {
     shell.saveBtn.disabled = true;
     try {
       await api('/api/admin/experiment/update', {
-        body: { id: exp.id, name, timing: exp.timing, items: exp.items.map(stripLocal) }
+        body: { id: exp.id, name, items: exp.items.map(stripLocal) }
       });
       await reloadExperiments();
-      state.expBaseline = JSON.stringify({ n: name, t: exp.timing, i: exp.items.map(stripLocal) });
+      state.expBaseline = JSON.stringify({ n: name, i: exp.items.map(stripLocal) });
       toast('已保存该实验模板');
-      state.trial = null;
       if (opts.modal) closeModal();
-      location.hash = '#/exp';
+      if (opts.exit) location.hash = '#/exp';
+      else shell.setTitle(`实验 · ${name}`);           // 留在编辑页：改了名字标题也立刻跟着变
       return true;
     } catch (err) {
       toast(err.message || '保存失败，请重试');
@@ -1888,14 +2362,16 @@ function renderExpEditorBody() {
     phoneTitle: '实验模板预览',
     withTrial: true,
     onSave: doSave,
-    isDirty: () => JSON.stringify({ n: exp.name, t: exp.timing, i: exp.items.map(stripLocal) }) !== state.expBaseline
+    isDirty: () => JSON.stringify({ n: exp.name, i: exp.items.map(stripLocal) }) !== state.expBaseline
   });
-  renderPhoneOnly();
+  markPreviewStale();
+  syncOutlineActive();         // 题卡已挂载：大纲高亮落到第一题
 }
 
 function stripLocal(item) {
   const out = JSON.parse(JSON.stringify(item));
   delete out.collapsed;
+  delete out.__thinkingOn;      // 「刚添加、还没写内容」的本地标记，不落库
   return out;
 }
 
@@ -2083,17 +2559,16 @@ async function renderQEditor(id) {
   state.editingQ = {
     id: questionnaire.id,
     title: questionnaire.title,
-    timing: { ...questionnaire.timing },
     items: questionnaire.items.map((it) => ({ ...it, collapsed: false }))
   };
   state.selected = null;
-  state.trial = null;
-  state.qBaseline = JSON.stringify({ n: questionnaire.title, t: questionnaire.timing, i: questionnaire.items.map(stripLocal) });
+  state.qBaseline = JSON.stringify({ n: questionnaire.title, i: questionnaire.items.map(stripLocal) });
   setSidebarMode('outline');       // 题目已就绪，切到题目大纲
   renderQEditorBody();
 }
 
 function renderQEditorBody() {
+  editorCtx = null;               // 页面重建期间先失效，构建完由 buildItemEditor 重新挂上
   const q = state.editingQ;
   const body = el('div');
 
@@ -2115,40 +2590,22 @@ function renderQEditorBody() {
   secBasic.appendChild(linkRow);
   body.appendChild(secBasic);
 
-  const secTiming = sectionHead('计时与呈现（全局默认值）', '插入实验模板时会带入模板的默认值；单题可勾选覆盖，未勾选的按这里生效。门控按秒计（0 = 无限制），呈现节奏按毫秒计。');
-  secTiming.id = 'sec-timing';
-  const gateGrid = el('div', 'grid2');
-  const rhythmGrid = el('div', 'grid2');
-  for (const key of TIMING_KEYS()) {
-    const meta = TIMING_META()[key];
-    const isRhythm = meta.group === 'rhythm';
-    const f = makeNumberField(`${meta.label}（${meta.unit}）`, q.timing[key], 0, isRhythm ? 10000 : 86400, meta.hint);
-    f.input.addEventListener('input', () => {
-      q.timing[key] = Number(f.input.value) || 0;
-      renderPhoneOnly();
-    });
-    (isRhythm ? rhythmGrid : gateGrid).appendChild(f.wrap);
-  }
-  secTiming.append(
-    el('p', 'section-hint', '作答门控（秒，默认 0 = 无限制）'), gateGrid,
-    el('p', 'section-hint', '呈现节奏（毫秒）'), rhythmGrid
-  );
-  body.appendChild(secTiming);
-
-  const secItems = sectionHead(`题目编排（${q.items.length} 道 · 默认全部展开）`, '问卷默认已含欢迎语（空）、知情同意页、结束语（空）、结束说明页，均可编辑或删除。可逐题插入、批量插入打分题，或整组插入实验模板后逐条修改。');
+  const secItems = sectionHead(`题目编排（${questionCount(q.items)} 道 · 默认全部展开）`, '问卷默认已含欢迎语（空）、知情同意页、结束语（空）、结束说明页，均可编辑或删除。可逐题插入、批量插入打分题，或整组插入实验模板后逐条修改。');
   secItems.id = 'sec-items';
-  const editor = buildItemEditor(q.items, q.timing, {
+  const editor = buildItemEditor(q.items, {
     withTemplateInsert: true,
     onChange: () => {
-      secItems.querySelector('.section-title').textContent = `题目编排（${q.items.length} 道 · 默认全部展开）`;
-      renderPhoneOnly();
+      secItems.querySelector('.section-title').textContent = `题目编排（${questionCount(q.items)} 道 · 默认全部展开）`;
+      markPreviewStale();
       renderOutline();
     }
   });
   secItems.appendChild(editor.wrap);
   body.appendChild(secItems);
+  editorCtx = editor;          // 关键：点大纲 / 点题卡时靠它就地更新选中态（否则编辑区不会跟着选中）
 
-  // 保存：名称必填；exit = 保存后返回列表（返回确认弹窗复用）
+  // 保存：名称必填。按钮保存留在编辑页（继续改，不想改了由用户自己点「← 返回列表」）；
+  // 只有「返回列表」确认弹窗里的保存（opts.exit）才保存完直接回列表。
   const doSave = async (opts = {}) => {
     const title = (q.title || '').trim();
     if (!title || title === UNNAMED_Q) {
@@ -2161,14 +2618,14 @@ function renderQEditorBody() {
     shell.saveBtn.disabled = true;
     try {
       await api('/api/admin/questionnaire/update', {
-        body: { id: q.id, title, timing: q.timing, items: q.items.map(stripLocal) }
+        body: { id: q.id, title, items: q.items.map(stripLocal) }
       });
       await reloadQuestionnaires();
-      state.qBaseline = JSON.stringify({ n: title, t: q.timing, i: q.items.map(stripLocal) });
+      state.qBaseline = JSON.stringify({ n: title, i: q.items.map(stripLocal) });
       toast('已保存问卷');
-      state.trial = null;
       if (opts.modal) closeModal();
-      location.hash = '#/q';
+      if (opts.exit) location.hash = '#/q';
+      else shell.setTitle(`修改问卷 · ${title}`);      // 留在编辑页：改了名字标题也立刻跟着变
       return true;
     } catch (err) {
       toast(err.message || '保存失败，请重试');
@@ -2182,14 +2639,15 @@ function renderQEditorBody() {
     title: `修改问卷 · ${(q.title && q.title !== UNNAMED_Q) ? q.title : '未命名'}`,
     backHash: '#/q',
     saveLabel: '保存问卷',
-    hint: `共 ${q.items.length} 道题`,
+    hint: `共 ${questionCount(q.items)} 道题`,
     body,
     phoneTitle: q.title || '未命名问卷',
     withTrial: true,
     onSave: doSave,
-    isDirty: () => JSON.stringify({ n: q.title, t: q.timing, i: q.items.map(stripLocal) }) !== state.qBaseline
+    isDirty: () => JSON.stringify({ n: q.title, i: q.items.map(stripLocal) }) !== state.qBaseline
   });
-  renderPhoneOnly();
+  markPreviewStale();
+  syncOutlineActive();         // 题卡已挂载：大纲高亮落到第一题
 }
 
 /* ---------------------------------------------------------------- 数据页 */
@@ -2211,15 +2669,28 @@ async function renderQData(id) {
     $main.appendChild(el('p', 'data-empty', err.message || '数据加载失败'));
     return;
   }
-  const { questionnaire, sessions, answerable } = data;
-  const totalAnswers = answerable == null ? questionnaire.itemCount : answerable;
+  // 口径 = 题号（与编辑器的「题目编排（N 道）」一致）：材料消息与页面环节（知情同意 / 确认 / 结束说明）不占题号
+  const { questionnaire, sessions, totalQuestions } = data;
+  const qCount = questionCount(questionnaire.items);
 
   const panel = el('div', 'data-panel');
   const phead = el('div', 'panel-head');
   const box = el('div', 'grow');
-  box.append(el('h2', '', `${questionnaire.title} · 数据`), el('p', 'panel-sub', `共 ${sessions.length} 位被试 · 问卷共 ${questionnaire.itemCount} 道题（其中 ${totalAnswers} 道需作答）。点击一行查看该被试的完整作答与对话。`));
+  box.append(el('h2', '', `${questionnaire.title} · 数据`), el('p', 'panel-sub', `共 ${sessions.length} 位被试 · 问卷共 ${qCount} 道题（另有 ${questionnaire.itemCount - qCount} 条材料与页面环节）。点击一行查看该被试的完整作答与对话。`));
+  // 状态筛选先建好：下面的「导出 Excel」要读它的当前值（此前它在空数据集分支里不会被初始化，点导出会报错）
+  const statusSel = el('select', 'filter-select');
+  // 默认不含「已作废」（重做 / 太久没提交被系统作废的会话）——需要时选「全部（含已作废）」
+  [['', '默认（不含已作废）'], ['in_progress', '进行中'], ['completed', '已完成'], ['abandoned', '已作废'], ['all', '全部（含已作废）']].forEach(([v, label]) => {
+    const o = el('option', '', label);
+    o.value = v;
+    statusSel.appendChild(o);
+  });
   const exportBtn = el('button', 'ghost-btn', '导出 Excel');
-  exportBtn.onclick = () => exportXlsx(questionnaire);
+  // 导出跟随当前状态筛选：默认不含已作废（选了「已作废 / 全部（含已作废）」才导出它们）
+  exportBtn.onclick = () => {
+    const v = statusSel.value;
+    exportXlsx(questionnaire, v === 'abandoned' || v === 'all');
+  };
   const delBtn = el('button', 'ghost-btn danger', '删除数据');
   phead.append(box, exportBtn, delBtn);
   panel.appendChild(phead);
@@ -2241,15 +2712,9 @@ async function renderQData(id) {
     return;
   }
 
-  // 筛选：状态 / 最短时长（分钟）
+  // 筛选：状态 / 最短时长（分钟）；statusSel 已在上面创建（导出按钮要读它），这里只挂进筛选行
   const filterRow = el('div', 'data-filters');
   filterRow.appendChild(el('span', 'lbl', '筛选：'));
-  const statusSel = el('select', 'filter-select');
-  [['', '全部状态'], ['in_progress', '进行中'], ['completed', '已完成']].forEach(([v, label]) => {
-    const o = el('option', '', label);
-    o.value = v;
-    statusSel.appendChild(o);
-  });
   const minDur = el('input', 'filter-num');
   minDur.type = 'number';
   minDur.min = '0';
@@ -2292,7 +2757,10 @@ async function renderQData(id) {
   };
 
   const visibleRows = () => sessions.filter((s) => {
-    if (statusSel.value && s.status !== statusSel.value) return false;
+    // 默认（空值）不含「已作废」；'all' = 全部；其余按状态精确筛选
+    if (statusSel.value === 'all') { /* 全部 */ }
+    else if (statusSel.value) { if (s.status !== statusSel.value) return false; }
+    else if (s.status === 'abandoned') return false;
     const minMinutes = Number(minDur.value) || 0;
     if (minMinutes > 0 && (s.durationSec == null || s.durationSec < minMinutes * 60)) return false;
     return true;
@@ -2318,7 +2786,7 @@ async function renderQData(id) {
       row.append(
         el('td', 'cell-strong', s.seq == null ? '—' : `#${s.seq}`),
         el('td', '', s.statusLabel),
-        el('td', '', `${s.answerCount} / ${totalAnswers}`),
+        el('td', '', `${s.answeredQuestions} / ${totalQuestions}`),
         el('td', '', formatTime(s.startedAt)),
         el('td', '', formatTime(s.endedAt)),
         el('td', '', formatDuration(s.durationSec))
@@ -2381,9 +2849,10 @@ async function renderQData(id) {
   renderRows();
 }
 
-async function exportXlsx(questionnaire) {
+async function exportXlsx(questionnaire, includeAbandoned) {
   try {
-    const res = await fetch(`/api/admin/questionnaire/export.xlsx?id=${encodeURIComponent(questionnaire.id)}`, {
+    const qs = `id=${encodeURIComponent(questionnaire.id)}${includeAbandoned ? '&includeAbandoned=1' : ''}`;
+    const res = await fetch(`/api/admin/questionnaire/export.xlsx?${qs}`, {
       headers: { Authorization: `Bearer ${state.token}` }
     });
     if (!res.ok) {
@@ -2438,7 +2907,7 @@ async function renderQSession(id, sid) {
     ['开始时间', formatTime(session.startedAt)],
     ['结束时间', formatTime(session.endedAt)],
     ['时长', formatDuration(session.durationSec)],
-    ['作答进度', `${responses.length} / ${session.totalAnswers}`],
+    ['作答进度', `${session.answeredQuestions} / ${session.totalQuestions} 题`],
     ['浏览器', (session.userAgent || '').slice(0, 60) || '——']
   ]) {
     const item = el('div', 'meta-item');
@@ -2474,17 +2943,29 @@ async function renderQSession(id, sid) {
   secResp.appendChild(tw);
   panel.appendChild(secResp);
 
-  const secMsg = sectionHead('对话记录', '被试端界面中实际呈现的全部消息；定时消息（延迟发出）标注可见时间。');
+  const secMsg = sectionHead('对话记录', '被试端界面中实际呈现的全部消息（正文为其清洗后的富文本）。');
   const timeline = el('div', 'msg-timeline');
   for (const m of messages) {
     const item = el('div', m.role === 'user' ? 'msg-item' : 'msg-item msg-ai');
     const h = el('div', 'msg-head');
+    // 「延迟发出」参数已从平台移除：这里只对历史数据（旧库里带 visible_at 的消息）显示
     const delayed = m.visible_at && new Date(m.visible_at).getTime() > new Date(m.created_at).getTime() + 1000;
     h.append(
       el('span', 'msg-role', m.role === 'user' ? '被试' : '系统'),
       el('span', 'msg-time', formatTime(m.created_at) + (delayed ? ' · 延迟发出' : ''))
     );
-    item.append(h, el('p', 'msg-content', m.content));
+    item.append(h);
+    // 思考过程：被试端在正文之前以此面板呈现（默认折叠），此处同样可折叠展开核对
+    if (m.thinking) {
+      const det = el('details', 'msg-think');
+      const thinkSec = Math.round(Number(m.think_ms) / 100) / 10;
+      det.appendChild(el('summary', '', `深度思考面板（用时 ${Number.isInteger(thinkSec) ? thinkSec : thinkSec.toFixed(1)} 秒）`));
+      det.appendChild(el('p', 'msg-content msg-content-think', m.thinking));
+      item.appendChild(det);
+    }
+    const contentNode = el('div', 'msg-content rich');
+    contentNode.innerHTML = RichText.sanitizeHtml(m.content);
+    item.appendChild(contentNode);
     timeline.appendChild(item);
   }
   secMsg.appendChild(timeline);
@@ -2601,6 +3082,45 @@ function renderSettings() {
   head.appendChild(el('p', 'page-sub', '管理您的账号信息与登录密码。'));
   panel.appendChild(head);
 
+  // 全局设置（仅管理员）：未完成会话的自动作废时限 / 恢复窗口
+  if (state.user && state.user.role === 'admin') {
+    const secGlobal = sectionHead('全局设置（仅管理员）', '影响所有问卷的会话生命周期。');
+    const grid = el('div', 'grid2');
+    const abandonField = makeNumberField('未完成会话自动作废时限（分钟）', '', 0, 1440,
+      '超过这个时长没有任何活动（答题 / 刷新 / 心跳）的进行中会话，下次打开时会被标记为「已作废」并释放设备；0 = 不自动作废');
+    const resumeField = makeNumberField('中途退出可恢复窗口（小时）', '', 0, 720,
+      '超出窗口后重新打开链接会从知情同意页重新开始（旧会话仍留档）；0 = 不限制');
+    grid.append(abandonField.wrap, resumeField.wrap);
+    const saveRow = el('div', 'avatar-btns');
+    const saveBtn = el('button', 'primary-btn', '保存全局设置');
+    saveBtn.type = 'button';
+    saveBtn.onclick = async () => {
+      saveBtn.disabled = true;
+      try {
+        const res = await api('/api/admin/settings', {
+          body: {
+            abandonAfterMinutes: Number(abandonField.input.value) || 0,
+            resumeWindowHours: Number(resumeField.input.value) || 0
+          }
+        });
+        toast('全局设置已保存');
+        abandonField.input.value = String(res.settings.abandonAfterMinutes);
+        resumeField.input.value = String(res.settings.resumeWindowHours);
+      } catch (err) {
+        toast(err.message || '保存失败，请重试');
+      } finally {
+        saveBtn.disabled = false;
+      }
+    };
+    saveRow.appendChild(saveBtn);
+    secGlobal.append(grid, saveRow);
+    panel.appendChild(secGlobal);
+    api('/api/admin/settings').then((res) => {
+      abandonField.input.value = String(res.settings.abandonAfterMinutes);
+      resumeField.input.value = String(res.settings.resumeWindowHours);
+    }).catch(() => { /* 非管理员或未登录：忽略 */ });
+  }
+
   // 头像
   const secAvatar = sectionHead('头像', '支持 PNG / JPG / WebP，自动压缩后保存。');
   const avatarRow = el('div', 'avatar-row');
@@ -2709,7 +3229,7 @@ function renderSettings() {
   outBtn.addEventListener('click', async () => {
     try { await api('/api/auth/logout', { body: {} }); } catch { /* 忽略 */ }
     state.token = '';
-    sessionStorage.removeItem(TOKEN_KEY);
+    clearTokens();
     location.replace('/');
   });
   secOut.appendChild(outBtn);
