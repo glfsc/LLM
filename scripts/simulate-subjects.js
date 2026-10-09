@@ -22,9 +22,6 @@
 const BASE = process.env.BASE || 'http://localhost:3000';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
 
-// 压到最小：不延迟、不强制等待、无最短提交、无思考动画与逐字输出
-const FAST_TIMING = { delay: 0, wait: 0, minSubmit: 0, maxAnswer: 0, thinkMs: 0, typeMs: 0 };
-
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function parseArgs(argv) {
@@ -139,7 +136,7 @@ async function ensureFastTarget(target, knownQuestionnaires) {
   });
 
   const created = await request('/api/admin/questionnaire/create', {
-    body: { title: copyTitle, timing: FAST_TIMING, items: stripped }
+    body: { title: copyTitle, items: stripped }
   });
   if (!created.ok) throw new Error(`创建模拟问卷失败：${JSON.stringify(created.data)}`);
   console.log(`已创建模拟问卷：${copyTitle}（${created.data.questionnaire.id}）`);

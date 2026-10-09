@@ -16,6 +16,9 @@
   const VOID = new Set(['br', 'hr']);
   // 连内容一起丢掉的容器
   const DROP_CONTENT = new Set(['script', 'style', 'head', 'title', 'meta', 'link', 'iframe', 'object', 'embed', 'svg', 'math', 'noscript', 'template', 'form', 'input', 'textarea', 'select', 'button']);
+  // DROP_CONTENT 里没有结束标签的 void 标签（meta / link / input / embed，或源码里写 <xxx/> 自闭合的）：
+  // 丢掉标签本身即可，不能让 skipTag 一直挂着 —— 否则它们后面的整段内容都会被当成「容器内部」而被吞掉。
+  const VOID_DROP = new Set(['meta', 'link', 'input', 'embed']);
   // 块级标签：新开一个块时按种类自动闭合上一个（避免 <p> 套 <p>、<li> 把 <ul> 顶掉）
   const CLOSE_ON_START = new Map([
     ['p', ['p']],
@@ -239,7 +242,10 @@
       }
       const rawName = (m[2] || '').toLowerCase();
       if (!rawName || skipTag) continue;
-      if (DROP_CONTENT.has(rawName)) { skipTag = rawName; continue; }
+      if (DROP_CONTENT.has(rawName)) {
+        if (!VOID_DROP.has(rawName) && !/\/\s*>$/.test(m[0])) skipTag = rawName;
+        continue;
+      }
       emitStart(rawName, m[3] || '');
     }
     if (last < src.length && !skipTag) out.push(escapeText(src.slice(last)));
@@ -282,6 +288,34 @@
     return `<p>${escapeText(t.trim()).replace(/\r?\n/g, '<br>')}</p>`;
   }
 
+  // 纯文本 → HTML（分节材料用）：首段成 <p>，一、二、三… 这类小节标题成行用 <h3>（加粗），其余行用 <br>。
+  // 问卷里「任务要求」这类带小节的材料统一走它，保证种子、后台保存、同步脚本三处呈现一致。
+  function sectionedHtml(text) {
+    const lines = String(text == null ? '' : text).replace(/\r\n/g, '\n').split('\n');
+    const out = [];
+    let buf = [];
+    const flushP = () => {
+      if (!buf.length) return;
+      out.push(`<p>${buf.join('<br>')}</p>`);
+      buf = [];
+    };
+    for (const line of lines) {
+      const t = line.trim();
+      if (/^[一二三四五六七八九十]+、/.test(t)) {
+        flushP();
+        out.push(`<h3><span style="font-weight: bold">${escapeText(t)}</span></h3>`);
+        continue;
+      }
+      if (!t) {                       // 空行 → 段落分隔
+        if (buf.length) buf.push('');
+        continue;
+      }
+      buf.push(escapeText(line));
+    }
+    flushP();
+    return sanitizeHtml(out.join(''));
+  }
+
   // Word / 网页粘贴：先按 MsoHeading 等特征映射标题，再走统一清洗
   function cleanWordPaste(html) {
     return sanitizeHtml(html);
@@ -303,6 +337,7 @@
     sanitizeHtml,
     htmlToText,
     textToHtml,
+    sectionedHtml,
     cleanWordPaste,
     plainPasteToHtml,
     firstLine,

@@ -15,9 +15,6 @@ npm-debug.log*
 .DS_Store
 Thumbs.db
 
-# 运行时上传（问卷实验题图片等，不入库）
-uploads/
-
 # 开发/自检过程截图不入库（仅保留 v3-* 文档定稿截图）
 screenshots/*
 !screenshots/v5-*

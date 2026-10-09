@@ -1,6 +1,7 @@
 // 数据层：SQLite（Node 内置 node:sqlite）—— 建表、种子数据与访问函数
-// 模型：一切皆题目（item）。实验 = 可复用的题目模板（模板库）；问卷 = 一条链接 + 一列题目 + 计时默认值。
-// 会话创建时把题目与计时快照进 sessions，此后修改模板 / 问卷不影响进行中的会话。
+// 模型：一切皆题目（item）。实验 = 可复用的题目模板（模板库）；问卷 = 一条链接 + 一列题目；
+// 参数（等待 / 最短提交 / 最长作答 / 思考与流式节奏 / 清屏点）只配在题目上，缺省回落到 DEFAULT_LIMITS。
+// 会话创建时把题目快照进 sessions，此后修改模板 / 问卷不影响进行中的会话。
 'use strict';
 
 const { DatabaseSync } = require('node:sqlite');
@@ -21,27 +22,27 @@ db.exec(`
 `);
 
 db.exec(`
-  -- 实验模板库：一套可复用的题目 + 计时默认值
+  -- 实验模板库：一套可复用的题目
   CREATE TABLE IF NOT EXISTS experiments (
     id          TEXT PRIMARY KEY,             -- 模板 ID（8 位短码）
     name        TEXT NOT NULL,
-    timing_json TEXT NOT NULL DEFAULT '{}',   -- 计时默认值（题目未勾选时生效）
+    timing_json TEXT NOT NULL DEFAULT '{}',   -- 已废弃（历史列）：参数只配在题目上
     items_json  TEXT NOT NULL DEFAULT '[]',   -- 题目列表
     created_at  TEXT,
     updated_at  TEXT
   );
 
-  -- 问卷：一条通用链接（/chat?q=<id>）+ 一列题目 + 计时默认值
+  -- 问卷：一条通用链接（/chat?q=<id>）+ 一列题目
   CREATE TABLE IF NOT EXISTS questionnaires (
     id          TEXT PRIMARY KEY,
     title       TEXT NOT NULL,
-    timing_json TEXT NOT NULL DEFAULT '{}',
+    timing_json TEXT NOT NULL DEFAULT '{}',   -- 已废弃（历史列）
     items_json  TEXT NOT NULL DEFAULT '[]',
     created_at  TEXT,
     updated_at  TEXT
   );
 
-  -- 会话：题目与计时在创建时快照，此后修改不影响进行中的会话
+  -- 会话：题目在创建时快照，此后修改不影响进行中的会话
   CREATE TABLE IF NOT EXISTS sessions (
     id                   TEXT PRIMARY KEY,
     questionnaire_id     TEXT NOT NULL,
@@ -52,7 +53,7 @@ db.exec(`
     duration_sec         INTEGER,
     user_agent           TEXT,
     items_json           TEXT NOT NULL DEFAULT '[]',
-    timing_json          TEXT NOT NULL DEFAULT '{}',
+    timing_json          TEXT NOT NULL DEFAULT '{}',   -- 已废弃（历史列）
     pending_presented_at TEXT,           -- 当前待作答单元的呈现时刻（服务端口径）
     active_at            TEXT,           -- 最近一次活动时间（心跳 / 提交 / 呈现）
     retry_json           TEXT,           -- 重试与超时统计（按作答单元）
@@ -133,6 +134,8 @@ ensureColumn('experiments', 'owner_id');
 ensureColumn('questionnaires', 'owner_id');
 ensureColumn('messages', 'thinking');
 ensureColumn('messages', 'item_id');
+ensureColumnInt('messages', 'think_ms');      // 早期库补齐：思考面板 / 「正在思考」时长
+ensureColumnInt('messages', 'type_ms');       // 早期库补齐：流式输出速度
 ensureColumn('sessions', 'active_at');        // 最近一次活动（心跳 / 提交），用于「太久未提交」自动作废
 ensureColumn('sessions', 'retry_json');       // 每道题的重试次数（{"unitIndex":{"retries":n,"timedOut":1}}）
 ensureColumnInt('responses', 'retry_count');  // 该题提交前的重试次数
@@ -336,8 +339,9 @@ function textSubsHint(item) {
 
 function richContentOf(type, src, item) {
   const title = item.title || '';
-  const hasHtml = src.html != null && String(src.html).trim() !== '';
-  if (hasHtml) return RT.sanitizeHtml(String(src.html));
+  // html 存在即权威（空串 = 正文确实是空的，如「欢迎语（留空则跳过）」这类占位消息）；
+  // 只有完全没有 html 键的旧数据才走下面的 title/text 迁移兜底
+  if (src.html != null) return RT.sanitizeHtml(String(src.html));
   const text = String(src.text ?? '');
   if (type === 'message') return RT.textToHtml(text) || RT.textToHtml(title);
   if (type === 'gate' || type === 'confirm' || type === 'debrief') {
@@ -401,19 +405,23 @@ const DEFAULT_DEBRIEF = {
 };
 
 // 新建问卷的默认题目：欢迎语（空）、知情同意页、结束语（空）、结束说明页
+// 两个占位消息显式带 html:''（正文确实是空的）：否则 title 会被迁移兜底写进正文，
+// 被试端就会把「欢迎语（留空则跳过）」这句提示当真内容发出去。
 function defaultQuestionnaireItems() {
   return normalizeItems([
-    { id: 'welcome', type: 'message', title: '欢迎语（留空则跳过）', text: '' },
+    { id: 'welcome', type: 'message', title: '欢迎语（留空则跳过）', text: '', html: '' },
     { id: 'consent', ...DEFAULT_GATE },
-    { id: 'end', type: 'message', title: '结束语（留空则跳过）', text: '' },
+    { id: 'end', type: 'message', title: '结束语（留空则跳过）', text: '', html: '' },
     { id: 'debrief', ...DEFAULT_DEBRIEF, title: '9 · 致谢与事后解释' }
   ]);
 }
 
-// 「+ 插入题目」时的默认模板
+// 「+ 插入题目」时的默认模板。
+// 每个默认项都过一遍 normalizeItems：正文（html）在服务端一次成型，编辑页拿到就有内容可改
+// （此前默认项只有 title/text，编辑页首次渲染的空白同步会把默认文案静默清掉）。
 function itemDefaults() {
-  return {
-    message: { type: 'message', title: '新材料', text: '' },
+  const defs = {
+    message: { type: 'message', title: '', text: '' },   // 标题一并留空：正文留空则被试端跳过，别把占位标题写进正文
     gate: { ...DEFAULT_GATE },
     gateId: { ...DEFAULT_GATE, variant: 'id', title: '知情同意说明（含编号）', idLabel: '被试编号', idPlaceholder: '请填写实验者提供的编号' },
     // 阅读确认页：先停留 N 秒（在「参数」里加「作答前强制等待」）才能点继续
@@ -427,128 +435,69 @@ function itemDefaults() {
     group: { type: 'group', title: '新题组', text: '', layout: 'column', subs: [] },
     rank: { type: 'rank', title: '请排序', options: ['项目 1', '项目 2', '项目 3'] }
   };
+  const out = {};
+  for (const [key, def] of Object.entries(defs)) out[key] = normalizeItems([def])[0];
+  return out;
 }
 
 // ---------------------------------------------------------------- 实验文档内容
-const TASK_INFO =
-  '欢迎参与本次创造力实验，你即将开始一项工作任务，下面是本次任务的具体信息。\n\n' +
-  '你目前就职于 A 饮品公司市场部，担任内容创作助理。你的日常工作包括参与新品文案撰写、整理产品卖点、协助制作传播物料等。\n\n' +
-  '公司即将上线一款新品——轻野·青柠气泡水。这款产品的特点是：0 糖 0 卡、真实青柠风味、气泡感强、随时饮用无负担；目标人群是 18-30 岁的城市年轻白领，他们注重健康，同时也看重口感与情绪体验。品牌主张是“把日常过成户外”（Everyday, Outdoors）。\n\n' +
-  '今天，品牌创意组要求你为这款新品创作一条广告语（slogan），该广告语将用于新品首发的线上主视觉与短视频片尾。\n\n' +
-  '请阅读接下来的任务要求，然后开始你的创作。';
-
-const REQUIRE_HIGH =
-  '【青柠气泡水 新品广告语创作任务简介】\n\n' +
-  '一、产品信息\n' +
-  '1. 品牌名：轻野（LIGHTWILD）\n' +
-  '2. 产品名：轻野·青柠气泡水\n' +
-  '3. 产品特点：0 糖 0 卡、真实青柠风味、气泡感强、随时饮用无负担\n' +
-  '4. 目标人群：18-30 岁城市年轻白领，注重健康，同时看重口感与情绪体验\n' +
-  '5. 品牌主张：把日常过成户外（Everyday, Outdoors）\n\n' +
-  '二、创作要求\n' +
-  '1. 广告语须为中文，字数控制在 8-20 字之间（含标点）。\n' +
-  '2. 广告语须体现产品核心利益点（“清爽”或“0 糖无负担”）中的至少一项。\n' +
-  '3. 广告语须与品牌主张“把日常过成户外”相呼应，体现年轻化的生活感，而非单纯描述产品口感。\n' +
-  '4. 广告语须便于记忆与口头传播，避免使用生僻词与冗长句式。\n' +
-  '5. 请勿直接套用饮品行业中的常见句式（如“清爽一夏”“一口畅快”“随时随地好心情”）。\n' +
-  '6. 如需说明创作思路，可在广告语后附不超过 50 字的创作说明。\n\n' +
-  '三、评价标准（满分 100 分）\n' +
-  '品牌契合度（30 分）：是否准确传递产品利益点与品牌主张。\n' +
-  '原创性（30 分）：表达是否新颖，是否避免了行业内的常见句式。\n' +
-  '可记忆性（20 分）：是否朗朗上口、便于复述与二次传播。\n' +
-  '可延展性（20 分）：能否支撑后续海报、短视频等传播物料的延展使用。\n\n' +
-  '四、提交与评审\n' +
-  '完成后，请将广告语与创作说明提交至对应窗口，由评审方进行统一评价。本次评价结果将作为你本季度项目分配与绩效评价的参考。';
-
-const REQUIRE_LOW =
-  '【青柠气泡水 新品广告语创作任务简介】\n\n' +
-  '一、产品信息\n' +
-  '1. 品牌名：轻野（LIGHTWILD）\n' +
-  '2. 产品名：轻野·青柠气泡水\n' +
-  '3. 产品特点：0 糖 0 卡、真实青柠风味、气泡感强、随时饮用无负担\n' +
-  '4. 目标人群：18-30 岁城市年轻白领，注重健康，同时看重口感与情绪体验\n' +
-  '5. 品牌主张：把日常过成户外（Everyday, Outdoors）\n\n' +
-  '二、创作要求\n' +
-  '1. 请为“轻野·青柠气泡水”这款新品创作一条广告语（slogan），用于新品首发宣传。\n' +
-  '2. 请尽力把这条广告语创作好。\n\n' +
-  '三、提交与评审\n' +
-  '完成后，请将广告语提交至对应窗口，由评审方进行统一评价。本次评价结果将作为你本季度项目分配与绩效评价的参考。';
-
-const CREATE_INTRO =
-  '请在明确产品信息与任务要求后，在 5 分钟内完成内容创作；开始 3 分钟后，可以通过系统对话框向智能评估系统提交你的创作成果。';
-
-const FEEDBACK_TEXT =
-  '很感谢你的认真创作，我是轻野品牌创意智能评估系统。关于你提交的这条广告语，在我们关注的几个方面都存在明显的不足：\n\n' +
-  '第一，原创性不够。“清爽”“轻负担”这一类表达在饮品行业中使用频率极高，缺乏区分度，很难让消费者把这句话与“轻野”联系在一起。\n\n' +
-  '第二，表达不够凝练。文案的节奏感偏弱，读起来缺少记忆点，不利于二次传播。\n\n' +
-  '第三，与品牌主张的关联停留在表层。“把日常过成户外”所强调的年轻化生活感，在你的文案中并没有被体现出来，读起来更像一句通用的产品描述，而不是“轻野”的声音。\n\n' +
-  '第四，可延展性不足。这条广告语很难支撑后续海报与短视频的延展表达，落地时的空间相当有限。\n\n' +
-  '坦白说，这次的完成度与我们的要求还有相当的距离，我对你这次的表现感到失望。';
-
-// 反馈消息的「深度思考过程」：被试端在反馈正文之前以可折叠面板逐字呈现。
-// 写作约束：只对照评价标准推演，不指认被试文本的具体字词（无法预判输入）；
-// 结论与 FEEDBACK_TEXT 的四点一一对应，但措辞须改写，避免把注意力检测题变成送分题。
-const FEEDBACK_THINKING =
-  '用户把广告语和创作说明发过来了。先别急着下判断，把任务要求过一遍。\n' +
-  '• 最硬的几条：体现“清爽”或“0 糖无负担”；呼应“把日常过成户外”；避开行业常见句式。\n' +
-  '• 还要看：是否便于记忆、能否延展成海报和短视频。\n\n' +
-  '先看品牌契合度。\n' +
-  '• 这条文案读起来更像在描述产品本身，“日常 / 户外”那层松弛感没有被带出来。\n' +
-  '• 等等，是不是我对“生活感”的理解太窄了？再想想——主张强调的是把户外的状态放进日常场景，不一定要出现“户外”两个字。\n' +
-  '• 嗯，不管从哪个角度取，这句话里的生活感都是缺的。\n\n' +
-  '再看原创性。\n' +
-  '• “清爽”“轻负担”这个方向在饮品行业里出现频率太高，属于典型套路。\n' +
-  '• 消费者很难把它跟某个具体品牌联系起来，区分度不够。\n\n' +
-  '节奏也要看。\n' +
-  '• 要求里说便于记忆、口头传播，这句整体偏平，重音落不到记忆点上。\n' +
-  '• 后面要延展成海报、短视频文案的话，能撑的空间也很有限。\n\n' +
-  '好，结论清楚了，整理一下反馈要点：\n' +
-  '• 一、表达落入行业惯用套路，原创性不足。\n' +
-  '• 二、品牌主张那层意思基本没带出来。\n' +
-  '• 三、节奏偏弱，不够凝练。\n' +
-  '• 四、延展空间有限。\n\n' +
-  '就按这几条来写反馈。';
-
-const CREATE2_INTRO = '请根据刚刚收到的反馈以及下面任务信息与任务要求，再次完成内容创作任务。';
-const AGREEMENT_ANCHOR = '1 = 完全不同意　·　5 = 完全同意';
-const FAIRNESS_ANCHOR = '1 = 非常正面　·　5 = 非常负面';
+// 文案集中在 seed-content.js（数据层只管存取，改文案不必动 db.js）；这里解构出来供种子题目构造使用。
+const {
+  TASK_INFO, REQUIRE_HIGH, REQUIRE_LOW, CREATE_INTRO, CREATE2_GUIDE,
+  FEEDBACK_TEXT, FEEDBACK_THINKING, CREATE2_INTRO,
+  AGREEMENT_ANCHOR, FAIRNESS_ANCHOR, AGREEMENT_SCALE_SPELLED
+} = require('./seed-content');
 
 // 量表 = 一道指导语消息 + N 道打分题（sectionNo = 附件中的章节号，写进标题便于逐条对照）
 function scaleItems(idPrefix, title, instruction, questions, anchor, sectionNo) {
   const head = sectionNo ? `${sectionNo} · ${title}` : title;
-  const out = [{ id: `${idPrefix}_intro`, type: 'message', title: head, text: `${title}\n${instruction}` }];
+  const out = [{ id: `${idPrefix}_intro`, type: 'message', level: 4, title: head, text: instruction }];
   questions.forEach((q, i) => {
     out.push({ id: `${idPrefix}_${i + 1}`, type: 'rating', title: q, min: 1, max: 5, anchor });
   });
   return out;
 }
 
-// 创作 = 一道创作指引消息 + 一个题组（广告语 + 创作说明，同屏呈现、一次提交）
-function creationItems(idPrefix, intro, sectionNo) {
+// 创作 = 一道创作指引消息 + 一道单框文本题（广告语与创作说明写在同一框里、一次提交）
+function creationItems(idPrefix, intro, sectionNo, box) {
   const tag = sectionNo ? `${sectionNo} · ` : '';
-  const again = idPrefix === 'create2' ? '（再次）' : '';
   return [
     { id: `${idPrefix}_intro`, type: 'message', title: `${tag}内容创作 · 创作指引`, text: intro },
     {
       id: `${idPrefix}_work`,
-      type: 'group',
-      title: `${tag}内容创作${again}`,
-      text: '',
-      layout: 'column',
-      limits: { minSubmit: 180, maxAnswer: 300 },
-      subs: [
-        { id: 'slogan', type: 'text', title: '广告语', required: true, rows: 1, maxLen: 20, placeholder: '请输入广告语（8–20 字）' },
-        { id: 'note', type: 'text', title: '创作说明（选填）', required: false, rows: 2, maxLen: 50, placeholder: '可简要说明创作思路' }
-      ]
+      type: 'text',
+      title: box.title,
+      limits: box.limits,
+      ...(box.level ? { level: box.level } : {}),
+      required: true,
+      rows: box.rows,
+      maxLen: box.maxLen,
+      placeholder: box.placeholder
     }
   ];
+}
+
+// 选择题 / 确认页的正文 = 题干：html 由题干生成（title 只是管理端标签，不呈现给被试）
+function choiceBody(text) {
+  return { text, html: RT.textToHtml(text) };
+}
+
+// 引导句的呈现：首行加粗放大（管理端给这行设了「加粗 + 小四 16px」），其余行按普通段落
+const HEADLINE_PX = 16;
+function headlineHtml(text) {
+  const lines = String(text == null ? '' : text).replace(/\r\n/g, '\n').split('\n');
+  const first = (lines.shift() || '').trim();
+  const rest = lines.join('\n').replace(/[ \t]+$/, '').replace(/\n+$/, '');
+  const head = `<strong><span style="font-size: ${HEADLINE_PX}px">${RT.escapeText(first)}</span></strong>`;
+  const body = rest ? `<br>${RT.escapeText(rest).replace(/\n/g, '<br>')}` : '';
+  return RT.sanitizeHtml(`<p>${head}${body}</p>`);
 }
 
 // 组别3 / 组别4 的题目（唯一差异：任务要求文本）
 function experimentItems(requirementsText) {
   return [
-    { id: 'task_info', type: 'message', title: '1 · 欢迎语与实验任务', text: TASK_INFO },
-    { id: 'task_req', type: 'message', title: '2 · 任务要求', text: requirementsText },
+    { id: 'task_info', type: 'message', level: 4, title: TASK_INFO.split('\n')[0], text: TASK_INFO, html: headlineHtml(TASK_INFO) },
+    { id: 'task_req', type: 'message', level: 4, title: '2 · 任务要求', text: requirementsText, html: RT.sectionedHtml(requirementsText) },
     ...scaleItems('goal_clarity', '目标清晰度测量', '请根据刚才收到的任务材料，评价下列说法与你的实际感受的符合程度。', [
       '我清楚地知道这项创作任务的目标是什么。',
       '我对这项任务的具体要求有清晰的理解。',
@@ -556,11 +505,15 @@ function experimentItems(requirementsText) {
       '我清楚自己应该朝着哪个方向努力。',
       '这项任务的要求是明确而具体的。'
     ], AGREEMENT_ANCHOR, '3'),
-    ...creationItems('create1', CREATE_INTRO, '4'),
-    // 思考面板时长 8 秒（题目覆盖问卷默认的 420ms）；不再用「延迟发出」——等待由思考面板承担
-    { id: 'feedback', type: 'message', title: '5 · 负面反馈输出', text: FEEDBACK_TEXT, thinking: FEEDBACK_THINKING, limits: { thinkMs: 8000 } },
-    { id: 'attention', type: 'single', title: '6 · 注意力检测', options: ['表达不够精炼', '可延展性不足', '格式不符合要求', '与品牌主张的关联停留在表层'], correct: 3, limits: { wait: 40 } },
-    { id: 'source', type: 'single', title: '7 · 反馈来源识别', options: ['品牌创意组组长 PH', '品牌创意智能评估系统（AI 系统）'], correct: 2 },
+    ...creationItems('create1', CREATE_INTRO, '4', {
+      title: '广告语和创作', limits: { wait: 180, maxAnswer: 300 }, level: 4, rows: 2, maxLen: 0, placeholder: '请输入'
+    }),
+    // 思考面板时长 10 秒（题目覆盖默认的 420ms）；等待由思考面板承担
+    { id: 'feedback', type: 'message', title: '5 · 负面反馈输出', text: FEEDBACK_TEXT, thinking: FEEDBACK_THINKING, limits: { thinkMs: 10000 } },
+    // 反馈之后先清屏并确认已读，再做注意力检测
+    { id: 'feedback_confirm', type: 'confirm', title: '用户阅读AI反馈', limits: { wait: 40 }, ...choiceBody('请你认真阅读反馈后点击确认'), button: '我已阅读完' },
+    { id: 'attention', type: 'single', level: 4, title: '6 · 注意力检测', limits: { refresh: 1 }, ...choiceBody('下面哪一个选项没有在上述反馈中出现？'), options: ['表达不够精炼', '可延展性不足', '格式不符合要求', '与品牌主张的关联停留在表层'], correct: 3 },
+    { id: 'source', type: 'single', level: 4, title: '7 · 反馈来源识别', ...choiceBody('请回想刚才为你提供反馈的是谁？'), options: ['品牌创意组组长 PH', '品牌创意智能评估系统（AI 系统）'], correct: 2 },
     ...scaleItems('fairness', '反馈公平性', '你如何评价刚才收到的那条关于你作品的反馈？', [
       '我认为反馈者的评价是公正的。',
       '我认为这次反馈的内容是客观的。',
@@ -569,7 +522,7 @@ function experimentItems(requirementsText) {
       '我认为这次反馈给了我应得的评价。',
       '总体而言，我认为这次反馈的处理方式是公平的。'
     ], FAIRNESS_ANCHOR, '7'),
-    ...scaleItems('meta_process', '元过程测量', '请回想你在这项任务中，尤其是收到反馈之后的感受，选择最符合的程度。', [
+    ...scaleItems('meta_process', '元过程测量', `请回想你在这项任务中，尤其是收到反馈之后的感受，选择最符合的程度。${AGREEMENT_SCALE_SPELLED}`, [
       '我在意这次评价会如何影响别人对我的看法。',
       '我会反复回想对方这个人是怎么看我的。',
       '我担心自己的专业能力受到质疑。',
@@ -583,10 +536,12 @@ function experimentItems(requirementsText) {
       '我把注意力放在了改进作品的具体策略上。'
     ], AGREEMENT_ANCHOR, '7'),
     // 第 8 节：再次完成与开头一模一样的任务（指导语 + 任务信息 + 任务要求 + 创作）
-    { id: 'create2_intro', type: 'message', title: '8 · 再次完成一模一样的任务（指导语）', text: CREATE2_INTRO },
+    { id: 'create2_intro', type: 'message', level: 4, title: '8 · 再次完成一模一样的任务（指导语）', text: CREATE2_INTRO, limits: { refresh: 1 } },
     { id: 'task_info2', type: 'message', title: '8 · 任务信息（与开头一致）', text: TASK_INFO },
-    { id: 'task_req2', type: 'message', title: '8 · 任务要求（与开头一致）', text: requirementsText },
-    ...creationItems('create2', CREATE_INTRO, '8')
+    { id: 'task_req2', type: 'message', title: '8 · 任务要求（与开头一致）', text: requirementsText, html: RT.sectionedHtml(requirementsText) },
+    ...creationItems('create2', CREATE2_GUIDE, '8', {
+      title: '广告语和创作说明', limits: { maxAnswer: 300 }, rows: 1, maxLen: 0, placeholder: '再次输入广告语和创作说明'
+    })
   ];
 }
 
@@ -1038,13 +993,6 @@ function maxMessageSeq(sessionId) {
   return Number(row.m) || 0;
 }
 
-function nextPendingVisibleAt(sessionId, now) {
-  const row = db.prepare(
-    'SELECT MIN(visible_at) AS v FROM messages WHERE session_id = ? AND visible_at IS NOT NULL AND visible_at > ?'
-  ).get(sessionId, now);
-  return row && row.v ? row.v : null;
-}
-
 // 最近一条消息的可见时刻（无定时消息则取创建时刻）：作答单元的呈现基准
 function latestMessageAt(sessionId) {
   const row = db.prepare('SELECT visible_at, created_at FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT 1').get(sessionId);
@@ -1069,16 +1017,8 @@ function addMessage(sessionId, role, content, visibleAt = null, rhythm = null) {
 }
 
 // ---------------------------------------------------------------- 作答
-function countResponses(sessionId) {
-  return Number(db.prepare('SELECT COUNT(*) AS n FROM responses WHERE session_id = ?').get(sessionId).n);
-}
-
 function listResponses(sessionId) {
   return db.prepare('SELECT * FROM responses WHERE session_id = ? ORDER BY id ASC').all(sessionId);
-}
-
-function lastResponse(sessionId) {
-  return db.prepare('SELECT * FROM responses WHERE session_id = ? ORDER BY id DESC LIMIT 1').get(sessionId) || null;
 }
 
 // 已完成的作答单元数（题组算一个单元，其多道子题同属一个 unit_index）
@@ -1089,10 +1029,6 @@ function countAnswerUnits(sessionId) {
 // 第 index 个作答单元的首行（用于取呈现 / 作答时间）
 function unitFirstResponse(sessionId, index) {
   return db.prepare('SELECT * FROM responses WHERE session_id = ? AND unit_index = ? ORDER BY sub_index ASC LIMIT 1').get(sessionId, index) || null;
-}
-
-function responseAt(sessionId, index) {
-  return db.prepare('SELECT * FROM responses WHERE session_id = ? ORDER BY id ASC LIMIT 1 OFFSET ?').get(sessionId, index) || null;
 }
 
 function addResponse({ sessionId, itemId, itemIndex, itemType, unitIndex, subIndex, value, valueText, optionLabel, presentedAt, answeredAt, elapsedMs, retryCount, timedOut }) {
@@ -1228,6 +1164,25 @@ function ensureAdminUser() {
 }
 ensureAdminUser();
 
+// 预设问卷的题目构成：知情同意页 + 模板题目（整组复制）+ 结束说明页。
+// 不带「欢迎语 / 结束语」两个空占位题：它们留空时会把占位标题（「欢迎语（留空则跳过）」）显示给被试，
+// 实跑的两份问卷里也没有这两题。seed-presets.js 用同一个函数，保证首次运行与手动重建结果一致。
+function presetQuestionnaireItems(exp) {
+  const consent = defaultQuestionnaireItems().find((it) => it.type === 'gate');
+  const debrief = {
+    ...DEFAULT_DEBRIEF,
+    id: 'debrief',
+    title: '9 · 致谢与事后解释',
+    level: 4,
+    html: `<h1>致谢与事后解释</h1>${RT.textToHtml(`${DEFAULT_DEBRIEF.text}\n\n${DEBRIEF_CLOSING}`)}`
+  };
+  return [
+    consent,
+    ...exp.items.map((it) => ({ ...it, id: `${exp.id}__${it.id}`, fromTemplateId: exp.id, fromTemplateName: exp.name })),
+    debrief
+  ];
+}
+
 // 首次运行：为两个实验各建一份预设问卷（插入模板 = 复制题目）
 function ensurePresetQuestionnaires() {
   if (getSetting('preset_questionnaires_seeded') === '1') return;
@@ -1235,18 +1190,10 @@ function ensurePresetQuestionnaires() {
     setSetting('preset_questionnaires_seeded', '1');
     return;
   }
-  const base = defaultQuestionnaireItems();
   for (const expId of ['group3-high-clarity', 'group4-low-clarity']) {
     const exp = getExperimentPayload(expId);
     if (!exp) continue;
-    createQuestionnaire({
-      title: exp.name,
-      items: [
-        ...base.slice(0, 2),                                                          // 欢迎语（空）+ 知情同意页
-        ...exp.items.map((it) => ({ ...it, id: `${expId}__${it.id}`, fromTemplateId: exp.id, fromTemplateName: exp.name })),
-        ...base.slice(2)                                                              // 结束语（空）+ 结束说明页
-      ]
-    });
+    createQuestionnaire({ title: exp.name, items: presetQuestionnaireItems(exp) });
   }
   setSetting('preset_questionnaires_seeded', '1');
 }
@@ -1254,19 +1201,17 @@ function ensurePresetQuestionnaires() {
 module.exports = {
   ITEM_TYPES,
   QUESTION_TYPES,
-  ITEM_LEVELS,
   ITEM_VARIANTS,
-  GATE_VARIANTS,
   FEEDBACK_TEXT,
   FEEDBACK_THINKING,
   ITEM_TYPE_LABELS,
   ITEM_LIMITS,
-  LIMIT_KEYS,
   LIMIT_META,
   LIMIT_SPEC,
   DEFAULT_LIMITS,
   itemDefaults,
   defaultQuestionnaireItems,
+  presetQuestionnaireItems,
   normalizeItems,
   getSetting,
   setSetting,
@@ -1312,15 +1257,11 @@ module.exports = {
   listVisibleMessages,
   setClearSeq,
   maxMessageSeq,
-  nextPendingVisibleAt,
   latestMessageAt,
   addMessage,
-  countResponses,
   countAnswerUnits,
   unitFirstResponse,
   listResponses,
-  lastResponse,
-  responseAt,
   addResponse,
   listSessionSummaries,
   listResponseRows,

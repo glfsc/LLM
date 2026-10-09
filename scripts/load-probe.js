@@ -39,15 +39,15 @@ async function main() {
   token = (await req('/api/auth/login', { body: { username: 'admin', password: ADMIN_PASSWORD } })).data.token;
   await cleanup();
 
-  // 探针问卷：复制组别3 模板并把题目级计时清零，便于快速走完
+  // 探针问卷：复制组别3 模板并把题目级参数清零（wait / minSubmit / maxAnswer 归零），便于快速走完
   const exp = (await admin('/api/admin/experiment/create', { body: { name: PROBE_EXP, copyFrom: 'group3-high-clarity' } })).experiment;
   const items = exp.items.map((it) => ({ ...it, limits: {} }));
-  await admin('/api/admin/experiment/update', { body: { id: exp.id, name: PROBE_EXP, timing: { delay: 0, wait: 0, minSubmit: 0, maxAnswer: 0 }, items } });
+  await admin('/api/admin/experiment/update', { body: { id: exp.id, name: PROBE_EXP, items } });
   const g3 = (await admin('/api/admin/questionnaires')).questionnaires.find((x) => /组别3/.test(x.title));
   const q = (await admin('/api/admin/questionnaire/create', { body: { title: PROBE_Q, copyFrom: g3.id } })).questionnaire;
   const qFull = (await admin(`/api/admin/questionnaire?id=${q.id}`)).questionnaire;
   const cleanItems = qFull.items.map((it) => ({ ...it, limits: {} }));
-  await admin('/api/admin/questionnaire/update', { body: { id: q.id, title: PROBE_Q, timing: { delay: 0, wait: 0, minSubmit: 0, maxAnswer: 0 }, items: cleanItems } });
+  await admin('/api/admin/questionnaire/update', { body: { id: q.id, title: PROBE_Q, items: cleanItems } });
 
   // ---- 一位被试的请求数与单请求耗时
   const timings = [];

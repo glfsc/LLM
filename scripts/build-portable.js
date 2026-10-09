@@ -18,7 +18,7 @@ const STAGE_NAME = '预实验便携包';
 const STAGE = path.join(DIST, STAGE_NAME);
 const ZIP_PATH = path.join(DIST, `${STAGE_NAME}.zip`);
 
-const COPY_FILES = ['server.js', 'db.js', 'xlsx.js', 'package.json', '启动预实验.bat', '实验人员须知.txt'];
+const COPY_FILES = ['server.js', 'db.js', 'seed-content.js', 'xlsx.js', 'package.json', '启动预实验.bat', '实验人员须知.txt'];
 const COPY_DIRS = ['public', 'vendor'];
 const COPY_NESTED = ['scripts/reset-db.js', 'scripts/pilot-start.js', 'scripts/simulate-subjects.js'];
 
@@ -26,6 +26,7 @@ const COPY_NESTED = ['scripts/reset-db.js', 'scripts/pilot-start.js', 'scripts/s
 const MUST_HAVE_IN_ZIP = [
   '预实验便携包/server.js',
   '预实验便携包/db.js',
+  '预实验便携包/seed-content.js',
   '预实验便携包/node.exe',
   '预实验便携包/启动预实验.bat',
   '预实验便携包/实验人员须知.txt',
@@ -36,6 +37,7 @@ const MUST_HAVE_IN_ZIP = [
   '预实验便携包/public/chat.html',
   '预实验便携包/public/admin.html',
   '预实验便携包/public/assets/chat.js',
+  '预实验便携包/public/assets/richtext.js',
   '预实验便携包/vendor/qrcode.js'
 ];
 

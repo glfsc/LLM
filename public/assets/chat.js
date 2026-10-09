@@ -56,7 +56,6 @@ const state = {
   action: null,
   busy: false,
   completed: false,
-  renderedMessages: 0,      // 已渲染的 assistant 消息数
   seenMsgs: 0,              // 已完整看过的消息数（重进时只补播没看完的部分）
   serverOffsetMs: 0,
   questionNodes: new Map(), // itemId -> { card, ... } 当前待作答卡片
@@ -418,7 +417,6 @@ document.addEventListener('visibilitychange', () => {
 function clearStream() {
   $stream.replaceChildren();
   clearSeen();
-  state.renderedMessages = 0;
   state.showAnswered = true;
   state.questionNodes.clear();
   composerTarget = null;
@@ -549,7 +547,7 @@ function refreshPageBtn() {
 // countdownUntilMs：阅读确认页的「N 秒后可继续」——到点前按钮置灰并显示倒计时
 // html：整页正文（富文本）。首行若是标题（h1/h2），拆出来当页面大标题；标题与正文都来自同一份可编辑正文。
 let pageCountdownTimer = null;
-function showPage({ title, html, text, check, button, requireCheck, hideButton, idField, countdownUntilMs }) {
+function showPage({ title, html, text, check, button, hideButton, idField, countdownUntilMs }) {
   clearTimeout(pageHideTimer);
   clearInterval(pageCountdownTimer);
   const rich = contentHtml(html || text || '');
@@ -855,12 +853,13 @@ function startHeartbeat() {
 
 // 退出重进的确认卡片：返回 'continue' | 'restart'
 function renderResumeCard(boot) {
-  const answered = Number(boot.answeredCount) || 0;
-  const total = Number(boot.totalAnswers) || 0;
+  // 口径 = 题号（与卡面「第 N 题」一致）：知情同意 / 确认页 / 结束说明不占题号
+  const current = Number(boot.currentQno) || 0;
+  const total = Number(boot.totalQuestions) || 0;
   const card = el('div', 'resume-card');
   card.appendChild(el('div', 'resume-title', '检测到未完成的作答'));
   card.appendChild(el('div', 'resume-text',
-    `上次已做到第 ${answered} / ${total} 题。继续作答会接着上次的进度往下走；` +
+    `上次进行到第 ${current} / ${total} 题。继续作答会接着上次的进度往下走；` +
     '重新开始会作废本次记录，从知情同意页重新填写。'));
   const actions = el('div', 'resume-actions');
   const goOn = el('button', 'primary-btn', '继续作答');
@@ -1261,9 +1260,9 @@ function finalizeQuestionCard(action, answerText) {
     bodyEl.classList.add('readonly');
     bodyEl.querySelectorAll('input, textarea').forEach((input) => input.setAttribute('readonly', 'readonly'));
     bodyEl.querySelectorAll('button').forEach((btn) => { btn.disabled = true; });
-    // 输入框驱动的题（单文本题 / 两段文本题组）：卡片里本来就没有输入控件，
-    // 把作答回显出来，否则交完之后看不到自己填了什么
-    if (!bodyEl.querySelector('.answer-input, .option-btn, .rating-btn')) {
+    // 输入框驱动的题（消息式题面）：卡片里本来就没有作答控件，把回显补出来；
+    // 卡内作答的题（打分 / 选项 / 排序 / 题组）控件就地只读，不需要再叠一层文字回显
+    if (!bodyEl.querySelector('.answer-input, .option-btn, .rating-btn, .rank-list')) {
       const echoNode = el('div', 'qcard-echo rich');
       echoNode.innerHTML = contentHtml(answerText || '（空）');
       bodyEl.appendChild(echoNode);
@@ -1323,6 +1322,17 @@ async function postStep(payload) {
 }
 
 function echoOf(action, payload) {
+  // 消息式题面（文本题 / 两段文本题组）：气泡里放被试的原话——与服务端落库的回显同一口径，
+  // 刷新 / 重进后的回放不会变样
+  if (isMessageStyleAction(action)) {
+    if (action.type === 'group') {
+      const rows = payload.answers || [];
+      const joined = rows.map((r) => String((r && r.text) || '').trim()).filter(Boolean).join(String.fromCharCode(10));
+      return joined || '（未填写内容）';
+    }
+    return String(payload.text || '').trim() || '（未填写内容）';
+  }
+  // 卡内作答的题组（混合子题）：逐子题回显
   if (action.type === 'group') {
     return action.subs.map((sub, i) => {
       const one = (payload.answers || [])[i] || {};
@@ -1333,16 +1343,6 @@ function echoOf(action, payload) {
       return `${sub.title}：${(sub.options.find((o) => o.value === one.value) || {}).label || one.value}`;
     }).join('\n');
   }
-  // 消息式题面（文本题 / 两段文本题组）：气泡里放被试的原话（与服务端落库的回显一致）
-  if (isMessageStyleAction(action)) {
-    if (action.type === 'group') {
-      const rows = payload.answers || [];
-      const joined = rows.map((r) => String((r && r.text) || '').trim()).filter(Boolean).join(String.fromCharCode(10));
-      return joined || '（未填写内容）';
-    }
-    return String(payload.text || '').trim() || '（未填写内容）';
-  }
-  if (action.type === 'text') return `我的回答：「${payload.text || '（空）'}」`;
   if (action.type === 'multi') return `我的选择：${(payload.values || []).map((v) => (action.options.find((o) => o.value === v) || {}).label).join('、')}`;
   if (action.type === 'rank') return `我的排序：${(payload.order || []).map((v, i) => `${i + 1}. ${(action.options.find((o) => o.value === v) || {}).label}`).join('  ')}`;
   const opt = (action.options || []).find((o) => o.value === payload.value);
@@ -1399,7 +1399,6 @@ function applyPayload(payload) {
       html: action.html,
       check: action.check,
       button: action.button,
-      requireCheck: true,
       idField: action.variant === 'id' ? { label: action.idLabel, placeholder: action.idPlaceholder } : null
     });
     pageHandler = async () => {
@@ -1569,7 +1568,7 @@ async function rerenderFromPayload(payload) {
   state.questionNodes.clear();
   state.draft = {};
   clearSeen();
-  state.renderedMessages = await renderReplay(payload.replay || [], 1e9);   // 全部秒显（预览里不需要重播动画）
+  await renderReplay(payload.replay || [], 1e9);   // 全部秒显（预览里不需要重播动画）
   applyPayload(payload);
   scrollToBottom(false);
 }
@@ -1638,7 +1637,7 @@ async function startSession() {
   storeSession(created.session.id);
   startHeartbeat();
   clearSeen();                                            // 新会话：从零开始逐字呈现
-  state.renderedMessages = await renderReplay(created.replay || [], 0);
+  await renderReplay(created.replay || [], 0);
   applyPayload(created);
 }
 
@@ -1665,7 +1664,7 @@ async function init() {
       const choice = await renderResumeCard(boot);
       if (choice === 'restart') { await abandonAndRestart(); return; }
       // 重建聊天流：已看完的秒显，没看完的继续逐字补播（已作答题目一并还原）
-      state.renderedMessages = await renderReplay(boot.replay || [], loadSeen());
+      await renderReplay(boot.replay || [], loadSeen());
       scrollToBottom(false);
       applyPayload(boot);
       return;

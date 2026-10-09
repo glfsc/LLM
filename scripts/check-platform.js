@@ -157,6 +157,28 @@ async function main() {
   check('思考内容随题目保存', !!fb && String(fb.thinking || '').length === THINKING_TEXT.length);
   check('题目级门控按题目保存', !!fb && fb.limits.thinkMs === 8000, JSON.stringify(fb && fb.limits));
   check('已删除的参数不会留在题目上', !!fb && fb.limits.delay === undefined, JSON.stringify(fb && fb.limits));
+  // 插入题目的默认项：正文（html）由服务端一次成型——编辑页首次渲染的空白同步曾把默认文案静默清掉
+  const metaFix = await admin('/api/admin/meta');
+  const defGate = metaFix.itemDefaults.gate || {};
+  const defDebrief = metaFix.itemDefaults.debrief || {};
+  const defMsg = metaFix.itemDefaults.message || {};
+  const defRating = metaFix.itemDefaults.rating || {};
+  check('插入默认项自带正文：知情同意带 <h1> 标题',
+    String(defGate.html || '').startsWith('<h1>'), JSON.stringify(String(defGate.html || '').slice(0, 40)));
+  check('插入默认项自带正文：结束说明 / 打分题题干非空',
+    String(defDebrief.html || '').includes('感谢') && String(defRating.html || '').includes('打分'),
+    JSON.stringify({ debrief: String(defDebrief.html || '').length, rating: String(defRating.html || '').slice(0, 30) }));
+  check('消息默认项正文与占位标题都为空（留空则被试端跳过）',
+    String(defMsg.html || '') === '' && String(defMsg.title || '') === '',
+    JSON.stringify({ html: defMsg.html, title: defMsg.title }));
+  // 新建问卷自带的欢迎语 / 结束语：提示标题不能漏进正文（否则被试端会把「欢迎语（留空则跳过）」当真内容发出去）
+  const defQ = metaFix.defaultQuestionnaireItems || [];
+  const welMsg = defQ.find((i) => i.id === 'welcome') || {};
+  const endMsg = defQ.find((i) => i.id === 'end') || {};
+  check('新建问卷的欢迎语 / 结束语正文为空（提示语不会发给被试）',
+    welMsg.type === 'message' && String(welMsg.html || '') === '' && String(welMsg.text || '') === ''
+      && endMsg.type === 'message' && String(endMsg.html || '') === '' && String(endMsg.text || '') === '',
+    JSON.stringify({ welcome: { html: welMsg.html, text: welMsg.text }, end: endMsg.html }));
 
   section('[2] 走查：流程完整性 + 同问卷两次逐字一致');
   const recA = {};
@@ -216,6 +238,12 @@ async function main() {
   const list = await admin(`/api/admin/questionnaire/sessions?id=${qA.id}`);
   check('会话列表含 2 位被试', list.sessions.length === 2, String(list.sessions.length));
   check(`会话作答进度 = ${expect.rowCount}`, list.sessions.every((s) => s.answerCount === expect.rowCount));
+  // 题号口径的进度：完成会话 = 全部题号都答完；且它不可能超过行数（题组按行多算）
+  const qnExpect = itemsA.filter((it) => ['group', 'rating', 'single', 'multi', 'text', 'rank'].includes(it.type)).length;
+  check(`题号口径进度 = ${qnExpect}（数据页显示口径），且 ≤ 作答行数`,
+    list.totalQuestions === qnExpect
+      && list.sessions.every((s) => s.answeredQuestions === qnExpect && s.answeredQuestions <= s.answerCount),
+    JSON.stringify({ total: list.totalQuestions, sessions: list.sessions.map((s) => `${s.answeredQuestions}/${s.answerCount}`) }));
   const xlsxRes = await fetch(`${BASE}/api/admin/questionnaire/export.xlsx?id=${qA.id}`, { headers: { Authorization: `Bearer ${token}` } });
   const buf = Buffer.from(await xlsxRes.arrayBuffer());
   check('xlsx 导出可用（PK 头）', xlsxRes.ok && buf.slice(0, 2).toString() === 'PK', `${buf.length} 字节`);
@@ -638,6 +666,33 @@ async function main() {
   check('档位表与编辑器下拉同源（11 档，正文 14px）',
     RT2.FONT_SIZE_PRESETS.length === 11 && RT2.BODY_FONT_PX === 14 && RT2.FONT_SIZE_PRESETS.some((x) => x.px === 48 && x.label === '小初'),
     JSON.stringify(RT2.FONT_SIZE_PRESETS.map((x) => x.label + x.px)));
+
+  // 清洗器：散落的 void 型「丢弃标签」（meta / link / input / embed）不能把后面的内容一起吞掉
+  const voidCases = [
+    '<p>a</p><meta charset="utf-8"><p>b</p>',
+    '<p>a</p><link rel="stylesheet" href="x.css"><p>b</p>',
+    '<p>a</p><input type="text"><p>b</p>',
+    '<p>a</p><input type="text"/><p>b</p>'
+  ];
+  const voidBad = voidCases.filter((h) => !RT2.sanitizeHtml(h).includes('b'));
+  check('散落的 meta / link / input 不会吞掉后续内容', voidBad.length === 0,
+    voidBad.map((h) => h + ' → ' + RT2.sanitizeHtml(h)).join('；'));
+  check('script / svg 容器仍整块丢弃（含内容）',
+    !RT2.sanitizeHtml('<p>a</p><script>bad()</script><p>b</p>').includes('bad')
+      && !RT2.sanitizeHtml('<p>a</p><svg><circle/></svg><p>b</p>').includes('circle'));
+
+  section('[10.6] 选项字母表：第 9 个选项不再是 undefined');
+  const abItems = [
+    { id: 'ab1', type: 'single', title: '【夹具】九选项', options: ['一', '二', '三', '四', '五', '六', '七', '八', '九'] },
+    { id: 'ab_end', type: 'debrief', title: '结束', text: '完' }
+  ];
+  const abPv = await admin('/api/admin/preview', { body: { items: abItems } });
+  const abBoot = await request('/api/preview/session', { body: { previewId: abPv.previewId } });
+  const abOpts = (abBoot.data.action && abBoot.data.action.options) || [];
+  check('第 9 个选项标为 I．九（字母表覆盖到 I）',
+    abOpts.length === 9 && abOpts[8].label === 'I．九',
+    JSON.stringify({ n: abOpts.length, ninth: abOpts[8] && abOpts[8].label }));
+  await request('/api/preview/destroy', { body: { previewId: abPv.previewId } });
 
   section('[11] 清理与设置还原');
   await admin('/api/admin/questionnaire/delete', { body: { id: qC.id, force: true } });

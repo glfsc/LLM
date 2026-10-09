@@ -24,33 +24,9 @@ const P3 = 'group3-high-clarity__';
 const TASK_REQ_SUFFIX = ['task_req', 'task_req2'];      // 唯一的组别操纵点（两处必须组内一致）
 const DEPTH_PREFIX = 'group3-high-clarity-demo';         // 占位，仅为说明层级是数据字段，不做前缀
 
-// 把纯文本转成与组别4 同构的富文本：首段 <p>，小节标题（一、二、三…）用 <h3>，其余行 <br>
-function textToGroupHtml(text) {
-  const lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
-  const out = [];
-  let buf = [];
-  const flushP = () => {
-    if (!buf.length) return;
-    out.push(`<p>${buf.join('<br>')}</p>`);
-    buf = [];
-  };
-  for (const line of lines) {
-    const t = line.trim();
-    if (/^[一二三四五六七八九十]+、/.test(t)) {
-      flushP();
-      out.push(`<h3><span style="font-weight: bold">${RT.escapeText(t)}</span></h3>`);
-      continue;
-    }
-    if (!t) {                                       // 空行 → 段落分隔
-      if (buf.length) buf.push('');
-      continue;
-    }
-    buf.push(RT.escapeText(line));
-  }
-  flushP();
-  // 收尾：末尾 <br> 与空段落清理，再走一遍统一清洗（保证与保存路径同源）
-  return RT.sanitizeHtml(out.join(''));
-}
+// 任务要求的富文本（首段 <p>，小节标题 <h3>，其余行 <br>）由 richtext 统一提供：
+// 种子（db.js）与本脚本共用同一个实现，避免「新建库 / 同步」两条路径呈现不一致。
+const textToGroupHtml = RT.sectionedHtml;
 
 function rePrefix(item, from, to) {
   const out = JSON.parse(JSON.stringify(item));

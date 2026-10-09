@@ -1,11 +1,11 @@
 // 服务端：HTTP 静态资源 + API（零第三方依赖，仅用 Node 内置模块）
-// 统一模型：问卷 = 一条链接 + 一列题目 + 计时默认值。被试端按题目顺序推进：
+// 统一模型：问卷 = 一条链接 + 一列题目；每个题目自带参数（等待 / 最短提交 / 最长作答 / 思考与流式节奏 / 清屏点），
+// 缺省回落到代码内置默认值（DEFAULT_LIMITS）。被试端按题目顺序推进：
 //   消息类题目（message）自动以消息形式发出；其余题型构成「作答单元」。
 // 计时门控全部服务端权威，且不产生额外请求：
-//   延迟发出       → 消息落库带 visible_at，到时才对被试可见
-//   作答前强制等待 → 作答单元的 availableAt = 呈现时刻 + wait
+//   作答前强制等待   → 作答单元的 availableAt = 呈现时刻 + wait
 //   最短提交/最长作答 → 共用窗口（相邻且设置相同的题目共用一个起点）
-// 会话创建时把题目与计时快照进 sessions，此后修改模板 / 问卷不影响进行中的会话。
+// 会话创建时把题目快照进 sessions，此后修改模板 / 问卷不影响进行中的会话。
 'use strict';
 
 const http = require('node:http');
@@ -38,7 +38,11 @@ const MIME_TYPES = {
 const STATUS_LABELS = { in_progress: '进行中', completed: '已完成', abandoned: '已作废' };
 // 作废：数据留档但默认从数据页 / 导出中排除（被试重做、或太久没提交被系统作废）
 const ABANDONED = 'abandoned';
-const OPTION_LETTERS = 'ABCDEFGH';
+// 选项字母：A–Z；理论上限 26 个选项，超出回落为数字（编辑器选项上限 50，不再出现 undefined）
+const OPTION_LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+function optionLetter(index) {
+  return OPTION_LETTERS[index] || String(index + 1);
+}
 
 // ---------------------------------------------------------------- 基础工具
 
@@ -107,7 +111,7 @@ function effLimit(item, key) {
 function optionLabelOf(item, value) {
   const idx = Number(value) - 1;
   if (idx < 0 || idx >= (item.options || []).length) return '';
-  return `${OPTION_LETTERS[idx]}．${item.options[idx]}`;
+  return `${optionLetter(idx)}．${item.options[idx]}`;
 }
 
 function textOf(valueText) {
@@ -275,7 +279,7 @@ function itemDescriptor(item) {
     };
   }
   if (item.type === 'single' || item.type === 'multi') {
-    return { options: (item.options || []).map((t, i) => ({ value: i + 1, label: `${OPTION_LETTERS[i]}．${t}` })) };
+    return { options: (item.options || []).map((t, i) => ({ value: i + 1, label: `${optionLetter(i)}．${t}` })) };
   }
   if (item.type === 'rank') {
     return { options: (item.options || []).map((t, i) => ({ value: i + 1, label: t })) };
@@ -303,7 +307,7 @@ function itemDescriptor(item) {
         min: Number(sub.min) || 1,
         max: Number(sub.max) || 5,
         anchor: sub.anchor || '',
-        options: (sub.options || []).map((t, k) => ({ value: k + 1, label: `${OPTION_LETTERS[k]}．${t}` }))
+        options: (sub.options || []).map((t, k) => ({ value: k + 1, label: `${optionLetter(k)}．${t}` }))
       }))
     };
   }
@@ -469,7 +473,7 @@ function handleBootstrap(req, res, url) {
   if (!session) {
     return sendJson(res, 200, {
       questionnaireTitle: questionnaire.title,
-      session: null, messages: [], action: null, pendingAt: null, nowMs: Date.now()
+      session: null, messages: [], action: null, nowMs: Date.now()
     });
   }
   sendJson(res, 200, { questionnaireTitle: questionnaire.title, ...sessionPayload(session) });
@@ -685,8 +689,7 @@ async function applyStep(st, sessionId, body) {
   st.touchSession(sessionId);                           // 提交也是一次活动
   const nextCount = completedCount + 1;
   const flush = emitMessagesBetween(session, plan, nextCount, nowMs, st);
-  const nowIsoStr = now.toISOString();
-  const messages = flush.messages.filter((m) => !m.visible_at || m.visible_at <= nowIsoStr);
+  const messages = flush.messages;                      // 消息即时可见（「延迟发出」已移除，visible_at 恒为 null）
 
   let completed = false;
   if (nextCount >= plan.units.length) {
@@ -1166,20 +1169,11 @@ async function handlePreviewSpeed(req, res) {
   sendJson(res, 200, { ok: true, speed: st.timeScale });
 }
 
-// POST /api/preview/destroy { previewId } —— 立即销毁预览会话（点「刷新预览」/「重试」时调用，不等 30 分钟 TTL）
+// POST /api/preview/destroy { previewId } —— 立即销毁预览会话（点「刷新预览」或离开编辑页时调用，不等 30 分钟 TTL）
 async function handlePreviewDestroy(req, res) {
   const body = await readJsonBody(req);
   const destroyed = destroyPreview(body.previewId);
   sendJson(res, 200, { ok: true, destroyed });
-}
-
-async function handlePreviewRetry(req, res) {
-  const body = await readJsonBody(req);
-  const st = previewOf(String(body.previewId || '').trim());
-  if (!st) return sendJson(res, 404, { error: 'preview_expired', message: '预览已过期，请刷新预览' });
-  const out = await retryCore(st, String(body.sessionId || '').trim());
-  if (out.error) return sendJson(res, out.status, out.error);
-  sendJson(res, 200, out.payload);
 }
 
 async function handlePreviewFinish(req, res) {
@@ -1382,11 +1376,9 @@ function handleAdminMeta(req, res) {
   sendJson(res, 200, {
     itemTypes: store.ITEM_TYPES,
     questionTypes: store.QUESTION_TYPES,
-    itemLevels: store.ITEM_LEVELS,
     itemTypeLabels: store.ITEM_TYPE_LABELS,
     itemVariants: store.ITEM_VARIANTS,
     itemLimits: store.ITEM_LIMITS,
-    limitKeys: store.LIMIT_KEYS,
     limitMeta: store.LIMIT_META,
     limitSpec: store.LIMIT_SPEC,
     limitDefaults: store.DEFAULT_LIMITS,
@@ -1607,6 +1599,28 @@ function scaleColumns(items) {
 function textColumns(items) { return answerAtoms(items).filter((a) => a.type === 'text'); }
 function choiceColumns(items) { return answerAtoms(items).filter((a) => a.type === 'single' || a.type === 'multi'); }
 
+// 各作答单元的题号（与 parseSession 同一口径）：非 message 依次入列，需要作答的题型才编号
+function unitQnosOf(items) {
+  const qnos = [];
+  let qno = 0;
+  for (const it of items) {
+    if (it.type === 'message') continue;
+    const isQuestion = store.QUESTION_TYPES.includes(it.type);
+    if (isQuestion) qno += 1;
+    qnos.push(isQuestion ? qno : 0);
+  }
+  return qnos;
+}
+
+// 已完成作答单元里属于「题号」的个数（题号口径的进度；不数知情同意 / 确认页 / 结束说明）
+function answeredQuestionsOf(rows, unitQnos) {
+  const units = new Set();
+  for (const r of rows) units.add(Number(r.unit_index) || 0);
+  let n = 0;
+  for (const ui of units) if ((unitQnos[ui] || 0) > 0) n += 1;
+  return n;
+}
+
 // GET /api/admin/questionnaire/sessions?id=
 function handleAdminQuestionnaireSessions(req, res, url) {
   const user = requireUser(req, res);
@@ -1617,29 +1631,40 @@ function handleAdminQuestionnaireSessions(req, res, url) {
     return sendJson(res, 404, { error: 'questionnaire_not_found', message: '问卷不存在' });
   }
   const payload = store.getQuestionnairePayload(id);
+  const unitQnos = unitQnosOf(payload.items);
+  const totalQuestions = unitQnos.filter((q) => q > 0).length;
 
-  // 可作答题目数（消息类只呈现，不计入作答进度）
-  const answerable = payload.itemCount - payload.items.filter((it) => it.type === 'message').length;
+  // 会话进度按「题号」报（完成会话 = 24/24 题）；answerCount 保留为作答行数（旧口径，自检在用）
+  const acc = new Map();      // session_id -> { rows, units: Set }
+  for (const r of store.listResponseRows(id)) {
+    let a = acc.get(r.session_id);
+    if (!a) { a = { rows: 0, units: new Set() }; acc.set(r.session_id, a); }
+    a.rows += 1;
+    a.units.add(Number(r.unit_index) || 0);
+  }
 
-  const counts = new Map();
-  for (const r of store.listResponseRows(id)) counts.set(r.session_id, (counts.get(r.session_id) || 0) + 1);
-
-  const sessions = store.listSessionSummaries(id).map((s) => ({
-    id: s.id,
-    seq: s.seq == null ? null : Number(s.seq),
-    status: s.status,
-    statusLabel: STATUS_LABELS[s.status] || s.status,
-    startedAt: s.started_at,
-    endedAt: s.ended_at,
-    durationSec: s.duration_sec == null ? null : Number(s.duration_sec),
-    answerCount: counts.get(s.id) || 0
-  }));
+  const sessions = store.listSessionSummaries(id).map((s) => {
+    const a = acc.get(s.id) || { rows: 0, units: new Set() };
+    let answered = 0;
+    for (const ui of a.units) if ((unitQnos[ui] || 0) > 0) answered += 1;
+    return {
+      id: s.id,
+      seq: s.seq == null ? null : Number(s.seq),
+      status: s.status,
+      statusLabel: STATUS_LABELS[s.status] || s.status,
+      startedAt: s.started_at,
+      endedAt: s.ended_at,
+      durationSec: s.duration_sec == null ? null : Number(s.duration_sec),
+      answerCount: a.rows,          // 作答行数（题组按子题分行；旧口径，保持不变）
+      answeredQuestions: answered   // 已答完的题数（题号口径，界面进度列用）
+    };
+  });
 
   sendJson(res, 200, {
     questionnaire: payload,
     sessions,
     sessionCount: sessions.length,
-    answerable
+    totalQuestions
   });
 }
 
@@ -1674,6 +1699,8 @@ function handleAdminQuestionnaireSession(req, res, url) {
   const atoms = answerAtoms(items);
   const atomByKey = new Map(atoms.map((a) => [a.key, a]));
   const labels = itemLabelMap(items);
+  const unitQnos = unitQnosOf(items);
+  const responseRows = store.listResponses(session.id);
 
   sendJson(res, 200, {
     questionnaire: store.getQuestionnairePayload(id, { withItems: false }),
@@ -1686,10 +1713,12 @@ function handleAdminQuestionnaireSession(req, res, url) {
       endedAt: session.ended_at,
       durationSec: session.duration_sec == null ? null : Number(session.duration_sec),
       userAgent: session.user_agent,
-      totalAnswers: items.filter((it) => it.type !== 'message').length
+      totalAnswers: items.filter((it) => it.type !== 'message').length,
+      totalQuestions: unitQnos.filter((q) => q > 0).length,
+      answeredQuestions: answeredQuestionsOf(responseRows, unitQnos)
     },
     messages: store.listMessages(session.id),
-    responses: store.listResponses(session.id).map((r) => {
+    responses: responseRows.map((r) => {
       const atom = atomByKey.get(`${r.item_id}#${r.sub_index || 0}`);
       const correct = atom && atom.type === 'single' ? Number(atom.sub ? atom.sub.correct : atom.item.correct) || 0 : 0;
       return {
@@ -1884,55 +1913,27 @@ function qrAsciiFor(text) {
   return lines.join('\n');
 }
 
+// 连接页模板（public/connect.html，占位符替换）：版式单独放文件里，改样式不用动服务端代码
+const CONNECT_TEMPLATE = (() => {
+  try {
+    return fs.readFileSync(path.join(PUBLIC_DIR, 'connect.html'), 'utf8');
+  } catch {
+    return '<!DOCTYPE html><html lang="zh-CN"><meta charset="utf-8"><body style="font-family:sans-serif;padding:32px">'
+      + '<h1>连接页模板缺失</h1><p>请确认 public/connect.html 存在（便携包是否完整解压）。</p></body></html>';
+  }
+})();
+
 function buildConnectHtml() {
   const urls = lanAddresses().map(entryUrl);
   const primary = urls[0] || entryUrl('');
-  const altItems = urls.slice(1).map((u) => `<li><code>${u}</code></li>`).join('');
-  return `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>手机连接 · 预实验入口</title>
-<style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-         background: #f5f6f8; color: #1f2329; min-height: 100vh; display: flex; justify-content: center; padding: 32px 16px; }
-  .card { background: #fff; border-radius: 16px; box-shadow: 0 4px 24px rgba(31,35,41,.08);
-          max-width: 420px; width: 100%; padding: 32px 24px; height: fit-content; }
-  h1 { font-size: 20px; text-align: center; margin-bottom: 4px; }
-  .sub { text-align: center; color: #86909c; font-size: 13px; margin-bottom: 20px; }
-  .qr { display: flex; justify-content: center; margin: 8px 0 16px; }
-  .qr svg { width: 240px; height: 240px; }
-  .url { text-align: center; margin-bottom: 20px; }
-  .url code { background: #f2f3f5; border-radius: 8px; padding: 8px 14px; font-size: 15px; word-break: break-all; }
-  h2 { font-size: 14px; margin: 16px 0 8px; color: #4e5969; }
-  ul.tips { list-style: none; }
-  ul.tips li { font-size: 13px; color: #4e5969; line-height: 1.7; padding-left: 18px; position: relative; }
-  ul.tips li::before { content: "·"; position: absolute; left: 6px; font-weight: 700; }
-  .alt { font-size: 12px; color: #86909c; margin-top: 4px; }
-  .admin { margin-top: 20px; padding-top: 16px; border-top: 1px solid #e5e6eb; font-size: 12px; color: #86909c; text-align: center; }
-  .admin a { color: #165dff; text-decoration: none; }
-</style>
-</head>
-<body>
-  <div class="card">
-    <h1>手机扫码进入实验</h1>
-    <p class="sub">请确保手机与这台电脑连接同一个 WiFi（或电脑开的热点）</p>
-    <div class="qr">${qrSvgFor(primary)}</div>
-    <div class="url"><code>${primary}</code></div>
-    <ul class="tips">
-      <li>用手机「相机」扫码，选择浏览器打开；微信扫一扫若无法打开，请改用相机。</li>
-      <li>手机与电脑要在同一个网里：电脑开热点让手机连，或手机开热点让电脑连，都行。</li>
-      <li>打不开时先看：手机是否还开着流量（需关掉并连同一 WiFi）；防火墙是否放行了
-        「专用网络」和「公用网络」两个（手机热点常被判为公用网络）。</li>
-      <li>路由器若开了「AP 隔离」，手机也连不上，需关闭或改用热点方式。</li>
-      ${altItems ? `<li>若上方地址无法访问，可尝试备选地址：<ul class="alt">${altItems}</ul></li>` : ''}
-    </ul>
-    <div class="admin">电脑端编辑/数据入口：<a href="/admin">http://localhost:${PORT}/admin</a>（本机打开）</div>
-  </div>
-</body>
-</html>`;
+  const altBlock = urls.length > 1
+    ? `<li>若上方地址无法访问，可尝试备选地址：<ul class="alt">${urls.slice(1).map((u) => `<li><code>${u}</code></li>`).join('')}</ul></li>`
+    : '';
+  return CONNECT_TEMPLATE
+    .replaceAll('{{QR_SVG}}', qrSvgFor(primary))
+    .replaceAll('{{PRIMARY_URL}}', primary)
+    .replaceAll('{{ALT_BLOCK}}', altBlock)
+    .replaceAll('{{PORT}}', String(PORT));
 }
 
 function handleConnect(res) {
@@ -1973,7 +1974,6 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/preview/bootstrap' && req.method === 'GET') return await handlePreviewBootstrap(req, res, url);
     if (pathname === '/api/preview/session' && req.method === 'POST') return await handlePreviewSession(req, res);
     if (pathname === '/api/preview/step' && req.method === 'POST') return await handlePreviewStep(req, res);
-    if (pathname === '/api/preview/retry' && req.method === 'POST') return await handlePreviewRetry(req, res);
     if (pathname === '/api/preview/seek' && req.method === 'POST') return await handlePreviewSeek(req, res);
     if (pathname === '/api/preview/seek-unit' && req.method === 'POST') return await handlePreviewSeekUnit(req, res);
     if (pathname === '/api/preview/speed' && req.method === 'POST') return await handlePreviewSpeed(req, res);

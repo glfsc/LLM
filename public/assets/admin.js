@@ -42,15 +42,14 @@ if (initialToken) { try { sessionStorage.setItem(TOKEN_KEY, initialToken); } cat
 const state = {
   token: initialToken,
   user: null,             // 当前登录用户 { id, username, role, avatar }
-  meta: null,             // { itemTypes, itemTypeLabels, itemVariants, itemLimits, limitMeta, limitKeys, limitDefaults, itemDefaults, ... }
+  meta: null,             // { itemTypes, itemTypeLabels, itemVariants, itemLimits, limitMeta, limitDefaults, itemDefaults, ... }
   experiments: [],
   questionnaires: [],
   editingExp: null,       // 编辑中的实验模板（本地副本，保存时提交）
   editingQ: null,         // 编辑中的问卷
   selected: null,         // 当前选中的题目 id
   sidebarMode: 'menu',    // menu | outline
-  previewSpeed: 1,        // 试填 / 预览的演示倍速（1 = 与正式实验一致）
-  trial: null,            // { list, idx, answers }
+  previewSpeed: 1,        // 手机预览的演示倍速（1 = 与正式实验一致）
   dragId: null,
   view: 'exp-list'
 };
@@ -59,7 +58,6 @@ const TYPE = () => state.meta.itemTypes;
 const TYPE_LABEL = (t) => (state.meta.itemTypeLabels[t] || t);
 const TYPE_LIMITS = (t) => (state.meta.itemLimits[t] || []);
 const LIMIT_META = () => state.meta.limitMeta;
-const LIMIT_KEYS = () => state.meta.limitKeys;
 const LIMIT_DEFAULTS = () => state.meta.limitDefaults;
 
 /* ---------------------------------------------------------------- 基础工具 */
@@ -131,12 +129,6 @@ function formatDuration(sec) {
   const m = Math.floor(n / 60);
   const s = n % 60;
   return m > 0 ? `${m} 分 ${s} 秒` : `${s} 秒`;
-}
-
-function setHint(node, message, isError = false) {
-  if (!node) return;
-  node.textContent = message;
-  node.classList.toggle('err', Boolean(isError));
 }
 
 function sectionHead(title, hint) {
@@ -561,6 +553,11 @@ function currentEditing() {
 
 function handleRoute() {
   if ($('admin-view').classList.contains('hidden')) return;
+  // 切页：先释放上一个编辑页的资源（进度轮询 / 预览会话）
+  if (editorShellDispose) {
+    try { editorShellDispose(); } catch { /* 忽略 */ }
+    editorShellDispose = null;
+  }
   if (!location.hash) { location.replace('#/q'); return; }
   const route = parseHash();
   if (!route) { location.replace('#/q'); return; }
@@ -598,13 +595,11 @@ window.addEventListener('hashchange', handleRoute);
 document.querySelectorAll('.sidebar-item').forEach((a) => {
   a.addEventListener('click', (e) => {
     e.preventDefault();
-    state.trial = null;
     location.hash = a.dataset.nav === 'exp' ? '#/exp' : '#/q';
   });
 });
 
 $('btn-settings').addEventListener('click', () => {
-  state.trial = null;
   location.hash = '#/settings';
 });
 
@@ -1377,16 +1372,19 @@ function buildItemEditor(list, opts = {}) {
       const n = Math.max(1, Math.min(30, Number(num.value) || 1));
       const items = [];
       for (let i = 0; i < n; i += 1) {
-        items.push({
+        // 题干进正文（title 置空后由正文首行自动回填），与「插入题目」的默认项同一口径
+        const text = `打分题 ${i + 1}`;
+        items.push(applyNewItemDefaults({
           id: `rate${Date.now().toString(36)}${i}`,
           type: 'rating',
-          title: `打分题 ${i + 1}`,
+          title: text,
+          html: RichText.textToHtml(text),
           min: 1,
           max: 5,
           anchor: '1 = 完全不同意　·　5 = 完全同意',
           limits: {},
           collapsed: false
-        });
+        }));
       }
       insertItem(list, ...items);
       toast(`已插入 ${n} 道打分题`);
@@ -1801,7 +1799,10 @@ function buildThinkingRow(item, onInput, rerender) {
     onInput();
   };
   dur.addEventListener('input', () => { if (dur.value !== '') writeDur(dur.value); });
-  dur.addEventListener('blur', () => { dur.value = String(msToSec(item.limits && item.limits.thinkMs)); });
+  // 失焦回显「当前生效值」：没配过 thinkMs 时回落默认（与输入框初始化同一口径，别显示成 0）
+  dur.addEventListener('blur', () => {
+    dur.value = String(msToSec(item.limits && item.limits.thinkMs != null ? item.limits.thinkMs : effLimit(item, 'thinkMs')));
+  });
   durRow.appendChild(dur);
   durRow.appendChild(el('span', 'param-unit', '秒'));
   for (const [label, v] of [['0.5 秒', 500], ['5 秒', 5000], ['8 秒', 8000], ['12 秒', 12000]]) {
@@ -1909,6 +1910,7 @@ document.addEventListener('click', (e) => {
 
 let editorCtx = null;
 let previewCtl = null;          // 手机预览：{ url, markStale }（由 editorShell 装配）
+let editorShellDispose = null;  // 当前编辑页的清理函数（切页时调用：停轮询 + 销毁预览会话）
 
 // 编辑内容变化时：提示「预览需要刷新」，而不是实时重渲染
 // （预览是真页面、真会话，重渲染会把正在试填的进度打断）
@@ -1959,7 +1961,6 @@ function editorShell({ title, backHash, saveLabel, hint, body, phoneTitle, withT
   // 未修改直接返回；有修改才弹确认（保存 / 不保存返回）
   back.onclick = () => {
     if (isDirty && !isDirty()) {
-      state.trial = null;
       location.hash = backHash;
       return;
     }
@@ -1971,7 +1972,6 @@ function editorShell({ title, backHash, saveLabel, hint, body, phoneTitle, withT
       hideCancel: true,
       onExtra: async () => {
         closeModal();
-        state.trial = null;
         location.hash = backHash;
       },
       onConfirm: async () => {
@@ -2081,7 +2081,7 @@ function editorShell({ title, backHash, saveLabel, hint, body, phoneTitle, withT
   col.appendChild(holder);
 
   // 预览会话：把编辑器里（可能还没保存）的题目发给服务端建一个内存会话，iframe 就是这个会话的页面
-  previewCtl = {
+  const ctl = {
     url: '',
     markStale: () => {
       if (!previewCtl.url) return;
@@ -2106,6 +2106,7 @@ function editorShell({ title, backHash, saveLabel, hint, body, phoneTitle, withT
       if (wasHidden) fitPhoneScale();      // 进度条出现会占掉一行高度 → 重新按可用高度缩放，别让手机被裁掉
     }
   };
+  previewCtl = ctl;
   // 预览是「点刷新那一刻」的题目快照：有未同步的改动时提醒一句，
   // 否则用户改了「呈现前清空」这类参数却以为已经生效（真机链接同理，用的是已保存的问卷）
   const warnIfStale = () => {
@@ -2138,6 +2139,7 @@ function editorShell({ title, backHash, saveLabel, hint, body, phoneTitle, withT
   });
   frame.addEventListener('load', () => {
     window.setTimeout(() => {
+      if (previewCtl !== ctl) return;         // 已离开编辑页：不再触碰预览
       previewCtl.syncScrub();
       // iframe 换页期间改过倍速：现在补发（只改速度，不重建会话）
       if (pendingSpeed != null) {
@@ -2185,7 +2187,18 @@ function editorShell({ title, backHash, saveLabel, hint, body, phoneTitle, withT
   // 编辑区内容渲染完之后同步一次大纲高亮（否则首次进入时大纲不会跟随定位）
   requestAnimationFrame(() => syncOutlineActive());
 
-  return { saveBtn: save, scroll, reloadPreview };
+  // 离开编辑页时释放资源：停止进度轮询 + 销毁这次预览会话（服务端还有 TTL/LRU 兜底）。
+  // 以前 scrubTimer 会一直空转，反复进出编辑页会累积一堆指向废 iframe 的定时器。
+  const dispose = () => {
+    window.clearInterval(scrubTimer);
+    scrubTimer = null;
+    const m = ((previewCtl && previewCtl.url) || '').match(/preview=([^&]+)/);
+    if (m) api('/api/preview/destroy', { body: { previewId: decodeURIComponent(m[1]) } }).catch(() => {});
+    if (previewCtl === ctl) previewCtl = null;
+  };
+  editorShellDispose = dispose;
+
+  return { saveBtn: save, scroll, reloadPreview, dispose };
 }
 
 /* ---------------------------------------------------------------- 实验模板列表 */
@@ -2255,7 +2268,6 @@ async function renderExpEditor(id) {
   }
   state.editingExp = { id: experiment.id, name: experiment.name, items: experiment.items.map((it) => ({ ...it, collapsed: false })) };
   state.selected = null;
-  state.trial = null;
   state.expBaseline = JSON.stringify({ n: experiment.name, i: experiment.items.map(stripLocal) });
   setSidebarMode('outline');       // 题目已就绪，切到题目大纲
   renderExpEditorBody();
@@ -2309,7 +2321,6 @@ function renderExpEditorBody() {
       await reloadExperiments();
       state.expBaseline = JSON.stringify({ n: name, i: exp.items.map(stripLocal) });
       toast('已保存该实验模板');
-      state.trial = null;
       if (opts.modal) closeModal();
       location.hash = '#/exp';
       return true;
@@ -2530,7 +2541,6 @@ async function renderQEditor(id) {
     items: questionnaire.items.map((it) => ({ ...it, collapsed: false }))
   };
   state.selected = null;
-  state.trial = null;
   state.qBaseline = JSON.stringify({ n: questionnaire.title, i: questionnaire.items.map(stripLocal) });
   setSidebarMode('outline');       // 题目已就绪，切到题目大纲
   renderQEditorBody();
@@ -2591,7 +2601,6 @@ function renderQEditorBody() {
       await reloadQuestionnaires();
       state.qBaseline = JSON.stringify({ n: title, i: q.items.map(stripLocal) });
       toast('已保存问卷');
-      state.trial = null;
       if (opts.modal) closeModal();
       location.hash = '#/q';
       return true;
@@ -2637,17 +2646,26 @@ async function renderQData(id) {
     $main.appendChild(el('p', 'data-empty', err.message || '数据加载失败'));
     return;
   }
-  const { questionnaire, sessions, answerable } = data;
-  const totalAnswers = answerable == null ? questionnaire.itemCount : answerable;
+  // 口径 = 题号（与编辑器的「题目编排（N 道）」一致）：材料消息与页面环节（知情同意 / 确认 / 结束说明）不占题号
+  const { questionnaire, sessions, totalQuestions } = data;
+  const qCount = questionCount(questionnaire.items);
 
   const panel = el('div', 'data-panel');
   const phead = el('div', 'panel-head');
   const box = el('div', 'grow');
-  box.append(el('h2', '', `${questionnaire.title} · 数据`), el('p', 'panel-sub', `共 ${sessions.length} 位被试 · 问卷共 ${questionnaire.itemCount} 道题（其中 ${totalAnswers} 道需作答）。点击一行查看该被试的完整作答与对话。`));
+  box.append(el('h2', '', `${questionnaire.title} · 数据`), el('p', 'panel-sub', `共 ${sessions.length} 位被试 · 问卷共 ${qCount} 道题（另有 ${questionnaire.itemCount - qCount} 条材料与页面环节）。点击一行查看该被试的完整作答与对话。`));
+  // 状态筛选先建好：下面的「导出 Excel」要读它的当前值（此前它在空数据集分支里不会被初始化，点导出会报错）
+  const statusSel = el('select', 'filter-select');
+  // 默认不含「已作废」（重做 / 太久没提交被系统作废的会话）——需要时选「全部（含已作废）」
+  [['', '默认（不含已作废）'], ['in_progress', '进行中'], ['completed', '已完成'], ['abandoned', '已作废'], ['all', '全部（含已作废）']].forEach(([v, label]) => {
+    const o = el('option', '', label);
+    o.value = v;
+    statusSel.appendChild(o);
+  });
   const exportBtn = el('button', 'ghost-btn', '导出 Excel');
   // 导出跟随当前状态筛选：默认不含已作废（选了「已作废 / 全部（含已作废）」才导出它们）
   exportBtn.onclick = () => {
-    const v = statusSel ? statusSel.value : '';
+    const v = statusSel.value;
     exportXlsx(questionnaire, v === 'abandoned' || v === 'all');
   };
   const delBtn = el('button', 'ghost-btn danger', '删除数据');
@@ -2671,16 +2689,9 @@ async function renderQData(id) {
     return;
   }
 
-  // 筛选：状态 / 最短时长（分钟）
+  // 筛选：状态 / 最短时长（分钟）；statusSel 已在上面创建（导出按钮要读它），这里只挂进筛选行
   const filterRow = el('div', 'data-filters');
   filterRow.appendChild(el('span', 'lbl', '筛选：'));
-  const statusSel = el('select', 'filter-select');
-  // 默认不含「已作废」（重做 / 太久没提交被系统作废的会话）——需要时选「全部（含已作废）」
-  [['', '默认（不含已作废）'], ['in_progress', '进行中'], ['completed', '已完成'], ['abandoned', '已作废'], ['all', '全部（含已作废）']].forEach(([v, label]) => {
-    const o = el('option', '', label);
-    o.value = v;
-    statusSel.appendChild(o);
-  });
   const minDur = el('input', 'filter-num');
   minDur.type = 'number';
   minDur.min = '0';
@@ -2752,7 +2763,7 @@ async function renderQData(id) {
       row.append(
         el('td', 'cell-strong', s.seq == null ? '—' : `#${s.seq}`),
         el('td', '', s.statusLabel),
-        el('td', '', `${s.answerCount} / ${totalAnswers}`),
+        el('td', '', `${s.answeredQuestions} / ${totalQuestions}`),
         el('td', '', formatTime(s.startedAt)),
         el('td', '', formatTime(s.endedAt)),
         el('td', '', formatDuration(s.durationSec))
@@ -2873,7 +2884,7 @@ async function renderQSession(id, sid) {
     ['开始时间', formatTime(session.startedAt)],
     ['结束时间', formatTime(session.endedAt)],
     ['时长', formatDuration(session.durationSec)],
-    ['作答进度', `${responses.length} / ${session.totalAnswers}`],
+    ['作答进度', `${session.answeredQuestions} / ${session.totalQuestions} 题`],
     ['浏览器', (session.userAgent || '').slice(0, 60) || '——']
   ]) {
     const item = el('div', 'meta-item');
@@ -2914,6 +2925,7 @@ async function renderQSession(id, sid) {
   for (const m of messages) {
     const item = el('div', m.role === 'user' ? 'msg-item' : 'msg-item msg-ai');
     const h = el('div', 'msg-head');
+    // 「延迟发出」参数已从平台移除：这里只对历史数据（旧库里带 visible_at 的消息）显示
     const delayed = m.visible_at && new Date(m.visible_at).getTime() > new Date(m.created_at).getTime() + 1000;
     h.append(
       el('span', 'msg-role', m.role === 'user' ? '被试' : '系统'),

@@ -28,7 +28,7 @@ for (const e of experiments) {
   const withLimits = e.items.filter((i) => Object.keys(i.limits).length);
   console.log(`  - ${e.id}（${e.name}）题目 ${e.itemCount} 道（作答 ${answerable}）`);
   console.log(`      题型分布：${Object.entries(counts).map(([k, v]) => `${store.ITEM_TYPE_LABELS[k]}×${v}`).join(' ')}`);
-  console.log(`      计时限制：${withLimits.map((i) => `${i.title}[${Object.entries(i.limits).map(([k, v]) => `${store.TIMING_META[k].label}${v}s`).join('+')}]`).join(' ')}`);
+  console.log(`      计时限制：${withLimits.map((i) => `${i.title}[${Object.entries(i.limits).map(([k, v]) => `${store.LIMIT_META[k].label}=${v}${store.LIMIT_META[k].unit || ''}`).join('+')}]`).join(' ')}`);
 }
 for (const q of questionnaires) {
   console.log(`  - 问卷「${q.title}」/chat?q=${q.id} · 题目 ${q.itemCount} 道 · 数据 ${q.sessionCount} 份`);

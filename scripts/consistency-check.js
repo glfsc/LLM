@@ -98,10 +98,10 @@ async function main() {
     String(q1Full.items.filter((i) => i.type === 'rating').length), { config: true });
   const groups = q1Full.items.filter((i) => i.type === 'group');
   const soloText = q1Full.items.filter((i) => i.type === 'text');
-  // 组别4 起把「第一次创作」改成了单框文本题（不限字数、可写广告语 + 创作说明），第二次仍是两子题题组
-  check('创作 = 1 个题组（2 道文本子题）+ 1 道单框文本题',
-    groups.length === 1 && groups[0].subs.length === 2 && groups[0].subs.every((x) => x.type === 'text') && soloText.length === 1,
-    JSON.stringify({ groups: groups.map((g) => g.subs.map((x) => x.title)), solo: soloText.map((x) => x.title) }), { config: true });
+  // 当前配置：两次创作都是单框文本题（广告语 + 创作说明写在同一框里提交），已不再用题组
+  check('创作 = 两道单框文本题（不再用题组）',
+    groups.length === 0 && soloText.length === 2,
+    JSON.stringify({ groups: groups.length, solo: soloText.map((x) => x.title) }), { config: true });
   check('问卷不再携带问卷级计时默认值（参数只在题目上）', q1Full.timing === undefined, JSON.stringify(q1Full.timing));
   const fbItem = q1Full.items.find((i) => i.type === 'message' && String(i.text || '').startsWith('很感谢你的认真创作'));
   check('反馈题带思考稿与思考时长 10000ms',
@@ -177,7 +177,11 @@ async function main() {
   section('[4] 计时门控（真实门控值，靠回拨快进，不等待）');
   check('触发过作答前强制等待', recA.flags.wait);
   check('触发过最短提交 / 最长作答时间窗', recA.flags.window);
-  check('创作题组承载最短提交 / 最长作答窗口', recA.flags.groupWindow === true, JSON.stringify(recA.flags));
+  // 题组承载窗口的机制由平台层夹具覆盖（check-platform 的 groupWindow 断言）；
+  // 当前配置里两道创作题都是单框文本题（见 [1]），这里按配置快照核对它们的窗口参数
+  check('两道创作题都配了最长作答窗口（maxAnswer）',
+    soloText.length === 2 && soloText.every((i) => Number(i.limits.maxAnswer) > 0),
+    JSON.stringify(soloText.map((i) => ({ title: i.title, limits: i.limits }))), { config: true });
   check('服务端拦截过未到时的提交（too_early）', recA.gates.rejected > 0, `拒绝 ${recA.gates.rejected} 次`);
   console.log(`  · 门控快进实况：一次走查被拒 ${recA.gates.rejected} 次，回拨合计 ${(recA.gates.fastForwardedMs / 1000).toFixed(0)}s`
     + `（若真等这些门控，3 次走查要等约 ${((recA.gates.fastForwardedMs / 1000) * 3 / 60).toFixed(1)} 分钟）`);
@@ -186,7 +190,7 @@ async function main() {
   const detail = await admin(`/api/admin/questionnaire/session?id=${q1Full.id}&sid=${sesA.sessionId}`);
   check(`作答记录 ${expectRows} 行（${expectSeq.length} 个作答单元，题组按子题分行）`,
     detail.responses.length === expectRows, String(detail.responses.length), { config: true });
-  check('文本作答按行落库（单框文本 1 行 + 题组子题 2 行）', detail.responses.filter((r) => r.itemType === 'text' && r.text).length === 3,
+  check('文本作答按行落库（两道创作题各 1 行）', detail.responses.filter((r) => r.itemType === 'text' && r.text).length === 2,
     String(detail.responses.filter((r) => r.itemType === 'text' && r.text).length), { config: true });
   check('单选题带对错判定', detail.responses.some((r) => r.itemType === 'single' && (r.isCorrect === '正确' || r.isCorrect === '错误')));
   check('量表题标签归入量表', detail.responses.some((r) => /目标清晰度测量 第 1 题/.test(r.itemLabel)),
@@ -201,6 +205,11 @@ async function main() {
   check('会话列表含 2 位被试', list.sessions.length === 2, String(list.sessions.length), { config: true });
   check(`会话作答进度 = ${expectRows}`, list.sessions.every((s) => s.answerCount === expectRows),
     list.sessions.map((s) => s.answerCount).join(','), { config: true });
+  // 题号口径的进度（数据页显示的就是它）：完成会话 = 全部题号都答完
+  const qnTotal = q1Full.items.filter((i) => ['group', 'rating', 'single', 'multi', 'text', 'rank'].includes(i.type)).length;
+  check(`题号口径进度 = ${qnTotal}（数据页显示口径）`,
+    list.totalQuestions === qnTotal && list.sessions.every((s) => s.answeredQuestions === qnTotal),
+    JSON.stringify({ total: list.totalQuestions, got: list.sessions.map((s) => s.answeredQuestions) }), { config: true });
   const xlsxRes = await fetch(`${BASE}/api/admin/questionnaire/export.xlsx?id=${q1Full.id}`, { headers: { Authorization: `Bearer ${token}` } });
   const buf = Buffer.from(await xlsxRes.arrayBuffer());
   check('xlsx 导出可用（PK 头）', xlsxRes.ok && buf.slice(0, 2).toString() === 'PK', `${buf.length} 字节`);
@@ -208,8 +217,8 @@ async function main() {
   check('含「汇总（一被试一行）」与「作答明细」两个 sheet',
     sheets.includes('汇总（一被试一行）') && sheets.includes('作答明细'), sheets.join(' / '));
   const s1 = unzipEntry(buf, 'xl/worksheets/sheet1.xml');
-  check('汇总表含量表均分与两次作品列',
-    /目标清晰度测量（均分）/.test(s1) && /广告语/.test(s1) && /创作说明（选填）/.test(s1) && /注意力检测·是否正确/.test(s1),
+  check('汇总表含量表均分与两次创作列',
+    /目标清晰度测量（均分）/.test(s1) && /广告语和创作/.test(s1) && /广告语和创作说明/.test(s1) && /注意力检测·是否正确/.test(s1),
     undefined, { config: true });
   check('汇总表含被试作品文本', /作品1|作品2/.test(s1));
 
