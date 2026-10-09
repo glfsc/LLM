@@ -2215,7 +2215,9 @@ function editorShell({ title, backHash, saveLabel, hint, body, phoneTitle, withT
   };
   editorShellDispose = dispose;
 
-  return { saveBtn: save, scroll, reloadPreview, dispose };
+  // setTitle：保存后不退出编辑页时，用来把顶部标题同步成新名字
+  const setTitle = (text) => { actionBar.querySelector('.editor-actionbar-title').textContent = text; };
+  return { saveBtn: save, scroll, reloadPreview, dispose, setTitle };
 }
 
 /* ---------------------------------------------------------------- 实验模板列表 */
@@ -2320,7 +2322,8 @@ function renderExpEditorBody() {
   body.appendChild(secItems);
   editorCtx = editor;          // 关键：点大纲 / 点题卡时靠它就地更新选中态（否则编辑区不会跟着选中）
 
-  // 保存：名称必填；exit = 保存后返回列表（返回确认弹窗复用）
+  // 保存：名称必填。按钮保存留在编辑页（与问卷编辑器同一套行为）；
+  // 只有「返回列表」确认弹窗里的保存（opts.exit）才保存完直接回列表。
   const doSave = async (opts = {}) => {
     const name = (exp.name || '').trim();
     if (!name || name === UNNAMED_EXP) {
@@ -2339,7 +2342,8 @@ function renderExpEditorBody() {
       state.expBaseline = JSON.stringify({ n: name, i: exp.items.map(stripLocal) });
       toast('已保存该实验模板');
       if (opts.modal) closeModal();
-      location.hash = '#/exp';
+      if (opts.exit) location.hash = '#/exp';
+      else shell.setTitle(`实验 · ${name}`);           // 留在编辑页：改了名字标题也立刻跟着变
       return true;
     } catch (err) {
       toast(err.message || '保存失败，请重试');
@@ -2600,7 +2604,8 @@ function renderQEditorBody() {
   body.appendChild(secItems);
   editorCtx = editor;          // 关键：点大纲 / 点题卡时靠它就地更新选中态（否则编辑区不会跟着选中）
 
-  // 保存：名称必填；exit = 保存后返回列表（返回确认弹窗复用）
+  // 保存：名称必填。按钮保存留在编辑页（继续改，不想改了由用户自己点「← 返回列表」）；
+  // 只有「返回列表」确认弹窗里的保存（opts.exit）才保存完直接回列表。
   const doSave = async (opts = {}) => {
     const title = (q.title || '').trim();
     if (!title || title === UNNAMED_Q) {
@@ -2619,7 +2624,8 @@ function renderQEditorBody() {
       state.qBaseline = JSON.stringify({ n: title, i: q.items.map(stripLocal) });
       toast('已保存问卷');
       if (opts.modal) closeModal();
-      location.hash = '#/q';
+      if (opts.exit) location.hash = '#/q';
+      else shell.setTitle(`修改问卷 · ${title}`);      // 留在编辑页：改了名字标题也立刻跟着变
       return true;
     } catch (err) {
       toast(err.message || '保存失败，请重试');
