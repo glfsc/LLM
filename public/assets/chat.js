@@ -72,6 +72,14 @@ const state = {
 // 时间已到后的统一提示：停止作答，只能重做（被试端各处共用同一句，避免口径不一致）
 const STOPPED_HINT = '作答时间已到，本题已停止作答。如需重新作答，请点击顶部的「重做」。';
 
+// 聊天流世代号：任何「整屏换内容」（跳题 / 重开会话）都会 +1。
+// 提交之后是一串异步续集（先逐字播消息、再渲染下一题），换屏时它可能还没跑完。
+// 续集每次写屏前先对世代号，对不上立即收手——否则它会把自己没播完的消息、
+// 以及旧那一步的下一题卡，追加进新的聊天流里（表现就是「跳到第 N 题作答后，
+// 开场材料又在第六题下方重播一遍，还冒出一张等着作答的旧题卡」）。
+let streamEpoch = 0;
+function beginFreshStream() { streamEpoch += 1; return streamEpoch; }
+
 const STORAGE_PREFIX = 'expchat_q_';
 const DRAFT_PREFIX = 'expchat_draft_';
 // 本机存储作用域：预览用独立的键，避免覆盖同一浏览器上真实被试的记录
@@ -180,17 +188,25 @@ function clearStoredSession() {
 }
 // 终态记录存在 sessionStorage：同一标签页内刷新仍在，关掉标签页即消失。
 // 于是「刷新」仍看到致谢页，「关掉重开」才回到开始页、把设备交给下一位被试。
+// 作用域与其他本机记录一致（真实问卷 = 问卷短码；预览 = 那一次的预览会话）：
+// 早先这里用的是问卷短码，而预览没有短码（空串）——于是**所有预览共用一个键**，
+// 做完一份预览再去开另一组问卷的预览，会直接停在上一份的终态页（既进不去也刷不掉）。
 const COMPLETED_PREFIX = 'expchat_done_';
 function storeCompletedFinal(payload) {
-  try { sessionStorage.setItem(COMPLETED_PREFIX + questionnaireCode, JSON.stringify(payload)); } catch { /* 忽略 */ }
+  try { sessionStorage.setItem(COMPLETED_PREFIX + storageScope, JSON.stringify(payload)); } catch { /* 忽略 */ }
 }
 function loadCompletedFinal() {
   try {
-    const raw = sessionStorage.getItem(COMPLETED_PREFIX + questionnaireCode);
+    const raw = sessionStorage.getItem(COMPLETED_PREFIX + storageScope);
     return raw ? JSON.parse(raw) || null : null;
   } catch { return null; }
 }
-function draftKey(itemId) { return `${DRAFT_PREFIX}${questionnaireCode}_${itemId}`; }
+function clearCompletedFinal() {
+  try { sessionStorage.removeItem(COMPLETED_PREFIX + storageScope); } catch { /* 忽略 */ }
+}
+// 草稿同样按 storageScope 分桶：真实问卷用短码互不串；预览用本次预览会话，
+// 上一次预览里没提交的草稿不会跑到下一次预览（更不会跨问卷）。
+function draftKey(itemId) { return `${DRAFT_PREFIX}${storageScope}_${itemId}`; }
 function saveDraft(itemId, map) {
   try {
     const empty = Object.values(map || {}).every((v) => !String(v || '').trim());
@@ -851,7 +867,14 @@ function startHeartbeat() {
   }, 60 * 1000);
 }
 
-// 退出重进的确认卡片：返回 'continue' | 'restart'
+// 退出重进的确认卡片：返回 'continue' | 'restart'（跳题打断时返回 'cancel'，见 cancelResumeCard）
+let resumeResolve = null;
+// 跳题会把整条聊天流换掉，重进卡片随之消失：此时必须把这次「继续作答？」作废，
+// 否则 init 里的 await 永远不会返回，恢复流程会挂在半路。
+function cancelResumeCard() {
+  const done = resumeResolve;
+  if (done) done('cancel');
+}
 function renderResumeCard(boot) {
   // 口径 = 题号（与卡面「第 N 题」一致）：知情同意 / 确认页 / 结束说明不占题号
   const current = Number(boot.currentQno) || 0;
@@ -871,23 +894,28 @@ function renderResumeCard(boot) {
   $stream.appendChild(card);
   scrollToBottom(false);
   return new Promise((resolve) => {
-    goOn.onclick = () => { card.remove(); resolve('continue'); };
-    restart.onclick = () => { restart.disabled = true; goOn.disabled = true; card.remove(); resolve('restart'); };
+    const done = (value) => { resumeResolve = null; resolve(value); };
+    resumeResolve = done;
+    goOn.onclick = () => { card.remove(); done('continue'); };
+    restart.onclick = () => { restart.disabled = true; goOn.disabled = true; card.remove(); done('restart'); };
   });
 }
 
 // 作废当前会话并从头开始（重做 / 重进卡片里的「重新开始」共用）
 async function abandonAndRestart() {
+  beginFreshStream();                              // 整屏重来：上一步没播完的续集立即收手
   try {
     if (state.sessionId) {
       await api(finishUrl(), { method: 'POST', body: stepBody({ sessionId: state.sessionId, abandon: true }) });
     }
   } catch { /* 作废失败也继续重开：旧会话已留档 */ }
+  hidePage();                                      // 终态页 / 知情同意页这类整页覆盖层：重开时一并撤掉
   clearStoredSession();
   clearSeen();
+  clearCompletedFinal();                           // 上一份的终态记录作废（否则之后再刷新会把它翻出来）
   try {
     Object.keys(localStorage)
-      .filter((k) => k.startsWith(`${DRAFT_PREFIX}${questionnaireCode}_`))
+      .filter((k) => k.startsWith(`${DRAFT_PREFIX}${storageScope}_`))
       .forEach((k) => localStorage.removeItem(k));
   } catch { /* 忽略 */ }
   $stream.replaceChildren();
@@ -899,6 +927,22 @@ async function abandonAndRestart() {
   state.showAnswered = true;
   refreshAnsweredBtn();
   await startSession();
+}
+
+// 「重做」入口（顶栏按钮 / 终态页按钮共用）：确认后作废当前会话，从知情同意页重新开始。
+// fromFinal = 从终态页点的：此时本次作答已经完成落库，重做只是再开一份新记录，旧记录不会被动（作废只作用于进行中的会话）。
+function requestRedo(fromFinal) {
+  openConfirm({
+    title: '重做本问卷',
+    text: fromFinal
+      ? '将从头开始一份新的作答（从知情同意页重新填写）；刚才那份已完成的记录会原样保留在数据页与导出里。确定重做吗？'
+      : '本次作答会被标记为「作废」并从头开始（记录仍留档，但默认不出现在数据页与导出里）。确定要重做吗？',
+    okLabel: '重做',
+    onOk: async () => {
+      $btnRedo.disabled = true;
+      try { await abandonAndRestart(); } finally { $btnRedo.disabled = false; }
+    }
+  });
 }
 
 // 时间已到：直接停止作答，然后提示可以点顶部的「重做」。
@@ -983,10 +1027,13 @@ function renderDoneCard(item, echo) {
   return root;
 }
 
-// 按 replay 重建聊天流：seenMsgs 之前的消息秒显，之后（没看完的）继续逐字补播
+// 按 replay 重建聊天流：seenMsgs 之前的消息秒显，之后（没看完的）继续逐字补播。
+// 逐条对世代号：重建途中若被跳题 / 重开会话打断，立刻停手，剩下的交给新的那次渲染。
 async function renderReplay(replay, seenMsgs) {
+  const epoch = streamEpoch;
   let msgIndex = 0;
   for (const entry of replay || []) {
+    if (epoch !== streamEpoch) return msgIndex;
     if (entry.kind === 'message') {
       if (msgIndex < seenMsgs) {
         appendAiMessageStatic(entry.content, entry.thinking, entry.thinkMs);
@@ -1119,13 +1166,15 @@ function renderConfirmInline(action) {
     state.questionNodes.delete(action.itemId);
     state.answeredCount += 1;
     refreshAnsweredBtn();
+    const gen = streamEpoch;                 // 提交时的世代：期间被跳题打断就不再把旧结果写屏
     try {
       const res = await api(stepUrl(), {
         method: 'POST',
         body: stepBody({ sessionId: state.sessionId, ack: true, elapsedMs: Math.round(performance.now() - (state.actionShownAt || performance.now())) })
       });
-      await afterStep(action, '', res);
+      await afterStep(action, '', res, gen);
     } catch (err) {
+      if (gen !== streamEpoch) return;
       if (err.code === 'session_closed') { state.completed = true; showFinalPage(action); return; }
       appendAiMessageStatic('提交失败，请稍后重试。');
     } finally {
@@ -1360,10 +1409,12 @@ async function submit(action, payload) {
   state.answeredCount += 1;
   delete state.draft[action.itemId];
   clearDraft(action.itemId);
+  const gen = streamEpoch;                       // 提交时的世代：期间被跳题打断就不再把旧结果写屏
   try {
     const res = await postStep({ sessionId: state.sessionId, ...payload, elapsedMs });
-    await afterStep(action, echo, res);
+    await afterStep(action, echo, res, gen);
   } catch (err) {
+    if (gen !== streamEpoch) return;
     if (err.code === 'session_closed') { state.completed = true; showFinalPage(action); return; }
     // 提交晚于服务端关闭的窗口：这一笔不会被记录，本题即停止作答（不再自动提交 / 不再开新窗口）
     if (err.code === 'window_closed') { appendAiMessageStatic(STOPPED_HINT); return; }
@@ -1404,11 +1455,12 @@ function applyPayload(payload) {
     pageHandler = async () => {
       if ($pageCheck.checked === false && !$pageCheckWrap.classList.contains('hidden')) return;
       hidePage();
+      const gen = streamEpoch;
       const res = await api(stepUrl(), {
         method: 'POST',
         body: stepBody({ sessionId: state.sessionId, consent: true, text: $pageIdInput.value.trim(), elapsedMs: 800 })
       });
-      afterStep(action, '', res);
+      afterStep(action, '', res, gen);
     };
     return;
   }
@@ -1422,9 +1474,10 @@ function applyPayload(payload) {
 
   // 结束说明是终态页：没有按钮，自动确认收尾（会话转为已完成），再由 showFinalPage 渲染终态
   if (action.type === 'debrief') {
+    const gen = streamEpoch;
     api(stepUrl(), { method: 'POST', body: stepBody({ sessionId: state.sessionId, ack: true, elapsedMs: 800 }) })
-      .then((res) => afterStep(action, '', res))
-      .catch(() => showFinalPage(action));
+      .then((res) => afterStep(action, '', res, gen))
+      .catch(() => { if (gen === streamEpoch) showFinalPage(action); });
     return;
   }
 
@@ -1432,10 +1485,15 @@ function applyPayload(payload) {
   scrollToBottom(false);  // 瞬时贴底：与进入动画同帧完成，不会「先闪一下再滚」
 }
 
-// 提交后的统一处理：渲染新消息 → 推进到下一题 / 结束
-async function afterStep(action, echo, res) {
+// 提交后的统一处理：渲染新消息 → 推进到下一题 / 结束。
+// gen = 提交那一刻的聊天流世代号：跳题 / 重开会话会让它失效，此时这条续集必须原地收手
+//（消息、下一题卡都不再写屏——新的一次渲染已经接管了聊天流）。
+async function afterStep(action, echo, res, gen) {
+  const epoch = gen == null ? streamEpoch : gen;
+  const stale = () => epoch !== streamEpoch;
   // 重复 / 迟到的提交被服务端忽略：静默同步到最新进度即可，不要当成失败
   if (res.ignored) {
+    if (stale()) return;
     applyPayload(res);
     scrollToBottom(true);
     return;
@@ -1445,15 +1503,18 @@ async function afterStep(action, echo, res) {
   // 清屏点（题目上或消息上）：先清空聊天流，再呈现清屏点之后的新内容（顺序不能反）
   if (res.clearStream) clearStream();
   for (const m of res.messages) {
+    if (stale()) return;
     if (m.role !== 'assistant') continue;
     await appendAiMessageAnimated(m.content, { thinkMs: m.think_ms, typeMs: m.type_ms }, m.thinking);
     appended += 1;
   }
+  if (stale()) return;
   if (appended) storeSeen((state.seenMsgs || 0) + appended);
   if (res.session.status === 'completed') {
     state.completed = true;
     state.action = null;
     await sleep(320);
+    if (stale()) return;
     showFinalPage(action);
     return;
   }
@@ -1537,16 +1598,17 @@ function renderFinalPage(title, html) {
   showPage({
     title: title || '实验说明',
     html: html || '本次全部任务已完成，感谢您的参与！',
-    hideButton: true
+    button: '重做本问卷'
   });
   $pageCheckWrap.classList.add('hidden');
-  pageHandler = null;
+  // 终态页给一个「重做」入口：答完/预览走完后想再来一遍，不必依赖刷新或关标签页
+  pageHandler = () => requestRedo(true);
   // 收尾小字（「本次实验已结束，您可以关闭本页面。」）已并入结束说明正文，由作者在管理端编辑，不再硬编码
   $pageHint.textContent = '';
   $pageHint.classList.add('hidden');
 }
 
-// 结束说明页（终态）：不放按钮，只提示可以关闭。
+// 结束说明页（终态）：给一个「重做」按钮（本次记录已落库，重做另起一份新记录）。
 // 同时清掉本机会话记录——填完即视为释放设备；终态内容另存 sessionStorage，
 // 供同一标签页刷新时复原（关掉标签页后即消失，重开链接回到开始页）。
 function showFinalPage(lastAction) {
@@ -1563,7 +1625,12 @@ function showFinalPage(lastAction) {
 /* ---------------------------------------------------------------- 初始化 */
 
 // 预览桥：管理端手机预览（同源 iframe）通过它改倍速、拖进度，而不用重建会话
+// 跳题 = 整屏重来：先换代（让上一步没播完的续集收手），再把界面上的临时状态全部复位。
 async function rerenderFromPayload(payload) {
+  beginFreshStream();
+  cancelResumeCard();                              // 重进卡片还挂着：作废（否则恢复流程的 await 永不返回）
+  hidePage();                                      // 知情同意 / 结束说明这类整页覆盖层要撤掉（否则跳过去也点不到题）
+  state.completed = false;                         // 从结束页跳回中间：服务端会话已被 seek 复活，客户端同步解除「已完成」
   $stream.replaceChildren();
   state.questionNodes.clear();
   state.draft = {};
@@ -1626,18 +1693,26 @@ if (IS_PREVIEW) {
       await rerenderFromPayload(res);
       return true;
     },
+    // 从头重做这次模拟（管理端预览栏的「重做」按钮）：作废当前会话、回到知情同意页重新开始
+    restart: async () => {
+      await abandonAndRestart();
+      return true;
+    },
     // 销毁本预览（管理端点「刷新预览」前会调）
     destroy: () => api('/api/preview/destroy', { method: 'POST', body: { previewId } }).catch(() => {})
   };
 }
 
 async function startSession() {
+  const gen = beginFreshStream();                       // 换代：上一个会话没播完的续集就此收手
   const created = await api(createSessionUrl(), { body: createSessionBody() });
+  if (gen !== streamEpoch) return;                      // 期间被跳题 / 重开打断：这次开局的负载已经过期
   state.sessionId = created.session.id;
   storeSession(created.session.id);
   startHeartbeat();
   clearSeen();                                            // 新会话：从零开始逐字呈现
   await renderReplay(created.replay || [], 0);
+  if (gen !== streamEpoch) return;
   applyPayload(created);
 }
 
@@ -1646,25 +1721,37 @@ async function init() {
     showError('链接无效：缺少问卷参数，请使用管理端复制的问卷链接进入。');
     return;
   }
+  const gen = streamEpoch;
   try {
     const sid = loadStoredSession();
-    // 本标签页刚做完：刷新仍看终态页（关掉标签页后 sessionStorage 清空，重开链接即回到开始页）
-    const done = forceFresh ? null : loadCompletedFinal();
+    // 本标签页刚做完：刷新仍看终态页（关掉标签页后 sessionStorage 清空，重开链接即回到开始页）。
+    // 预览例外：预览是作者的试填工具，做完后再刷新 / 再进来一律**强制重进**（从头再走一遍），
+    // 不能被上次的终态页锁住（那种「刷新也进不去」正是它引出来的）。
+    if (IS_PREVIEW) clearCompletedFinal();
+    const done = forceFresh || IS_PREVIEW ? null : loadCompletedFinal();
     if (!sid && done) {
       renderFinalPage(done.title, done.text);
       return;
     }
     const boot = await api(bootstrapUrl(sid));
+    if (gen !== streamEpoch) return;
     if (boot.session) {
       state.sessionId = boot.session.id;
       storeSession(boot.session.id);
       startHeartbeat();
-      if (boot.session.status === 'completed') { state.completed = true; showFinalPage(null); return; }
+      if (boot.session.status === 'completed') {
+        if (IS_PREVIEW) { clearStoredSession(); await startSession(); return; }   // 预览：已完成 → 整份重来
+        state.completed = true;
+        showFinalPage(null);
+        return;
+      }
       // 退出重进：先给一张卡片确认（继续作答 / 重新开始），不再静默续做
       const choice = await renderResumeCard(boot);
       if (choice === 'restart') { await abandonAndRestart(); return; }
+      if (choice !== 'continue') return;             // 被跳题打断：界面已由那次跳转接管
       // 重建聊天流：已看完的秒显，没看完的继续逐字补播（已作答题目一并还原）
       await renderReplay(boot.replay || [], loadSeen());
+      if (gen !== streamEpoch) return;               // 补播被打断：恢复流程作废，不再渲染过期负载
       scrollToBottom(false);
       applyPayload(boot);
       return;
@@ -1705,16 +1792,6 @@ $confirmOk.addEventListener('click', async () => {
 });
 
 // 重做：作废当前会话（数据留档、导出默认排除）、清除本机草稿，回到知情同意页重新开始
-$btnRedo.addEventListener('click', () => {
-  openConfirm({
-    title: '重做本问卷',
-    text: '本次作答会被标记为「作废」并从头开始（记录仍留档，但默认不出现在数据页与导出里）。确定要重做吗？',
-    okLabel: '重做',
-    onOk: async () => {
-      $btnRedo.disabled = true;
-      try { await abandonAndRestart(); } finally { $btnRedo.disabled = false; }
-    }
-  });
-});
+$btnRedo.addEventListener('click', () => requestRedo(false));
 
 init();

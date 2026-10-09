@@ -408,6 +408,19 @@ function buildReplay(session, plan, st = store) {
   return replay;
 }
 
+// 进度以「题号」报（卡面就是题号）：停在知情同意 / 确认页这类不占题号的单元时，报它之后的第一个题号。
+// 提交（/api/step）与整包负载（sessionPayload）共用同一份口径——少了它，预览的进度条 / 题号框
+// 每答完一题就慢一拍（屏幕已到下一题，进度还停在上一步的题号上）。
+function currentQnoFor(plan, action) {
+  const totalQuestions = plan.units.filter((u) => u.qno > 0).length;
+  if (!action) return totalQuestions;
+  const idx = plan.units.findIndex((u) => u.item.id === action.itemId);
+  for (let i = Math.max(0, idx); i < plan.units.length; i += 1) {
+    if (plan.units[i].qno > 0) return plan.units[i].qno;
+  }
+  return totalQuestions;
+}
+
 function sessionPayload(session, st = store) {
   const plan = parseSession(session, st);
   const completedCount = st.countAnswerUnits(session.id);
@@ -415,17 +428,6 @@ function sessionPayload(session, st = store) {
   const clearSeq = Number(session.clear_seq) || 0;
   const action = session.status === 'completed' ? null : computeAction(session, plan, completedCount, Date.now(), st);
   const totalQuestions = plan.units.filter((u) => u.qno > 0).length;
-  // 进度以「题号」报（卡面就是题号）：停在知情同意 / 确认页这类不占题号的单元时，报它之后的第一个题号
-  let currentQno = 0;
-  if (action) {
-    const idx = plan.units.findIndex((u) => u.item.id === action.itemId);
-    for (let i = Math.max(0, idx); i < plan.units.length; i += 1) {
-      if (plan.units[i].qno > 0) { currentQno = plan.units[i].qno; break; }
-    }
-    if (!currentQno) currentQno = totalQuestions;
-  } else {
-    currentQno = totalQuestions;
-  }
   return {
     session: sessionBrief(session),
     messages: st.listVisibleMessages(session.id, nowIsoStr, clearSeq),
@@ -435,7 +437,7 @@ function sessionPayload(session, st = store) {
     totalItems: plan.items.length,
     totalAnswers: plan.units.length,                    // 作答单元数（含知情同意 / 确认页 / 结束说明）
     totalQuestions,                                     // 真实题数（进度条分母按这个来）
-    currentQno,                                         // 当前「第几题」（progress 用）
+    currentQno: currentQnoFor(plan, action),            // 当前「第几题」（progress 用）
     answeredCount: completedCount,
     timeScale: (st && Number(st.timeScale) > 0) ? Number(st.timeScale) : 1
   };
@@ -718,6 +720,7 @@ async function applyStep(st, sessionId, body) {
       answeredCount: nextCount,
       totalAnswers: plan.units.length,
       totalQuestions: nextPlan.units.filter((u) => u.qno > 0).length,   // 真实题数（进度条分母）
+      currentQno: currentQnoFor(nextPlan, nextAction),                  // 当前「第几题」（进度条 / 题号框）
       timeScale: (st && Number(st.timeScale) > 0) ? Number(st.timeScale) : 1
     }
   };

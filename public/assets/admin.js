@@ -2008,6 +2008,23 @@ function editorShell({ title, backHash, saveLabel, hint, body, phoneTitle, withT
   refreshBtn.type = 'button';
   refreshBtn.title = '同步编辑内容并从头试填（预览不落库）';
   bar.appendChild(refreshBtn);
+  // 重做：不等整页刷新，直接把这次模拟从头再走一遍（作废当前预览会话，回到知情同意页）
+  const redoPvBtn = el('button', 'mini-btn', '↺ 重做');
+  redoPvBtn.type = 'button';
+  redoPvBtn.title = '把这次模拟从头再走一遍（作废当前预览会话，回到知情同意页；题目内容不变）';
+  redoPvBtn.addEventListener('click', async () => {
+    warnIfStale();
+    const b = previewCtl.bridge();
+    if (!b) { toast('预览还没就绪，稍等一下再重做'); return; }
+    try {
+      if (b.restart) await b.restart();
+      else { const u = previewCtl.url || frame.src; if (u) frame.src = u; }   // 老版本桥：退化成重载
+      previewCtl.syncScrub();
+    } catch (err) {
+      toast(err.message || '重做失败，请重试');
+    }
+  });
+  bar.appendChild(redoPvBtn);
   if (withTrial) {
     // 倍速：弹字 / 思考面板 / 门控计时**一起**按倍速加速，切换时只改速度、不重建会话
     const speedSel = el('select', 'pv-speed');

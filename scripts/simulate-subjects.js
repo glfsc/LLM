@@ -58,6 +58,8 @@ function answerBody(action, subject, seed) {
   const pick = (n) => 1 + ((subject * 3 + seed) % n);
   switch (action.type) {
     case 'gate': return { consent: true };
+    // 阅读确认页（如「用户阅读AI反馈」）：服务端要的是 ack，漏了会被拒（invalid_answer）
+    case 'confirm': return { ack: true };
     case 'debrief': return { ack: true };
     case 'rating': return { value: 1 + ((subject * 2 + seed) % 5) };
     case 'single': return { value: pick(action.options.length) };

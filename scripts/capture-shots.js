@@ -380,6 +380,82 @@ async function main() {
   hardCheck(/1–\d+ 之间的题号|1-\d+ 之间的题号/.test(jumpBox.invalidToast || ''),
     '预览：题号超范围时给出提示且不跳转',
     '提示「' + (jumpBox.invalidToast || '') + '」');
+  // 批次6：跳题打断「正在逐字播放的消息」 —— 上一步没播完的消息、以及它的下一题卡，
+  // 都不得串进新聊天流。用户报的现象：跳到第 5 题作答后，开场材料又在第六题下方重播一遍，
+  // 最后还冒出一张等着作答的「第 1 题」旧卡（旧那一步的渲染续集没被取消）。
+  const raceJump = JSON.parse(await evaluate(`(async () => {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const w = document.querySelector('.phone-frame').contentWindow;
+    const b = w.__preview;
+    const d = w.document;
+    if (!b) return JSON.stringify({ ok: false });
+    const seekQuestion = (qno) => (b.seekQuestion ? b.seekQuestion(qno) : b.seek(qno - 1));
+    const snap = () => [...d.querySelectorAll('#chat-stream > *')].map((n) => n.className + '|' + (n.textContent || '').replace(/\\s+/g, '').slice(0, 12));
+    await b.setSpeed(20);                        // 20×：材料仍在逐字播放，但整段几秒内跑完——旧续集要串屏也落在这几秒
+    await seekQuestion(0);                       // 回到知情同意（seek 0 = 不合成任何作答，直接停在第一页）
+    await sleep(600);
+    const pageUp = !d.getElementById('page-screen').classList.contains('hidden');
+    const cb = d.getElementById('page-check');
+    if (cb && !cb.checked) { cb.checked = true; cb.dispatchEvent(new Event('change', { bubbles: true })); }
+    const idIn = d.getElementById('page-id-input');
+    if (idIn && !idIn.value) { idIn.value = 'RACE-01'; idIn.dispatchEvent(new Event('input', { bubbles: true })); }
+    d.getElementById('page-btn').click();        // 答知情同意 → 开场材料开始逐字播放
+    let sawCursor = false;
+    for (let i = 0; i < 160 && !sawCursor; i += 1) { sawCursor = !!d.querySelector('.type-cursor'); if (!sawCursor) await sleep(25); }
+    await seekQuestion(5);                       // 播放中跳题：旧续集必须就此收手
+    const afterSeek = snap();
+    await sleep(4000);                           // 观察窗：旧续集若还活着，会在这段时间里补旧消息 / 补旧题卡
+    const later = snap();
+    const pendings = [...d.querySelectorAll('#chat-stream .qcard.pending, #chat-stream .qmsg.pending')].map((n) => (n.querySelector('.qnum') || {}).textContent || '');
+    const staleOldCard = [...d.querySelectorAll('#chat-stream .qcard.pending, #chat-stream .qmsg.pending')]
+      .some((n) => /第\\s*1\\s*题/.test((n.querySelector('.qnum') || {}).textContent || ''));
+    await b.setSpeed(1);
+    return JSON.stringify({ ok: true, pageUp, sawCursor, stable: JSON.stringify(afterSeek) === JSON.stringify(later),
+      pendings, staleOldCard, nodes: afterSeek.length, qno: b.currentQno ? b.currentQno() : 0 });
+  })()`));
+  hardCheck(raceJump.ok && raceJump.sawCursor && raceJump.stable && raceJump.pendings.length === 1 && !raceJump.staleOldCard,
+    '预览：播放中跳题后，旧消息 / 旧题卡不会串进新聊天流（只留目标题一张待作答卡）',
+    raceJump.ok ? ('播放中跳题 → 4 秒内流内 ' + raceJump.nodes + ' 个节点保持不变 · 待作答卡 ' + JSON.stringify(raceJump.pendings))
+      : '预览桥不可用');
+  // 批次7：预览做完后刷新，必须**强制重进**（回到知情同意页从头再走），不能被上一份的终态页锁住 ——
+  // 终态记录早先按「问卷短码」分桶，而预览没有短码（空串），于是所有预览共用一个键：
+  // 做完一份预览再刷新 / 再开另一组问卷的预览，都会停在上一份的终态页，进不去也刷不掉。
+  const reenterPv = JSON.parse(await evaluate(`(async () => {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const w = document.querySelector('.phone-frame').contentWindow;
+    const b = w.__preview;
+    const d = w.document;
+    if (!b) return JSON.stringify({ ok: false });
+    const seekQuestion = (qno) => (b.seekQuestion ? b.seekQuestion(qno) : b.seek(qno - 1));
+    const title = () => (d.getElementById('page-title') || {}).textContent || '';
+    const pageUp = () => { const sc = d.getElementById('page-screen'); return !!sc && !sc.classList.contains('hidden'); };
+    await b.setSpeed(1);                           // 走查版问卷把作答窗口压成 5 秒；20× 下只剩 0.25 秒会在作答前就超时停止，这里用 1×
+    await seekQuestion(Math.max(1, (b.totalQuestions ? b.totalQuestions() : b.total()) || 1));   // 跳到最后一道题
+    await sleep(400);
+    const input = d.getElementById('composer-input');
+    const card = d.querySelector('.qcard.pending');
+    if (card) {                                    // 题卡式：点一个选项再提交
+      const btn = [...card.querySelectorAll('.rating-btn, .option-btn')][0];
+      if (btn) btn.click();
+      const submit = card.querySelector('.primary-btn');
+      if (submit && !submit.disabled) submit.click();
+    } else if (input) {                            // 消息式：在底部输入框作答
+      input.value = '终态自检用的一句话';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      const send = d.getElementById('composer-send');
+      if (send && !send.disabled) send.click();
+    }
+    let ended = false;
+    for (let i = 0; i < 60 && !ended; i += 1) { await sleep(100); ended = pageUp() && !/知情同意/.test(title()); }
+    const endTitle = title();
+    const src = w.location.href;
+    await new Promise((resolve) => { w.location.reload(); setTimeout(resolve, 1200); });   // 刷新预览页
+    for (let i = 0; i < 40; i += 1) { await sleep(100); if (pageUp()) break; }
+    return JSON.stringify({ ok: true, ended, endTitle, src, backTitle: title(), backIsConsent: /知情同意/.test(title()) });
+  })()`));
+  hardCheck(reenterPv.ok && reenterPv.ended && reenterPv.backIsConsent,
+    '预览：做完后刷新强制重进（回到知情同意页，不再被终态页锁住）',
+    reenterPv.ok ? ('终态「' + reenterPv.endTitle + '」→ 刷新后「' + reenterPv.backTitle + '」') : '预览桥不可用');
   const pvOk = pvBridge.ok && pvBridge.kept && pvBridge.qno1 === 3 && pvBridge.cardQno === 3 && pvBridge.speedNow === 5;
   hardCheck(pvBridge.speedNow === 5, '预览：改倍速后客户端立刻拿到新倍速（倒计时与弹字都按它加速）', 'speed=' + pvBridge.speedNow);
   console.log('预览进度/倍速：会话共 ' + pvBridge.totalQ + ' 题（' + pvBridge.total + ' 个作答单元）· 跳到第 3 题后卡面显示第 ' + pvBridge.cardQno + ' 题（作答卡 ' + pvBridge.done1 + '）'
@@ -730,21 +806,25 @@ async function main() {
     }
   }  await sleep(800);
   if (!seen.includes('SHOT-DEBRIEF')) await shot('v6-15-chat-debrief');
-  // 结束页：终态不放按钮，只提示可以关闭（填完即释放设备，下次打开链接回到开始页）
+  // 结束页：终态只留一个「重做」按钮（填完即释放设备；想再来一遍不必刷新或关标签页）
   const finalInfo = JSON.parse(await evaluate(`(() => {
     const b = document.getElementById('page-btn');
+    const others = [...document.querySelectorAll('#page-screen button')].map((x) => x.textContent.trim());
     return JSON.stringify({
       visible: !document.getElementById('page-screen').classList.contains('hidden'),
       buttonHidden: b.classList.contains('hidden'),
+      buttonText: b.textContent.trim(),
+      buttons: others,
       hint: document.getElementById('page-hint').textContent,
       body: document.getElementById('page-text').textContent,
       title: document.getElementById('page-title').textContent
     });
   })()`));
   // 收尾小字（「可以关闭本页面」）现在是结束说明正文的一部分，由作者在管理端编辑
-  console.log('结束页终态：' + (finalInfo.visible && finalInfo.buttonHidden && /关闭/.test(finalInfo.body)
-    ? `无按钮 · 标题「${finalInfo.title}」· 正文含收尾提示 ✔`
-    : `不符合预期 ✘（按钮隐藏=${finalInfo.buttonHidden}，正文=「${String(finalInfo.body).slice(0, 40)}」）`));
+  const finalOk = finalInfo.visible && !finalInfo.buttonHidden && /重做/.test(finalInfo.buttonText) && finalInfo.buttons.length === 1;
+  hardCheck(finalOk && /关闭/.test(finalInfo.body),
+    '结束页终态只留一个「重做」按钮（想再来一遍不必刷新或关标签页）',
+    `按钮=${JSON.stringify(finalInfo.buttons)} · 标题「${finalInfo.title}」`);
   if (finalInfo.visible) await shot('v6-22-chat-final');
   const done = await evaluate('JSON.stringify({ answered: state.answeredCount, total: state.totalAnswers, completed: state.completed })');
   // issue 5：每道新题出现时，滚动位置是否落在「本轮新增内容的开头」（内容不足一屏则贴底也算合格）
