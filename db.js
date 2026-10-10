@@ -9,6 +9,16 @@ const { randomUUID, randomBytes, scryptSync, timingSafeEqual } = require('node:c
 const path = require('node:path');
 // 富文本清洗 / 互转（与浏览器共用同一份实现，见 public/assets/richtext.js）
 const RT = require('./public/assets/richtext.js');
+// 实验材料文案：数据层只管存取与排版，文案集中在 seed-content.js（改文案不必动 db.js）
+const {
+  TASK_INFO, REQUIRE_HIGH, REQUIRE_LOW, CREATE_INTRO, CREATE2_GUIDE, CREATE2_INTRO,
+  FEEDBACK_TEXT, FEEDBACK_THINKING,
+  AGREEMENT_ANCHOR, FAIRNESS_ANCHOR,
+  GOAL_CLARITY, FAIRNESS, VALENCE, META_PROCESS, TASK_PROCESS,
+  GATE_TEXT, GATE_CHECK, GATE_BUTTON,
+  GATE_VARIANT, GATE_ID_LABEL, GATE_ID_PLACEHOLDER,
+  DEBRIEF_TEXT, DEBRIEF_CLOSING
+} = require('./seed-content');
 
 const DB_PATH = path.join(__dirname, 'data.db');
 const db = new DatabaseSync(DB_PATH);
@@ -186,8 +196,33 @@ const ITEM_VARIANTS = {
   gate: [
     { key: 'gate', label: '知情同意页（仅勾选同意）' },
     { key: 'gateId', label: '知情同意页（需填被试编号）' }
+  ],
+  text: [
+    { key: 'text', label: '文本题（自由作答）' },
+    { key: 'textMatch', label: '文本题（需输入指定内容）' }
   ]
 };
+
+// 文本题的两种形态（题型仍是一个 text，只有形态差异）：
+//   free  = 自由作答（默认，不落库）
+//   match = 需输入指定内容：被试在底部输入框里输入的正文要与「标准答案」一致才能发送出去；
+//           空 / 不一致时只在输入框旁提示（提示文案自定义，默认「答案错误」），这一笔不落库
+// 「答案错误」的兜底文案：题目没填提示文案时用它（题目填了就以题目的为准）
+const MATCH_ERROR_DEFAULT = '答案错误';
+// 比对键：忽略大小写与所有空白（首尾、中间、全角空格都算）——被试多打一个空格不该被判错
+const matchKey = (s) => String(s ?? '').replace(/\s+/g, '').toLowerCase();
+// 标准答案一行一个：任一行匹配即通过（可写「我已完成阅读」+「已完成阅读」这类等价写法）
+function matchAnswerLines(item) {
+  return String((item && item.answer) || '').split('\n').map((x) => x.trim()).filter(Boolean);
+}
+function matchesAnswer(item, text) {
+  const key = matchKey(text);
+  return !!key && matchAnswerLines(item).some((line) => matchKey(line) === key);
+}
+// 断言失败时给被试看的文案（题目自定义 → 兜底默认）
+function matchErrorText(item) {
+  return String((item && item.errorText) || '').trim() || MATCH_ERROR_DEFAULT;
+}
 
 // 各题型可添加的参数（题目下方「参数区」里按需添加，没添加就整块不显示）
 // 消息类题目额外可配 AI 思考时长与流式输出速度；refresh = 呈现该题前清空聊天流（刷新点）
@@ -213,7 +248,7 @@ const LIMIT_META = {
   wait: { label: '作答前强制等待', unit: '秒', hint: '需先停留 N 秒才能作答（如强制阅读）' },
   minSubmit: { label: '最短提交时间', unit: '秒', hint: '提交前的最短等待' },
   maxAnswer: { label: '最长作答时间', unit: '秒', hint: '到点自动提交已输入内容' },
-  thinkMs: { label: 'AI 思考时长', unit: '毫秒', hint: '该消息配了思考内容时为「深度思考面板」时长；未配则只是「正在思考」转圈时长。0 = 不显示', group: 'rhythm' },
+  thinkMs: { label: 'AI 思考时长', unit: '毫秒', hint: '该消息配了思考内容时就是「深度思考面板」的时长（在「思考过程」行里改，单位是秒）；未配思考稿时只是「正在思考」转圈时长。0 = 不显示', group: 'rhythm' },
   typeMs: { label: '流式输出速度', unit: '毫秒/字', hint: '每字间隔；0 = 立即整段显示（数值越小越快）', group: 'rhythm' }
 };
 // 各参数的默认值与取值范围（门控以秒计，节奏以毫秒计，刷新点为 0/1）
@@ -222,7 +257,7 @@ const LIMIT_SPEC = {
   wait: { def: 0, min: 0, max: 86400 },
   minSubmit: { def: 0, min: 0, max: 86400 },
   maxAnswer: { def: 0, min: 0, max: 86400 },
-  thinkMs: { def: 420, min: 0, max: 10000 },
+  thinkMs: { def: 20000, min: 0, max: 60000 },
   typeMs: { def: 11, min: 0, max: 500 }
 };
 // 未配置任何参数时的生效值（服务端与两个前端共用同一份，避免兜底路径分叉）
@@ -299,6 +334,13 @@ function normalizeItem(raw, index) {
     item.rows = toClampedInt(src.rows, 1, 1, 12);
     item.maxLen = toClampedInt(src.maxLen, 0, 0, 5000);
     item.placeholder = String(src.placeholder ?? '');
+    // 二级形态「需输入指定内容」：variant 只在 match 时落库（free 是默认，保持 JSON 干净）
+    if (src.variant === 'match') {
+      item.variant = 'match';
+      item.answer = String(src.answer ?? '').trim();
+      item.errorText = String(src.errorText ?? '').trim();
+      item.required = true;                                 // 有标准答案 = 必答，没有「选填」一说
+    }
   }
   if (type === 'group') {
     // 题组：一个单元内呈现多道子题、一次提交（如「广告语 + 创作说明」）
@@ -313,6 +355,10 @@ function normalizeItem(raw, index) {
       delete sub.level;                                // 层级只属于顶层题目
       delete sub.fromTemplateId;
       delete sub.fromTemplateName;
+      // 「需输入指定内容」是单个文本题的形态：题组里的子题在题组输入框里作答，没有逐子题的断言
+      delete sub.variant;
+      delete sub.answer;
+      delete sub.errorText;
       subs.push(sub);
     });
     item.subs = subs;
@@ -324,8 +370,7 @@ function normalizeItem(raw, index) {
   return item;
 }
 
-// 结束说明的收尾小字：并入正文（可编辑），不再硬编码在被试端
-const DEBRIEF_CLOSING = '本次实验已结束，您可以关闭本页面。';
+// 结束说明的收尾小字（文案见 seed-content.js）：并入正文（可编辑），不再硬编码在被试端
 // 两段文本题组的作答约定：并入题组正文（可编辑），不再硬编码在输入框提示里
 function textSubsHint(item) {
   const subs = Array.isArray(item.subs) ? item.subs : [];
@@ -347,7 +392,7 @@ function richContentOf(type, src, item) {
   if (type === 'gate' || type === 'confirm' || type === 'debrief') {
     const head = title ? `<h1>${RT.escapeText(title)}</h1>` : '';
     let body = text;
-    if (type === 'debrief' && body.trim() && !body.includes('关闭本页面')) body = `${body}\n\n${DEBRIEF_CLOSING}`;
+    if (type === 'debrief' && body.trim() && !body.includes(DEBRIEF_CLOSING)) body = `${body}\n\n${DEBRIEF_CLOSING}`;
     return head + RT.textToHtml(body);
   }
   if (type === 'group') {
@@ -380,28 +425,85 @@ function parseJson(text, fallback) {
   }
 }
 
+// ---------------------------------------------------------------- 正文排版
+// 材料排版（与线上预设问卷一致）：正文小四 16px、小节标题四号 19px。
+// 数据层只在这一处定字号，被试端 CSS 的默认字号也是 16px（两边一致，正文不写死也不会变小）。
+const PX_BODY = 16;                                     // 小四
+const PX_HEAD = 19;                                     // 四号
+
+// 普通正文：整段包在一个 16px 的 span 里（空行 → <br><br>，与手工排版一致）
+function body16(text, opts = {}) {
+  const t = String(text == null ? '' : text).replace(/\r\n/g, '\n').trim();
+  if (!t) return '';
+  const style = `font-size: ${PX_BODY}px${opts.bold ? '; font-weight: bold' : ''}`;
+  return RT.sanitizeHtml(`<p><span style="${style}">${RT.escapeText(t).replace(/\n/g, '<br>')}</span></p>`);
+}
+
+// 分节材料（任务信息 / 任务要求）：首行与「一、二、三…」小节标题四号 19px，其余正文小四 16px
+function materialHtml(text) {
+  const lines = String(text == null ? '' : text).replace(/\r\n/g, '\n').split('\n');
+  const chunks = [];
+  let buf = [];
+  let seenAny = false;                                  // 材料的首行总是标题（如「欢迎参与…」）
+  const flush = () => {
+    if (!buf.length) return;
+    chunks.push({ head: false, html: `<span style="font-size: ${PX_BODY}px">${buf.join('<br>')}</span>` });
+    buf = [];
+  };
+  for (const line of lines) {
+    const t = line.trim();
+    if (!t && !seenAny) continue;
+    const isHeading = !seenAny || /^【.+】$/.test(t) || /^[一二三四五六七八九十]+、/.test(t);
+    if (isHeading) {                                    // 小节标题
+      flush();
+      chunks.push({ head: true, html: `<span style="font-size: ${PX_HEAD}px">${RT.escapeText(t)}</span>` });
+      seenAny = true;
+      continue;
+    }
+    if (!t) {                                           // 空行 = 段落分隔
+      if (buf.length) buf.push('');
+      continue;
+    }
+    buf.push(RT.escapeText(line));
+    seenAny = true;
+  }
+  flush();
+  // 材料首行之后空一行；小节标题前空一行；标题与它的正文之间只断行
+  const html = chunks.map((c, i) => `${i === 0 ? '' : i === 1 || c.head ? '<br><br>' : '<br>'}${c.html}`).join('');
+  return RT.sanitizeHtml(`<p>${html}</p>`);
+}
+
+// 整页正文（知情同意页）：首行当 h3 小标题（加粗由样式表给），其余正文小四 16px
+function gateHtml(text) {
+  const lines = String(text == null ? '' : text).replace(/\r\n/g, '\n').split('\n');
+  const first = (lines.shift() || '').trim();
+  const rest = lines.join('\n').replace(/^\n+/, '').replace(/\s+$/, '');
+  const head = first ? `<h3>${RT.escapeText(first)}</h3>` : '';
+  // 标题与正文之间留一个空行（与线上「知情同意页」的排版一致）
+  const body = rest ? `<p style="font-size: ${PX_BODY}px"><br>${RT.escapeText(rest).replace(/\n/g, '<br>')}</p>` : '';
+  return RT.sanitizeHtml(head + body);
+}
+
+// 结束说明页：标题 + 正文（含收尾小字）
+function debriefHtml(title, text) {
+  return RT.sanitizeHtml(`<h1>${RT.escapeText(title)}</h1>${body16(text)}`);
+}
+
 // ---------------------------------------------------------------- 默认内容
 const DEFAULT_GATE = {
   type: 'gate',
   title: '知情同意说明',
-  text:
-    '您好！非常感谢您参加本次实验！\n\n' +
-    '请您仔细阅读以下信息，并按实验要求完成各项任务。所有任务的答案均无对错之分，您按照自己的真实情况如实填写即可。\n\n' +
-    '实验结束后，您将获得报酬，统一在所有任务完成后发放。您有权在任何时间退出实验且不必承担后果，但中途退出实验将不能获得相应报酬。\n\n' +
-    '本实验所收集的信息将只供科学研究使用，我们将对您的数据进行保密，所涉及的公开发表物不会出现您的身份信息。\n\n' +
-    '如果您勾选并开始作答，即意味着：您已阅读上述信息；您自愿同意参加本次实验，并会认真对待本次实验。否则，请关闭页面退出本实验。',
-  check: '我已阅读上述信息，自愿同意参加本次实验',
-  button: '开始实验'
+  text: GATE_TEXT,
+  html: gateHtml(GATE_TEXT),
+  check: GATE_CHECK,
+  button: GATE_BUTTON
 };
 
 const DEFAULT_DEBRIEF = {
   type: 'debrief',
   title: '实验说明',
-  text:
-    '感谢你参与本次研究。本次研究旨在考察：面对负面信息的时候，个体的创造力会提升还是会下降。\n\n' +
-    '需要向你说明的是：为了保证所有参与者接收到内容完全一致的反馈，你所收到的评价意见及其回应，都是由研究团队预先设定的标准化内容，由系统按统一规则返回，并非针对你个人作品的个性化判断。你所提交的作品已被匿名保存，仅用于学术分析，不会用于任何实际的工作评价。\n\n' +
-    '如果你对本次研究有任何疑问，请通过以下方式联系我们：\n' +
-    '实验组联系方式：周颖 zyingzhou@whut.edu.cn'
+  text: DEBRIEF_TEXT,
+  html: debriefHtml('致谢与事后解释', `${DEBRIEF_TEXT}\n\n${DEBRIEF_CLOSING}`)
 };
 
 // 新建问卷的默认题目：欢迎语（空）、知情同意页、结束语（空）、结束说明页
@@ -431,6 +533,16 @@ function itemDefaults() {
     single: { type: 'single', title: '单选题', options: ['选项 A', '选项 B'], correct: 0 },
     multi: { type: 'multi', title: '多选题', options: ['选项 A', '选项 B', '选项 C'] },
     text: { type: 'text', title: '新文本题', required: true, rows: 1, maxLen: 0, placeholder: '请输入…' },
+    // 文本题二级形态「需输入指定内容」：被试要在底部输入框里原样输入「标准答案」才能发送
+    textMatch: {
+      type: 'text',
+      variant: 'match',
+      title: '阅读材料确认',
+      html: body16(READ_CONFIRM_PROMPT),
+      answer: MATCH_READ_ANSWER,
+      errorText: MATCH_ERROR_DEFAULT,
+      placeholder: `请输入${MATCH_READ_ANSWER}…`
+    },
     // 只给框架：不含预设子题，子题由用户在编辑页自行插入
     group: { type: 'group', title: '新题组', text: '', layout: 'column', subs: [] },
     rank: { type: 'rank', title: '请排序', options: ['项目 1', '项目 2', '项目 3'] }
@@ -441,28 +553,56 @@ function itemDefaults() {
 }
 
 // ---------------------------------------------------------------- 实验文档内容
-// 文案集中在 seed-content.js（数据层只管存取，改文案不必动 db.js）；这里解构出来供种子题目构造使用。
-const {
-  TASK_INFO, REQUIRE_HIGH, REQUIRE_LOW, CREATE_INTRO, CREATE2_GUIDE,
-  FEEDBACK_TEXT, FEEDBACK_THINKING, CREATE2_INTRO,
-  AGREEMENT_ANCHOR, FAIRNESS_ANCHOR, AGREEMENT_SCALE_SPELLED
-} = require('./seed-content');
+// 文案集中在 seed-content.js（数据层只管存取与排版，改文案不必动 db.js）。
 
-// 量表 = 一道指导语消息 + N 道打分题（sectionNo = 附件中的章节号，写进标题便于逐条对照）
-function scaleItems(idPrefix, title, instruction, questions, anchor, sectionNo) {
-  const head = sectionNo ? `${sectionNo} · ${title}` : title;
-  const out = [{ id: `${idPrefix}_intro`, type: 'message', level: 4, title: head, text: instruction }];
-  questions.forEach((q, i) => {
-    out.push({ id: `${idPrefix}_${i + 1}`, type: 'rating', title: q, min: 1, max: 5, anchor });
+// 量表 = 一道指导语消息 + N 道打分题
+//   spec = { title, section, instruction, anchor, questions:[{ title, text }] }
+//   title 是管理端标签（列表 / 大纲），text 才是被试看到的题干，两者按线上数据如实保留。
+function scaleItems(idPrefix, spec, opts = {}) {
+  const head = spec.section ? `${spec.section} · ${spec.title}` : spec.title;
+  const out = [{
+    id: `${idPrefix}_intro`,
+    type: 'message',
+    level: 4,
+    title: head,
+    text: spec.instruction,
+    html: body16(spec.instruction, { bold: !!opts.bold }),
+    ...(opts.limits ? { limits: opts.limits } : {})
+  }];
+  spec.questions.forEach((q, i) => {
+    out.push({ id: `${idPrefix}_${i + 1}`, type: 'rating', title: q.title, html: body16(q.text), min: 1, max: 5, anchor: spec.anchor });
   });
   return out;
+}
+
+// 反馈效价感知（即时操纵检验二）：一行引导语 + 2 道打分题，紧跟在「反馈公平性」之后。
+// 线上这两题是手工插入的（id newmv…），走 LIVE_ITEM_ID_ALIASES 保留原 id，导出列与既有会话对得上。
+function valenceItems() {
+  return [
+    {
+      id: 'valence_intro',
+      type: 'message',
+      title: VALENCE.instruction,
+      text: VALENCE.instruction,
+      html: body16(VALENCE.instruction, { bold: true })
+    },
+    ...VALENCE.questions.map((q, i) => ({
+      id: `valence_${i + 1}`,
+      type: 'rating',
+      title: q.title,
+      html: body16(q.text),
+      min: 1,
+      max: 5,
+      anchor: VALENCE.anchor
+    }))
+  ];
 }
 
 // 创作 = 一道创作指引消息 + 一道单框文本题（广告语与创作说明写在同一框里、一次提交）
 function creationItems(idPrefix, intro, sectionNo, box) {
   const tag = sectionNo ? `${sectionNo} · ` : '';
   return [
-    { id: `${idPrefix}_intro`, type: 'message', title: `${tag}内容创作 · 创作指引`, text: intro },
+    { id: `${idPrefix}_intro`, type: 'message', title: `${tag}内容创作 · 创作指引`, text: intro, html: body16(intro) },
     {
       id: `${idPrefix}_work`,
       type: 'text',
@@ -472,73 +612,70 @@ function creationItems(idPrefix, intro, sectionNo, box) {
       required: true,
       rows: box.rows,
       maxLen: box.maxLen,
-      placeholder: box.placeholder
+      placeholder: box.placeholder,
+      html: body16(box.title)
     }
   ];
 }
 
-// 选择题 / 确认页的正文 = 题干：html 由题干生成（title 只是管理端标签，不呈现给被试）
+// 选择题的正文 = 题干（title 只是管理端标签，不呈现给被试）
 function choiceBody(text) {
-  return { text, html: RT.textToHtml(text) };
+  return { text, html: body16(text) };
 }
 
-// 引导句的呈现：首行加粗放大（管理端给这行设了「加粗 + 小四 16px」），其余行按普通段落
-const HEADLINE_PX = 16;
-function headlineHtml(text) {
-  const lines = String(text == null ? '' : text).replace(/\r\n/g, '\n').split('\n');
-  const first = (lines.shift() || '').trim();
-  const rest = lines.join('\n').replace(/[ \t]+$/, '').replace(/\n+$/, '');
-  const head = `<strong><span style="font-size: ${HEADLINE_PX}px">${RT.escapeText(first)}</span></strong>`;
-  const body = rest ? `<br>${RT.escapeText(rest).replace(/\n/g, '<br>')}` : '';
-  return RT.sanitizeHtml(`<p>${head}${body}</p>`);
+// 「需输入指定内容」的文本题（二级形态）：被试要在底部输入框里输入「标准答案」才能发送。
+// 两道这样的确认题（读完材料 / 读完反馈）在线上问卷里都是这个形态。
+const MATCH_READ_ANSWER = '已完成阅读';
+function textMatchItem(id, title, prompt, limits) {
+  return {
+    id,
+    type: 'text',
+    variant: 'match',
+    title,
+    limits: limits || {},
+    answer: MATCH_READ_ANSWER,
+    errorText: MATCH_ERROR_DEFAULT,
+    placeholder: `请输入${MATCH_READ_ANSWER}…`,
+    rows: 1,
+    maxLen: 0,
+    html: body16(prompt)
+  };
 }
+const READ_CONFIRM_PROMPT = '请确认你已阅读上面的内容，并在下方输入框中输入「已完成阅读」后发送。回复后进入后续实验环节。';
 
-// 组别3 / 组别4 的题目（唯一差异：任务要求文本）
+// 组别3 / 组别4 的题目（唯一差异：任务要求文本 requirementsText）
+//   与线上预设问卷同构：两道「指定答案」的阅读确认题、第 8 节不再重复贴任务信息、思考时长 20 秒。
+const FEEDBACK_THINK_MS = 20000;                        // AI 思考时长（默认 20 秒）
 function experimentItems(requirementsText) {
   return [
-    { id: 'task_info', type: 'message', level: 4, title: TASK_INFO.split('\n')[0], text: TASK_INFO, html: headlineHtml(TASK_INFO) },
-    { id: 'task_req', type: 'message', level: 4, title: '2 · 任务要求', text: requirementsText, html: RT.sectionedHtml(requirementsText) },
-    ...scaleItems('goal_clarity', '目标清晰度测量', '请根据刚才收到的任务材料，评价下列说法与你的实际感受的符合程度。', [
-      '我清楚地知道这项创作任务的目标是什么。',
-      '我对这项任务的具体要求有清晰的理解。',
-      '我知道评价这件作品的标准是什么。',
-      '我清楚自己应该朝着哪个方向努力。',
-      '这项任务的要求是明确而具体的。'
-    ], AGREEMENT_ANCHOR, '3'),
+    { id: 'task_info', type: 'message', level: 4, title: TASK_INFO.split('\n')[0], text: TASK_INFO, html: materialHtml(TASK_INFO) },
+    { id: 'task_req', type: 'message', level: 4, title: '2 · 任务要求', text: requirementsText, html: materialHtml(requirementsText) },
+    // 读完任务材料后先确认已读（输入「已完成阅读」才能继续），再进量表
+    textMatchItem('read_confirm', '阅读材料确认', READ_CONFIRM_PROMPT),
+    ...scaleItems('goal_clarity', GOAL_CLARITY, { bold: true }),
     ...creationItems('create1', CREATE_INTRO, '4', {
-      title: '广告语和创作', limits: { wait: 180, maxAnswer: 300 }, level: 4, rows: 2, maxLen: 0, placeholder: '请输入'
+      title: '广告语和创作', limits: { wait: 120, maxAnswer: 480 }, level: 4, rows: 2, maxLen: 0, placeholder: '请输入'
     }),
-    // 思考面板时长 10 秒（题目覆盖默认的 420ms）；等待由思考面板承担
-    { id: 'feedback', type: 'message', title: '5 · 负面反馈输出', text: FEEDBACK_TEXT, thinking: FEEDBACK_THINKING, limits: { thinkMs: 10000 } },
-    // 反馈之后先清屏并确认已读，再做注意力检测
-    { id: 'feedback_confirm', type: 'confirm', title: '用户阅读AI反馈', limits: { wait: 40 }, ...choiceBody('请你认真阅读反馈后点击确认'), button: '我已阅读完' },
-    { id: 'attention', type: 'single', level: 4, title: '6 · 注意力检测', limits: { refresh: 1 }, ...choiceBody('下面哪一个选项没有在上述反馈中出现？'), options: ['表达不够精炼', '可延展性不足', '格式不符合要求', '与品牌主张的关联停留在表层'], correct: 3 },
-    { id: 'source', type: 'single', level: 4, title: '7 · 反馈来源识别', ...choiceBody('请回想刚才为你提供反馈的是谁？'), options: ['品牌创意组组长 PH', '品牌创意智能评估系统（AI 系统）'], correct: 2 },
-    ...scaleItems('fairness', '反馈公平性', '你如何评价刚才收到的那条关于你作品的反馈？', [
-      '我认为反馈者的评价是公正的。',
-      '我认为这次反馈的内容是客观的。',
-      '我认为反馈者对我的作品做出了合理的判断。',
-      '我认为这次评价没有受到个人偏好的影响。',
-      '我认为这次反馈给了我应得的评价。',
-      '总体而言，我认为这次反馈的处理方式是公平的。'
-    ], FAIRNESS_ANCHOR, '7'),
-    ...scaleItems('meta_process', '元过程测量', `请回想你在这项任务中，尤其是收到反馈之后的感受，选择最符合的程度。${AGREEMENT_SCALE_SPELLED}`, [
-      '我在意这次评价会如何影响别人对我的看法。',
-      '我会反复回想对方这个人是怎么看我的。',
-      '我担心自己的专业能力受到质疑。',
-      '我花了不少心思去想，这次评价对我的形象意味着什么。',
-      '我感觉被评价的是我这个人，而不只是我的作品。'
-    ], AGREEMENT_ANCHOR, '7'),
-    ...scaleItems('task_process', '任务过程测量', '请回想你在收到反馈之后的真实想法与反应，选择最符合的程度。', [
-      '收到反馈后，我更多的是在思考怎样调整我的创作方法。',
-      '我在想有哪些具体的做法可以让我的这条广告语变得更好。',
-      '我试着去分析我的作品与要求之间的差距究竟在哪里。',
-      '我把注意力放在了改进作品的具体策略上。'
-    ], AGREEMENT_ANCHOR, '7'),
-    // 第 8 节：再次完成与开头一模一样的任务（指导语 + 任务信息 + 任务要求 + 创作）
-    { id: 'create2_intro', type: 'message', level: 4, title: '8 · 再次完成一模一样的任务（指导语）', text: CREATE2_INTRO, limits: { refresh: 1 } },
-    { id: 'task_info2', type: 'message', title: '8 · 任务信息（与开头一致）', text: TASK_INFO },
-    { id: 'task_req2', type: 'message', title: '8 · 任务要求（与开头一致）', text: requirementsText, html: RT.sectionedHtml(requirementsText) },
+    // 负面反馈：先以「深度思考面板」逐字呈现思考稿（20 秒），再输出反馈正文
+    { id: 'feedback', type: 'message', title: '5 · 负面反馈输出', text: FEEDBACK_TEXT, html: body16(FEEDBACK_TEXT), thinking: FEEDBACK_THINKING, limits: { thinkMs: FEEDBACK_THINK_MS } },
+    // 反馈之后确认已读（强制停留 30 秒），再做注意力检测
+    textMatchItem('feedback_confirm', '用户阅读确认反馈', READ_CONFIRM_PROMPT, { wait: 30 }),
+    { id: 'attention', type: 'single', level: 4, title: '6 · 注意力检测', limits: { refresh: 1 }, ...choiceBody('请回忆刚刚的反馈内容，下面哪一个选项没有在上述反馈中出现'), options: ['表达不够精炼', '可延展性不足', '格式不符合要求', '与品牌主张的关联停留在表层'], correct: 3 },
+    { id: 'source', type: 'single', level: 4, title: '7 · 反馈来源识别', ...choiceBody('请回想刚才为你提供反馈的是谁？'), options: ['品牌创意组组长小艾', '品牌创意人工智能助手小A'], correct: 2 },
+    ...scaleItems('fairness', FAIRNESS, { bold: true }),
+    ...valenceItems(),
+    // 元过程测量：指导语加粗 + 呈现前清屏（进入这一节先清空聊天流）
+    ...scaleItems('meta_process', META_PROCESS, { bold: true, limits: { refresh: 1 } }),
+    ...scaleItems('task_process', TASK_PROCESS, { bold: true }),
+    // 第 8 节：再次完成一模一样的任务（指导语 + 任务信息 + 任务要求 + 创作）
+    { id: 'create2_intro', type: 'message', level: 4, title: '8 · 再次完成一模一样的任务（指导语）', text: CREATE2_INTRO, html: body16(CREATE2_INTRO), limits: { refresh: 1 } },
+    {
+      id: 'task_req2',
+      type: 'message',
+      title: '8 · 任务要求（与开头一致）',
+      text: `${CREATE2_INTRO}\n任务信息：\n${requirementsText}`,
+      html: RT.sanitizeHtml(`${body16(CREATE2_INTRO)}<p><span style="font-size: ${PX_HEAD}px">任务信息：</span></p>${materialHtml(requirementsText)}`)
+    },
     ...creationItems('create2', CREATE2_GUIDE, '8', {
       title: '广告语和创作说明', limits: { maxAnswer: 300 }, rows: 1, maxLen: 0, placeholder: '再次输入广告语和创作说明'
     })
@@ -1167,18 +1304,39 @@ ensureAdminUser();
 // 预设问卷的题目构成：知情同意页 + 模板题目（整组复制）+ 结束说明页。
 // 不带「欢迎语 / 结束语」两个空占位题：它们留空时会把占位标题（「欢迎语（留空则跳过）」）显示给被试，
 // 实跑的两份问卷里也没有这两题。seed-presets.js 用同一个函数，保证首次运行与手动重建结果一致。
+// 线上手工插入的题目 id（与种子里的规范 id 对应）：线上已有会话的作答按 id 落库，
+// 重建预设问卷时沿用这些 id，既有数据的导出列才对得上号（sync-group-content.js 用同一张表）。
+const LIVE_ITEM_ID_ALIASES = {
+  consent: 'newmuyw7oxr',
+  read_confirm: 'newmv114v4d',
+  feedback_confirm: 'newmv10z3u5',
+  create1_work: 'newmuywh96n',
+  create2_work: 'newmuzp2opk',
+  // 反馈效价感知（2026-10-10 管理端手工插入的两道题 + 引导语）
+  valence_intro: 'newmv278rzw',
+  valence_1: 'newmv279day',
+  valence_2: 'newmv27aa7f'
+};
+const liveItemId = (expId, id) => LIVE_ITEM_ID_ALIASES[id] || `${expId}__${id}`;
+
 function presetQuestionnaireItems(exp) {
-  const consent = defaultQuestionnaireItems().find((it) => it.type === 'gate');
+  // 预设问卷的知情同意页用「含编号」形态（被试要填实验者发的编号）；新建的空白问卷仍用默认形态
+  const consent = {
+    ...defaultQuestionnaireItems().find((it) => it.type === 'gate'),
+    id: liveItemId(exp.id, 'consent'),
+    variant: GATE_VARIANT,
+    idLabel: GATE_ID_LABEL,
+    idPlaceholder: GATE_ID_PLACEHOLDER
+  };
   const debrief = {
     ...DEFAULT_DEBRIEF,
     id: 'debrief',
     title: '9 · 致谢与事后解释',
-    level: 4,
-    html: `<h1>致谢与事后解释</h1>${RT.textToHtml(`${DEFAULT_DEBRIEF.text}\n\n${DEBRIEF_CLOSING}`)}`
+    level: 4
   };
   return [
     consent,
-    ...exp.items.map((it) => ({ ...it, id: `${exp.id}__${it.id}`, fromTemplateId: exp.id, fromTemplateName: exp.name })),
+    ...exp.items.map((it) => ({ ...it, id: liveItemId(exp.id, it.id), fromTemplateId: exp.id, fromTemplateName: exp.name })),
     debrief
   ];
 }
@@ -1202,8 +1360,20 @@ module.exports = {
   ITEM_TYPES,
   QUESTION_TYPES,
   ITEM_VARIANTS,
+  MATCH_ERROR_DEFAULT,
+  matchAnswerLines,
+  matchesAnswer,
+  matchErrorText,
   FEEDBACK_TEXT,
   FEEDBACK_THINKING,
+  FEEDBACK_THINK_MS,
+  PX_BODY,
+  PX_HEAD,
+  body16,
+  materialHtml,
+  gateHtml,
+  experimentItems,
+  LIVE_ITEM_ID_ALIASES,
   ITEM_TYPE_LABELS,
   ITEM_LIMITS,
   LIMIT_META,

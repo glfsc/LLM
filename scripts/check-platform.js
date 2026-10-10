@@ -20,6 +20,7 @@ const Q_A = '自检·平台层A';
 const Q_C = '【自检夹具C·消息式题面与清屏点】';
 const Q_D = '【自检夹具D·超时重试】';
 const Q_B = '自检·平台层B';
+const Q_M = '【自检夹具M·需输入指定内容】';
 const RUN_STARTED = Date.now();
 
 let passed = 0;
@@ -42,6 +43,9 @@ const TASK_TEXT_A = '【夹具·任务要求 A】请为新品写一句广告语�
 const TASK_TEXT_B = '【夹具·任务要求 B】请为新品写一句广告语，并说明创作思路。';
 const FEEDBACK_TEXT = '【夹具·反馈正文】这是标准化反馈，用于验证逐字一致与落库完整。';
 const THINKING_TEXT = '【夹具·思考过程】先把任务要求过一遍，再对照标准推演。\n• 第一条\n• 第二条\n\n结论：按这几条来写反馈。';
+// 「需输入指定内容」的文本题：标准答案不下发给被试端，走查时由这里显式喂给 walk
+const MATCH_ANSWER = '我已完成阅读';
+const MATCH_ANSWERS = { typed: MATCH_ANSWER };
 
 // 覆盖全部题型 + 三类门控 + 题组 + 思考面板；门控用真实值（走查靠回拨快进，不用等）
 function fixture(taskText) {
@@ -75,6 +79,8 @@ function fixture(taskText) {
     { id: 'multi', type: 'multi', title: '多选题', options: ['甲', '乙', '丙'] },
     { id: 'rank', type: 'rank', title: '请排序', options: ['一', '二', '三'] },
     { id: 'free', type: 'text', title: '文本题', required: true, rows: 1, maxLen: 30, placeholder: '请输入' },
+    // 文本题二级形态「需输入指定内容」：被试要在底部输入框里输入指定内容才发送得出去
+    { id: 'typed', type: 'text', variant: 'match', title: '【夹具】需输入指定内容', answer: MATCH_ANSWER, errorText: '【夹具】答案错误', placeholder: '请输入确认内容' },
     { id: 'debrief', type: 'debrief', title: '结束说明', text: '【夹具】到此结束，感谢参与。' }
   ];
 }
@@ -137,7 +143,7 @@ async function main() {
 
   // 清掉上次可能的残留
   for (const q of (await admin('/api/admin/questionnaires')).questionnaires) {
-    if (q.title === Q_A || q.title === Q_B) await admin('/api/admin/questionnaire/delete', { body: { id: q.id, force: true } });
+    if ([Q_A, Q_B, Q_M].includes(q.title)) await admin('/api/admin/questionnaire/delete', { body: { id: q.id, force: true } });
   }
 
   const itemsA = fixture(TASK_TEXT_A);
@@ -163,8 +169,9 @@ async function main() {
   const defDebrief = metaFix.itemDefaults.debrief || {};
   const defMsg = metaFix.itemDefaults.message || {};
   const defRating = metaFix.itemDefaults.rating || {};
-  check('插入默认项自带正文：知情同意带 <h1> 标题',
-    String(defGate.html || '').startsWith('<h1>'), JSON.stringify(String(defGate.html || '').slice(0, 40)));
+  check('插入默认项自带正文：知情同意 = h3 小标题 + 小四正文',
+    String(defGate.html || '').startsWith('<h3>') && String(defGate.html || '').includes('font-size: 16px'),
+    JSON.stringify(String(defGate.html || '').slice(0, 60)));
   check('插入默认项自带正文：结束说明 / 打分题题干非空',
     String(defDebrief.html || '').includes('感谢') && String(defRating.html || '').includes('打分'),
     JSON.stringify({ debrief: String(defDebrief.html || '').length, rating: String(defRating.html || '').slice(0, 30) }));
@@ -183,8 +190,8 @@ async function main() {
   section('[2] 走查：流程完整性 + 同问卷两次逐字一致');
   const recA = {};
   const recB = {};
-  const sesA = await walk({ request, questionnaireId: qA.id, record: recA });
-  const sesB = await walk({ request, questionnaireId: qA.id, record: recB });
+  const sesA = await walk({ request, questionnaireId: qA.id, record: recA, matchAnswers: MATCH_ANSWERS });
+  const sesB = await walk({ request, questionnaireId: qA.id, record: recB, matchAnswers: MATCH_ANSWERS });
   check('流程走完（会话已完成）', recA.finished && recB.finished);
   check(`环节序列 = 夹具推导的 ${expect.unitCount} 个作答单元`,
     JSON.stringify(recA.seen) === JSON.stringify(expect.expectSeq),
@@ -195,7 +202,7 @@ async function main() {
   check('同问卷两次走查 AI 消息逐字一致', aiA.length === aiB.length && aiA.every((t, i) => t === aiB[i]));
 
   section('[3] 跨组：差异恰为任务要求一处');
-  const sesC = await walk({ request, questionnaireId: qB.id });
+  const sesC = await walk({ request, questionnaireId: qB.id, matchAnswers: MATCH_ANSWERS });
   const aiC = aiTexts(sesC.messages);
   const diff = [];
   for (let i = 0; i < Math.max(aiA.length, aiC.length); i += 1) if (aiA[i] !== aiC[i]) diff.push(i + 1);
@@ -328,7 +335,7 @@ async function main() {
   const introFix = adminDetailFix.messages.find((m) => RT.htmlToText(m.content).includes('开场材料'));
   check('正文以 HTML 下发且脚本注入被清洗', Boolean(introFix) && !/script|onclick/i.test(introFix.content));
   check('页面类题目的标题并入正文（h1）',
-    (qC.items.find((i) => i.id === 'c_gate').html || '').startsWith('<h1>'));
+    (qC.items.find((i) => i.id === 'c_gate').html || '').startsWith('<h1>'));   // 夹具自己的正文（不是默认项）
   check('题组正文里带上作答约定（可编辑，不再硬编码在输入框提示里）',
     String(qC.items.find((i) => i.id === 'c_g').html || '').includes('第一行填'));
 
@@ -646,7 +653,7 @@ async function main() {
     ['<span style="font-size:13.5pt">x</span>', 19, '四号'],
     ['<span style="font-size:36pt">x</span>', 48, '小初'],
     ['<span style="font-size:48px">x</span>', 48, '小初'],
-    ['<span style="font-size:1.2em">x</span>', 16, '小四'],
+    ['<span style="font-size:1.2em">x</span>', 19, '四号'],      // em 按正文 16px 折算：1.2em = 19.2 → 四号 19px
     ['<font size="4">x</font>', 19, '四号'],
     ['<span style="font-size:52px">x</span>', 48, '小初']
   ];
@@ -663,8 +670,8 @@ async function main() {
   });
   check('字号清洗是幂等的（粘贴 → 保存 → 被试端渲染三次不漂移）', idemBad.length === 0,
     idemBad.map(([h]) => h).join('；'));
-  check('档位表与编辑器下拉同源（11 档，正文 14px）',
-    RT2.FONT_SIZE_PRESETS.length === 11 && RT2.BODY_FONT_PX === 14 && RT2.FONT_SIZE_PRESETS.some((x) => x.px === 48 && x.label === '小初'),
+  check('档位表与编辑器下拉同源（11 档，正文 16px = 小四）',
+    RT2.FONT_SIZE_PRESETS.length === 11 && RT2.BODY_FONT_PX === 16 && RT2.FONT_SIZE_PRESETS.some((x) => x.px === 48 && x.label === '小初'),
     JSON.stringify(RT2.FONT_SIZE_PRESETS.map((x) => x.label + x.px)));
 
   // 清洗器：散落的 void 型「丢弃标签」（meta / link / input / embed）不能把后面的内容一起吞掉
@@ -694,12 +701,95 @@ async function main() {
     JSON.stringify({ n: abOpts.length, ninth: abOpts[8] && abOpts[8].label }));
   await request('/api/preview/destroy', { body: { previewId: abPv.previewId } });
 
+  section('[10.7] 文本题·需输入指定内容（发送前先断言，不通过不发送）');
+  // 夹具 M：三种情形各一题 —— 自定义提示 / 默认提示（留空回落）/ 未配标准答案（退化为自由作答）
+  const itemsM = [
+    { id: 'm_intro', type: 'message', title: '开场', text: '【夹具M】开场。' },
+    { id: 'm_t1', type: 'text', variant: 'match', title: '【夹具M】请输入指定内容', answer: MATCH_ANSWER, errorText: '【夹具M】请核对后重新输入', placeholder: '请输入' },
+    { id: 'm_t2', type: 'text', variant: 'match', title: '【夹具M】默认提示', answer: 'OK' },
+    { id: 'm_t3', type: 'text', variant: 'match', title: '【夹具M】未设置答案', answer: '' },
+    { id: 'm_end', type: 'debrief', title: '【夹具M】结束', text: '【夹具M】结束。' }
+  ];
+  const qM = (await admin('/api/admin/questionnaire/create', { body: { title: Q_M, items: itemsM } })).questionnaire;
+  const mSaved = qM.items.find((i) => i.id === 'm_t1') || {};
+  check('形态与配置随题目保存（variant / answer / errorText）',
+    mSaved.variant === 'match' && mSaved.answer === MATCH_ANSWER && mSaved.errorText === '【夹具M】请核对后重新输入',
+    JSON.stringify({ variant: mSaved.variant, answer: mSaved.answer, errorText: mSaved.errorText }));
+  check('自由作答的文本题不带形态字段（JSON 保持干净）',
+    !qA.items.find((i) => i.id === 'free').variant && qA.items.find((i) => i.id === 'free').answer === undefined);
+
+  const mSes = await request('/api/session', { body: { q: qM.id } });
+  const mSid = mSes.data.session.id;
+  const mAct = mSes.data.action || {};
+  check('按普通题目计题号（第 1 题），并下发形态标记',
+    mAct.itemId === 'm_t1' && mAct.qno === 1 && mAct.variant === 'match',
+    JSON.stringify({ id: mAct.itemId, qno: mAct.qno, variant: mAct.variant }));
+  check('标准答案与提示文案都不下发给被试端（断言只在服务端做）',
+    mAct.answer === undefined && mAct.errorText === undefined,
+    JSON.stringify({ answer: mAct.answer, errorText: mAct.errorText }));
+
+  const mStep = (body) => request('/api/step', { body: { sessionId: mSid, elapsedMs: 300, ...body } });
+  const mEmpty = await mStep({ itemId: 'm_t1', text: '' });
+  check('内容为空：不通过，返回自定义提示且不发送',
+    mEmpty.status === 400 && mEmpty.data.error === 'invalid_answer' && mEmpty.data.assertionFailed === true
+      && mEmpty.data.message === '【夹具M】请核对后重新输入',
+    JSON.stringify(mEmpty.data));
+  const mWrong = await mStep({ itemId: 'm_t1', text: '我已完成' });
+  check('内容不一致：同样不通过（同一句提示）',
+    mWrong.status === 400 && mWrong.data.message === '【夹具M】请核对后重新输入', JSON.stringify(mWrong.data));
+  const mAfterFail = await request(`/api/bootstrap?q=${qM.id}&session=${mSid}`);
+  const mUsers = (mAfterFail.data.messages || []).filter((m) => m.role === 'user');
+  check('两次断言失败都没推进、也没写聊天流（点「发送」等于没发出去）',
+    mAfterFail.data.action && mAfterFail.data.action.itemId === 'm_t1' && mUsers.length === 0,
+    JSON.stringify({ action: mAfterFail.data.action && mAfterFail.data.action.itemId, userMessages: mUsers.length }));
+
+  const mOk = await mStep({ itemId: 'm_t1', text: `  ${MATCH_ANSWER}  ` });   // 首尾空格照样算一致
+  check('内容一致（含首尾空格）：通过并推进到下一题',
+    mOk.ok && mOk.data.action && mOk.data.action.itemId === 'm_t2',
+    JSON.stringify({ ok: mOk.ok, next: mOk.data.action && mOk.data.action.itemId }));
+  check('通过后按普通文本题处理：原话进聊天流（用户气泡）',
+    String((mOk.data.userMessage || {}).content || '') === MATCH_ANSWER,
+    JSON.stringify(String((mOk.data.userMessage || {}).content || '')));
+  const mDefault = await mStep({ itemId: 'm_t2', text: '随便写' });
+  check('题目没填提示文案：回落到默认「答案错误」',
+    mDefault.status === 400 && mDefault.data.message === '答案错误', JSON.stringify(mDefault.data));
+  const mCase = await mStep({ itemId: 'm_t2', text: 'ok' });
+  check('比对忽略大小写：ok 命中标准答案 OK',
+    mCase.ok && mCase.data.action && mCase.data.action.itemId === 'm_t3');
+  const mNoAnswer = await mStep({ itemId: 'm_t3', text: '随便写点什么都行' });
+  check('题目没配标准答案：退化为自由作答（管理端另有「尚未设置答案」提醒）',
+    mNoAnswer.ok && mNoAnswer.data.action && mNoAnswer.data.action.itemId === 'm_end');
+  await mStep({ itemId: 'm_end', ack: true });
+
+  const mDetail = await admin(`/api/admin/questionnaire/session?id=${qM.id}&sid=${mSid}`);
+  const mRow = (mDetail.responses || []).find((r) => r.itemId === 'm_t1') || {};
+  check('通过后落库：itemType = text、正文 = 被试输入',
+    mRow.itemType === 'text' && mRow.text === MATCH_ANSWER, JSON.stringify({ type: mRow.itemType, text: mRow.text }));
+  check('断言失败计入该题的「重试次数」（空 1 次 + 不一致 1 次 = 2）',
+    Number(mRow.retryCount) === 2, String(mRow.retryCount));
+
+  // 预览（管理端试填）走的是同一套状态机：断言一样生效，作者能当场试出提示长什么样
+  const mPv = await admin('/api/admin/preview', { body: { items: itemsM } });
+  const mPvBoot = await request('/api/preview/session', { body: { previewId: mPv.previewId } });
+  const mPvSid = mPvBoot.data.session.id;
+  const mPvWrong = await request('/api/preview/step', {
+    body: { previewId: mPv.previewId, sessionId: mPvSid, itemId: mPvBoot.data.action.itemId, text: '不对的内容' }
+  });
+  check('预览里同样被断言拦下（返回同一句提示）',
+    mPvWrong.status === 400 && mPvWrong.data.message === '【夹具M】请核对后重新输入', JSON.stringify(mPvWrong.data));
+  const mPvRight = await request('/api/preview/step', {
+    body: { previewId: mPv.previewId, sessionId: mPvSid, itemId: mPvBoot.data.action.itemId, text: MATCH_ANSWER }
+  });
+  check('预览里输入一致则正常推进', mPvRight.ok && mPvRight.data.action && mPvRight.data.action.itemId === 'm_t2');
+  await request('/api/preview/destroy', { body: { previewId: mPv.previewId } });
+
   section('[11] 清理与设置还原');
   await admin('/api/admin/questionnaire/delete', { body: { id: qC.id, force: true } });
   await admin('/api/admin/questionnaire/delete', { body: { id: qA.id, force: true } });
   await admin('/api/admin/questionnaire/delete', { body: { id: qB.id, force: true } });
+  await admin('/api/admin/questionnaire/delete', { body: { id: qM.id, force: true } });
   const restQ = (await admin('/api/admin/questionnaires')).questionnaires;
-  check('夹具问卷已清理', restQ.every((q) => q.title !== Q_A && q.title !== Q_B && q.title !== Q_C && q.title !== Q_D));
+  check('夹具问卷已清理', restQ.every((q) => ![Q_A, Q_B, Q_C, Q_D, Q_M].includes(q.title)));
   await admin('/api/admin/settings', { body: { resumeWindowHours: settings.resumeWindowHours } });
   const restored = (await admin('/api/admin/settings')).settings;
   check('全局设置已还原', restored.resumeWindowHours === settings.resumeWindowHours);

@@ -44,6 +44,7 @@ const $pageBtn = document.getElementById('page-btn');
 const $composer = document.getElementById('composer');
 const $composerInput = document.getElementById('composer-input');
 const $composerSend = document.getElementById('composer-send');
+const $composerError = document.getElementById('composer-error');
 const $composerHint = document.getElementById('composer-hint');
 const $leaveMask = document.getElementById('leave-mask');
 const $leaveText = document.getElementById('leave-text');
@@ -110,6 +111,7 @@ async function api(path, options = {}) {
   if (!res.ok) {
     const err = new Error(data.message || data.error || `请求失败（${res.status}）`);
     err.code = data.error;
+    err.data = data;                     // 报错细节（如断言失败标记 assertionFailed）
     throw err;
   }
   return data;
@@ -249,6 +251,7 @@ function appendAiMessageStatic(content, thinkingText, thinkMs) {
   if (thinkingText) {
     body.appendChild(appendThinkPanelStatic(thinkingText, thinkMs));
     body.appendChild(el('div', 'think-divider'));
+    body.appendChild(el('div', 'think-done', '思考已完成'));       // 与流式渲染一致：回放 / 刷新也看得到
   }
   const text = el('div', 'ai-text');
   text.innerHTML = contentHtml(content);
@@ -370,7 +373,9 @@ async function appendThinkingPanelAnimated(thinkingText, totalMs) {
   $stream.appendChild(row);
   scrollToBottom();
 
-  // 思考文本按目标时长铺满（留 12% 收尾），使「已思考（用时 N 秒）」与实际动画一致。
+  // 思考稿按目标时长**铺满**（不再「先铺 88%、再干等剩下的一截」）：
+  // typewrite 的 pace 模式每步按「剩余毫秒 ÷ 剩余字数」决定延迟 —— 字数多就走得快、少就走得慢，
+  // 到点正好写完。于是「AI 思考时长」这个参数改的其实是**弹出速度**（20 秒 / 15 秒 / 30 秒都只改它）。
   // 剩余时长按**当前倍速**实时消耗：切倍速时正在思考的这条也立刻跟着快/慢。
   let remainMs = Number(totalMs) || 0;
   let lastAt = performance.now();
@@ -378,24 +383,23 @@ async function appendThinkingPanelAnimated(thinkingText, totalMs) {
     const now = performance.now();
     remainMs -= (now - lastAt) * speedScale();
     lastAt = now;
-    return remainMs;
+    return Math.max(0, remainMs);
   };
   const tick = window.setInterval(() => {
-    const left = Math.max(0, drain());
+    const left = drain();
     const shown = Math.max(0, Math.min(Math.floor(totalMs / 1000), Math.floor((totalMs - left) / 1000)));
     panel.label.textContent = `正在思考（${shown} 秒）`;
   }, 200);
 
-  const perChar = Math.max(1, (Number(totalMs) * 0.88) / Math.max(1, thinkingText.length));
-  await typewrite(panel.inner, thinkingText, perChar, 0, true);   // 不限速：按目标时长铺满
-
-  const remain = Math.max(0, drain());
-  if (remain > 0) await sleepPaced(remain);
+  await typewrite(panel.inner, thinkingText, TYPE_MS_DEFAULT, 0, true, { remaining: drain });
+  drain();
   window.clearInterval(tick);
 
   badge.replaceWith(sparkBadge());
   panel.label.textContent = `已思考（用时 ${thinkSecondsText(Number(totalMs))} 秒）`;
   panel.think.classList.remove('open');           // 输出完自动折叠
+  // 思考结束 → 正文开始之间给一行明示（被试不用去猜「怎么还不出字」）
+  body.insertBefore(el('div', 'think-done', '思考已完成'), answer);
   await sleep(240);
   return answer;
 }
@@ -437,6 +441,7 @@ function clearStream() {
   state.questionNodes.clear();
   composerTarget = null;
   $composerInput.value = '';
+  clearComposerError();
   refreshAnsweredBtn();
   scrollToBottom(false);
 }
@@ -451,7 +456,8 @@ const TYPE_MS_MIN = 26;          // 旧问卷里存了过快速度时的下限�
 
 // 预览倍速的当前值（真实会话恒为 1）
 function speedScale() { return previewSpeed > 1 ? previewSpeed : 1; }
-// 按「当前倍速」消耗指定毫秒数：中途切速会跟着变（用于「正在思考」提示与思考面板的收尾等待）
+// 按「当前倍速」消耗指定毫秒数：中途切速会跟着变（用于「正在深度思考…」转圈提示）。
+// 配了思考稿的消息不用它 —— 那一段由思考面板按「剩余毫秒 ÷ 剩余字数」调速铺满，没有干等。
 async function sleepPaced(totalMs) {
   let remain = Number(totalMs) || 0;
   let last = performance.now();
@@ -465,51 +471,89 @@ async function sleepPaced(totalMs) {
 
 // 流式输出（HTML 版）：先把完整的正文骨架挂上，再按文本节点逐字填充——
 // 这样加粗 / 标题 / 颜色在流式过程中就是正确的，光标始终紧跟最后一个已输出的字。
+// **未输出的部分不占高度**：骨架里还没轮到的换行（<br>）与块级容器先隐藏，写到那一行 / 那一段时才显形。
+//   否则消息从第一帧起就占满最终高度（整片空白行），跟随底部的滚动会把视口顶到空白底部——
+//   表现就是「刷屏变白、往下刷很多空格，内容从上方流下来」。写完时全部显形，终态与刷新后的静态渲染一致。
 // minMs：速度下限（默认 TYPE_MS_MIN，防止旧问卷存了过快速度）；思考面板按目标时长铺满时传 0
+// pace：{ remaining } —— 限期铺满（思考面板用，见 appendThinkingPanelAnimated）。
+//   每步延迟 = 剩余毫秒 ÷ 剩余字数：字数多就走得快、字数少走得慢，正好在目标时长处写完；
+//   改「AI 思考时长」即改弹出速度，中间不再有「先铺一段、再干等剩下的一截」。
 // 倍速在**每一帧**重新读（typeMs 一律传「原始设定值」）——中途切倍速时，正在输出的这条也立刻跟着变快/变慢。
-function typewrite(textEl, content, typeMs, minMs, plain) {
+function typewrite(textEl, content, typeMs, minMs, plain, pace) {
+  const paced = !!(pace && typeof pace.remaining === 'function');
   if (plain) textEl.textContent = String(content == null ? '' : content);   // 思考面板是纯文本（保留 pre-wrap 观感）
   else textEl.innerHTML = contentHtml(content);
   const raw = Number.isFinite(Number(typeMs)) ? Number(typeMs) : TYPE_MS_DEFAULT;
   const floor = minMs == null ? TYPE_MS_MIN : Number(minMs);
-  if (raw <= 0) { textEl.innerHTML = contentHtml(content); scrollToBottom(false); return Promise.resolve(); }
+  if (raw <= 0 && !paced) { scrollToBottom(false); return Promise.resolve(); }
   // 浏览器对嵌套定时器有 ~4ms 的下限：只压缩「每字延迟」在快档会触底，
   // 所以按倍速把「每次吐的字数」一并放大，保证总时长真的按倍速缩短（1× 时仍是 1~2 字/步）。
   const RATE = 1.5 / TYPE_MS_DEFAULT;      // 1× 时的吐字速率（字 / 毫秒）
   const stepMs = () => Math.max(raw / speedScale(), floor / speedScale());   // 每帧按当前倍速算
   const chunkFor = (delayMs) => Math.max(1 + Math.floor(Math.random() * 2), Math.round(RATE * speedScale() * Math.max(delayMs, 4)));
 
+  // 可显示单元（按文档顺序）：文本节点（有字数）+ 换行 / 块级容器（零字数，但占一行或一段的高度）
+  const BLOCK_TAGS = { P: 1, H1: 1, H2: 1, H3: 1, H4: 1, H5: 1, H6: 1, LI: 1, BLOCKQUOTE: 1, UL: 1, OL: 1 };
   const nodes = [];
-  const walker = document.createTreeWalker(textEl, NodeFilter.SHOW_TEXT);
-  while (walker.nextNode()) {
-    const node = walker.currentNode;
+  const tails = [];            // { el, at }：at = 这个换行 / 容器之前已有多少字
+  let chars = 0;
+  const walker = document.createTreeWalker(textEl, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (node.nodeType === 1) {
+      if (node.tagName === 'BR' || BLOCK_TAGS[node.tagName]) {
+        node.style.display = 'none';
+        tails.push({ el: node, at: chars });
+      }
+      continue;
+    }
     const full = node.nodeValue;
     if (!full) continue;
     node.nodeValue = '';
-    nodes.push({ node, full });
+    nodes.push({ node, full, start: chars });
+    chars += full.length;
   }
-  if (!nodes.length) { scrollToBottom(false); return Promise.resolve(); }
+  const totalChars = chars;
+  const revealAll = () => { for (const t of tails) t.el.style.display = ''; };
+  // 「写到了没有」：某一行 / 某一段的第一个字吐出来时，它前面的换行与容器才显形
+  let ti = 0;
+  const revealTail = (printed) => {
+    while (ti < tails.length && tails[ti].at < printed) { tails[ti].el.style.display = ''; ti += 1; }
+  };
+  if (!nodes.length) { revealAll(); scrollToBottom(false); return Promise.resolve(); }
 
   const cursor = el('span', 'type-cursor');
   let ni = 0;                 // 当前文本节点
   let ci = 0;                 // 当前节点已输出的字数
-  let printed = 0;
+  let steps = 0;
+  let paceLeft = paced ? Math.max(0, Number(pace.remaining()) || 0) : 0;
+  const charsLeft = () => Math.max(1, totalChars - nodes[ni].start - ci);
   return new Promise((resolve) => {
     const step = () => {
-      if (ni >= nodes.length) { cursor.remove(); scrollToBottom(false); resolve(); return; }
+      if (ni >= nodes.length) { revealAll(); cursor.remove(); scrollToBottom(false); resolve(); return; }
       const cur = nodes[ni];
-      const delay = stepMs();
-      ci += chunkFor(delay);                 // 每次吐 1~2 字（倍速越高吐得越多）
+      // 每步都重新读一次剩余时间：与 typeMs 路径一样逐帧跟着倍速走（中途切速立刻生效）
+      if (paced) paceLeft = Math.max(0, Number(pace.remaining()) || 0);
+      const delay = paced ? Math.max(4, paceLeft / charsLeft()) : stepMs();
+      // pace 模式同样受 4ms 定时器下限约束：剩余时间不够「一字一步」时，一次多吐几个字
+      ci += paced
+        ? Math.max(1, Math.ceil(charsLeft() / Math.max(1, Math.floor(paceLeft / 4))))
+        : chunkFor(delay);
+      if (ci > cur.full.length) ci = cur.full.length;
       cur.node.nodeValue = cur.full.slice(0, ci);
       const parent = cur.node.parentNode;
       if (parent) parent.insertBefore(cursor, cur.node.nextSibling);
-      printed += 1;
-      if (printed % 4 === 0) scheduleScrollToBottom();
+      revealTail(cur.start + ci);
+      steps += 1;
+      if (steps % 4 === 0) scheduleScrollToBottom();
       const prev = cur.full[ci - 1] || '';
-      if (ci >= cur.full.length) { ni += 1; ci = 0; }
-      const punct = PUNCT_EXTRA / speedScale();
-      const jitter = 14 / speedScale();
-      window.setTimeout(step, PUNCT_PAUSE.includes(prev) ? delay + punct : delay + Math.random() * jitter);
+      const done = ci >= cur.full.length;
+      if (done) { ni += 1; ci = 0; }
+      // 标点额外停顿 / 随机抖动只在按 typeMs 走的时候加；限期铺满时按剩余时间严格控制，不加额外停顿
+      let wait = delay;
+      if (!paced) {
+        wait += PUNCT_PAUSE.includes(prev) ? PUNCT_EXTRA / speedScale() : Math.random() * (14 / speedScale());
+      }
+      window.setTimeout(step, wait);
     };
     step();
   });
@@ -527,7 +571,7 @@ async function appendAiMessageAnimated(content, rhythm, thinkingText) {
   if (thinking && thinkMs0 > 0) {
     const answer = await appendThinkingPanelAnimated(thinking, thinkMs0);
     await typewrite(answer, content, typeMs0);
-    scrollToBottom();
+    scrollToBottom(false);          // 瞬时：与流式期间的跟随滚动同一节奏，不平滑动画抢位置
     return;
   }
   if (thinkMs0 > 0) {
@@ -537,7 +581,7 @@ async function appendAiMessageAnimated(content, rhythm, thinkingText) {
   }
   const row = appendAiMessageStatic('');
   await typewrite(row.querySelector('.ai-text'), content, typeMs0);
-  scrollToBottom();
+  scrollToBottom(false);
   return row;
 }
 
@@ -609,8 +653,15 @@ function showPage({ title, html, text, check, button, hideButton, idField, count
   }
   $pageHint.classList.add('hidden');
   refreshPageBtn();
+  // 这块全屏容器在「知情同意页 / 致谢页」之间复用：必须每次回到最上方。
+  // 浏览器会保留 display:none 元素的滚动偏移——知情同意页被滚过的位置（手机上填编号必然滚）
+  // 会被沿用到致谢页，被 maxScroll 一夹就正好停在最下方（致谢页只看得见最后几行）。
   $pageScreen.classList.remove('hidden');
-  requestAnimationFrame(() => $pageScreen.classList.add('visible'));
+  $pageScreen.scrollTop = 0;
+  requestAnimationFrame(() => {
+    $pageScreen.scrollTop = 0;            // display:none → block 的首次布局在下一帧才算稳，这里再压一次
+    $pageScreen.classList.add('visible');
+  });
 }
 
 function hidePage() {
@@ -807,6 +858,27 @@ function growComposer() {
   $composerInput.style.height = `${Math.min(168, Math.max(42, $composerInput.scrollHeight))}px`;
 }
 
+// 「需输入指定内容」的文本题（二级形态）：被试还是在这条常驻输入框里作答，但点「发送」时
+// 服务端会先做断言——内容为空或与题目要求不一致时，这一笔既不落库也不进聊天流，
+// 只在输入框上方给出研究者自定义的提示（默认「答案错误」），输入内容原样保留让被试改。
+const needsAnswerCheck = (action) => !!(action && action.type === 'text' && action.variant === 'match');
+
+// 断言提示（挂在输入框上方）：改输入 / 换题 / 提交成功都会清掉
+function setComposerError(text) {
+  const msg = String(text || '').trim();
+  $composerError.textContent = msg;
+  $composerError.classList.toggle('hidden', !msg);
+  if (!msg) return;
+  const inner = $composer.querySelector('.composer-inner');
+  if (inner) {
+    inner.classList.remove('shake');       // 重放一次抖动：先摘掉类、强制重排，再加回来
+    void inner.offsetWidth;
+    inner.classList.add('shake');
+  }
+  $composerInput.focus();                  // 手机端顺手把键盘唤起来，方便直接改
+}
+function clearComposerError() { setComposerError(''); }
+
 function refreshComposer() {
   const action = state.action;
   const node = action ? state.questionNodes.get(action.itemId) : null;
@@ -817,14 +889,24 @@ function refreshComposer() {
   if (!usable) $composerInput.value = '';
   if (usable) {
     $composerInput.placeholder = action.placeholder || '输入你的回答…';
-    $composerSend.disabled = state.busy || !node.ready() || !node.gateOk();
-    $composerHint.textContent = '按「发送」提交你的回答；提交后不可修改。';
+    // 「需输入指定内容」的题：空内容也让点「发送」——断言由服务端做，点了才会得到提示
+    const canSend = needsAnswerCheck(action) ? true : node.ready();
+    $composerSend.disabled = state.busy || !canSend || !node.gateOk();
+    $composerHint.textContent = needsAnswerCheck(action)
+      ? '按「发送」提交你的回答；内容与题目要求不一致时不会发送，并在上方提示。'
+      : '按「发送」提交你的回答；提交后不可修改。';
   } else {
     // 输入框常驻：任何时候都在原位；当前步骤用不上时不置灰、也不给长提示
     $composerSend.disabled = true;
     if (node && node.closed) {
       $composerInput.placeholder = '本题已停止作答';
       $composerHint.textContent = STOPPED_HINT;
+    } else if (action && isMessageStyleAction(action) && !state.questionNodes.has(action.itemId)) {
+      // 消息式题面：本题**已经交上去了**（答案已作为用户气泡进流、题卡也打上「✓ 已提交」）。
+      // 输入框这时必须是空的且停用——内容留在框里会被当成「没发出去」；
+      // 等系统把回应播完、下一题渲染出来，输入框再自动指向下一题。
+      $composerInput.placeholder = state.completed ? '本次作答已完成' : '已提交，正在等待系统回应…';
+      $composerHint.textContent = '';
     } else if (action && ['gate', 'confirm', 'debrief'].includes(action.type)) {
       $composerInput.placeholder = '请先在页面上完成当前步骤';
       $composerHint.textContent = '';
@@ -838,10 +920,23 @@ function refreshComposer() {
   }
 }
 
+// 发送成功（内容已交出去）后立刻把输入框清空、停用。
+// 两种题两种时机：普通文本题点「发送」即算发出（立刻清）；「需输入指定内容」的题要等服务端点头
+// （断言没过 = 没发出去，输入内容必须原样留给被试改）。提交点在 submit() 的 settle() 里。
+function resetComposer() {
+  composerTarget = null;
+  composerMode = null;
+  $composerInput.value = '';
+  clearComposerError();
+  growComposer();
+  refreshComposer();
+}
+
 $composerInput.addEventListener('input', () => {
   if (!composerTarget) return;
   state.draft[composerTarget] = { 0: $composerInput.value };
   saveDraft(composerTarget, state.draft[composerTarget]);
+  clearComposerError();                     // 一开始改输入，上一次的断言提示就撤掉
   growComposer();
   refreshComposer();
 });
@@ -964,6 +1059,7 @@ function stopQuestionByDeadline(action) {
     $composerInput.value = '';
     $composerSend.disabled = true;
     $composerHint.textContent = STOPPED_HINT;
+    clearComposerError();                            // 已停止作答：断言提示换成上面这条统一的停答说明
   } else if (node.hint) {
     node.hint.textContent = STOPPED_HINT;
   }
@@ -1087,10 +1183,13 @@ function renderQuestionMessage(action) {
   const draft = loadDraft(action.itemId);
   composerTarget = action.itemId;
   composerMode = 'two';
+  clearComposerError();                     // 进入新的一题：上一题的断言提示不跟过来
   $composerInput.value = draft[0] != null ? draft[0] : '';
   growComposer();
 
   const twoText = action.type === 'group';
+  // 「需输入指定内容」的题：空内容也算「可发送」——对不对由服务端断言说了算（见 submit）
+  const assertAnswer = needsAnswerCheck(action);
   const collect = () => {
     if (twoText) {
       const [a, b] = splitComposerTwo($composerInput.value);
@@ -1098,7 +1197,9 @@ function renderQuestionMessage(action) {
     }
     return { text: $composerInput.value.trim() };
   };
-  const ready = () => (twoText ? splitComposerTwo($composerInput.value)[0].length > 0 : $composerInput.value.trim().length > 0);
+  const ready = () => (assertAnswer
+    ? true
+    : (twoText ? splitComposerTwo($composerInput.value)[0].length > 0 : $composerInput.value.trim().length > 0));
   const gateOk = () => {
     const now = serverNow();
     if (action.availableAtMs && now < action.availableAtMs) return false;
@@ -1405,22 +1506,33 @@ async function submit(action, payload) {
   if (node && node.submitBtn) node.submitBtn.disabled = true;
   const elapsedMs = Math.round(performance.now() - (state.actionShownAt || performance.now()));
   const echo = echoOf(action, payload);
-  finalizeQuestion(action, echo);                // 消息式题面 → 用户气泡；卡片 → 就地只读
-  state.answeredCount += 1;
-  delete state.draft[action.itemId];
-  clearDraft(action.itemId);
+  // 「需输入指定内容」的题：发送前先由服务端断言。与其余题型不同，这一类的收尾（用户气泡 / ✓ 已提交）
+  // 要等服务端点头之后再做——断言没过时点「发送」等于没发出去：题卡照旧待答、输入内容原样保留。
+  const asserting = needsAnswerCheck(action);
+  const settle = () => {
+    finalizeQuestion(action, echo);
+    state.answeredCount += 1;
+    delete state.draft[action.itemId];
+    clearDraft(action.itemId);
+    resetComposer();                             // 已经发出去了：输入框立刻清空（否则内容留在框里像没发出去）
+  };
+  if (!asserting) settle();
   const gen = streamEpoch;                       // 提交时的世代：期间被跳题打断就不再把旧结果写屏
   try {
     const res = await postStep({ sessionId: state.sessionId, ...payload, elapsedMs });
+    if (asserting && !res.ignored) settle();     // 被服务端忽略的提交（错题/迟到）不算发出去
     await afterStep(action, echo, res, gen);
   } catch (err) {
     if (gen !== streamEpoch) return;
+    // 断言没过：只在输入框上方提示（文案由题目配置，服务端带回），不落库、不进聊天流
+    if (asserting && err.code === 'invalid_answer') { setComposerError(err.message); return; }
     if (err.code === 'session_closed') { state.completed = true; showFinalPage(action); return; }
     // 提交晚于服务端关闭的窗口：这一笔不会被记录，本题即停止作答（不再自动提交 / 不再开新窗口）
     if (err.code === 'window_closed') { appendAiMessageStatic(STOPPED_HINT); return; }
     appendAiMessageStatic(err.code === 'too_early' ? '还没有到可以提交的时间，请稍候再试。' : '抱歉，连接似乎出现了问题，请稍后重试。');
   } finally {
     state.busy = false;
+    if (asserting) refreshComposer();             // 断言失败：把「发送」重新点亮（输入内容还在）
   }
 }
 
@@ -1440,6 +1552,7 @@ function applyPayload(payload) {
   state.actionShownAt = performance.now();
   composerTarget = null;
   composerMode = null;                         // 由 renderQuestion 按题型重新决定
+  clearComposerError();
   refreshComposer();
   if (!action) return;
 

@@ -289,7 +289,10 @@ function itemDescriptor(item) {
       required: item.required !== false,
       rows: Number(item.rows) || 1,
       maxLen: Number(item.maxLen) || 0,
-      placeholder: item.placeholder || ''
+      placeholder: item.placeholder || '',
+      // 形态：match = 需输入指定内容（被试发送前由服务端断言）。
+      // 标准答案与提示文案都不下发给被试端——断言结果由 /api/step 的报错带回。
+      variant: item.variant === 'match' ? 'match' : 'free'
     };
   }
   if (item.type === 'group') {
@@ -564,6 +567,13 @@ function validateAnswer(item, body, deadlinePassed = false) {
     case 'text': {
       const text = String(body.text ?? '').trim();
       const maxLen = Number(item.maxLen) || 0;
+      // 二级形态「需输入指定内容」：先在服务端断言，通过了才当普通文本题落库。
+      // 断言失败（含内容为空）返回研究者自定义的提示文案（默认「答案错误」），
+      // 这一笔不写库、也不进聊天流——被试端只在输入框旁提示，输入内容原样保留。
+      // 题目没配标准答案时退化为自由作答（管理端会在题目摘要里提醒「尚未设置答案」）。
+      if (item.variant === 'match' && store.matchAnswerLines(item).length && !store.matchesAnswer(item, text)) {
+        return { error: store.matchErrorText(item), assertionFailed: true };
+      }
       if (item.required !== false && !text && !deadlinePassed) return { error: '请填写内容后再提交' };
       if (maxLen > 0 && text.length > maxLen) return { error: `字数不能超过 ${maxLen} 字` };
       return { value: null, valueText: JSON.stringify({ text }), optionLabel: text };
@@ -636,7 +646,12 @@ async function applyStep(st, sessionId, body) {
   const deadlinePassed = !!(action.deadlineMs && nowMs >= action.deadlineMs);
   const check = validateAnswer(item, body, deadlinePassed);
   if (check.error) {
-    return { status: 400, error: { error: 'invalid_answer', message: check.error } };
+    // 「需输入指定内容」的断言失败：也记一次「提交前的重试」——数据里能看出被试试了几次才对
+    if (check.assertionFailed) st.bumpRetry(sessionId, completedCount, false);
+    return {
+      status: 400,
+      error: { error: 'invalid_answer', message: check.error, assertionFailed: !!check.assertionFailed }
+    };
   }
 
   const elapsedMs = Number.isFinite(Number(body.elapsedMs))
@@ -1737,7 +1752,7 @@ function handleAdminQuestionnaireSession(req, res, url) {
         presentedAt: r.presented_at,
         answeredAt: r.answered_at,
         elapsedMs: r.elapsed_ms,
-        retryCount: Number(r.retry_count) || 0,     // 超时后点过几次「重试」
+        retryCount: Number(r.retry_count) || 0,     // 提交前的重试次数（超时后点「重试」+「需输入指定内容」的断言失败）
         timedOut: Boolean(r.timed_out)              // 是否曾到点未交
       };
     })
@@ -1828,7 +1843,7 @@ function handleAdminQuestionnaireExport(req, res, url) {
     fmtLocal(r.presented_at),
     fmtLocal(r.answered_at),
     sec(r.elapsed_ms),
-    Number(r.retry_count) || 0,          // 超时后点过几次「重试」
+    Number(r.retry_count) || 0,          // 提交前的重试次数（超时后点「重试」+「需输入指定内容」的断言失败）
     r.timed_out ? '是' : ''              // 是否曾到点未交（超时）
   ]);
 

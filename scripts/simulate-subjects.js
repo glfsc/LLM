@@ -54,7 +54,8 @@ async function request(route, options = {}) {
 }
 
 // 按题型生成「有变化」的作答：同一批被试之间数值不同，便于在数据页看出差异
-function answerBody(action, subject, seed) {
+// matchAnswers：itemId → 标准答案（「需输入指定内容」的文本题；答案不下发给被试端，只能从题目上读）
+function answerBody(action, subject, seed, matchAnswers) {
   const pick = (n) => 1 + ((subject * 3 + seed) % n);
   switch (action.type) {
     case 'gate': return { consent: true };
@@ -74,7 +75,11 @@ function answerBody(action, subject, seed) {
       if (subject % 2 === 1) order.reverse();
       return { order };
     }
-    case 'text': return { text: `模拟被试${subject}的作品${seed}` };
+    case 'text': {
+      // 「需输入指定内容」的题必须原样输入标准答案才发送得出去（没配答案的题会退化为自由作答）
+      const known = action.variant === 'match' ? (matchAnswers || {})[action.itemId] : '';
+      return { text: known || `模拟被试${subject}的作品${seed}` };
+    }
     case 'group': return {
       answers: (action.subs || []).map((sub) => (sub.type === 'text'
         ? { text: `模拟被试${subject}的作品${seed}` }
@@ -84,11 +89,25 @@ function answerBody(action, subject, seed) {
   }
 }
 
+// 读出问卷里「需输入指定内容」的题各自的标准答案（管理端接口可见；被试端拿不到）
+async function matchAnswersOf(questionnaireId) {
+  const got = await request('/api/admin/questionnaire?id=' + encodeURIComponent(questionnaireId));
+  const items = (got.ok && got.data.questionnaire && got.data.questionnaire.items) || [];
+  const map = {};
+  for (const it of items) {
+    if (it.type !== 'text' || it.variant !== 'match') continue;
+    const first = String(it.answer || '').split('\n').map((x) => x.trim()).filter(Boolean)[0];
+    if (first) map[it.id] = first;
+  }
+  return map;
+}
+
 // 走完一位被试的完整流程；stopEarly=true 时答完两个单元就离开，留一条「进行中」记录
 async function runSubject(questionnaireId, subject, stopEarly) {
   const created = await request('/api/session', { body: { q: questionnaireId } });
   if (!created.ok) throw new Error(`创建会话失败：${JSON.stringify(created.data)}`);
   const sessionId = created.data.session.id;
+  const matchAnswers = await matchAnswersOf(questionnaireId);
   let action = created.data.action;
 
   let guard = 0;
@@ -99,7 +118,7 @@ async function runSubject(questionnaireId, subject, stopEarly) {
     // 每位被试的作答耗时不同，导出后「耗时」列不会千篇一律
     const elapsedMs = 700 + ((subject * 137 + answered * 89) % 2200);
     const res = await request('/api/step', {
-      body: { sessionId, elapsedMs, ...answerBody(action, subject, seed) }
+      body: { sessionId, elapsedMs, ...answerBody(action, subject, seed, matchAnswers) }
     });
     if (res.status === 400 && res.data.error === 'too_early') {
       await sleep(Math.max(0, (res.data.availableAtMs || 0) - Date.now()) + 60);

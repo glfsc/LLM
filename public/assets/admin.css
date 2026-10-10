@@ -118,29 +118,28 @@ body.col-dragging { cursor: col-resize; user-select: none; }
 .sidebar-outline::-webkit-scrollbar-thumb { background: #e0e0e3; border-radius: 4px; }
 .ol-sec { display: flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 600; color: var(--muted); padding: 9px 8px 4px; cursor: pointer; }
 .ol-sec:hover { color: var(--fg); }
-.ol-item { display: flex; align-items: center; gap: 7px; padding: 6px 8px; border-radius: 9px; color: var(--fg-soft); cursor: pointer; }
+.ol-item { display: flex; align-items: center; gap: 4px; padding: 6px 4px; border-radius: 9px; color: var(--fg-soft); cursor: pointer; }
 .ol-item:hover { background: var(--surface); }
 .ol-item.on { background: var(--bubble); color: var(--fg); font-weight: 600; }
-/* 层级缩进：1–4 级（仅大纲分组用，被试端无感知） */
-.ol-item.d1 { margin-left: 12px; }
-.ol-item.d2 { margin-left: 24px; }
-.ol-item.d3 { margin-left: 36px; }
-.ol-item.d4 { margin-left: 48px; }        /* 默认层级（0 级）缩进最深 */
+/* 层级缩进：1–4 级（仅大纲分组用，被试端无感知）。阶梯压得很小（4px/级），
+   左边留白总共约三个字就到折叠箭头，标题能多显示好几个字 */
+.ol-item.d1 { margin-left: 4px; }
+.ol-item.d2 { margin-left: 9px; }
+.ol-item.d3 { margin-left: 14px; }
+.ol-item.d4 { margin-left: 19px; }        /* 默认层级（0 级）缩进最深 */
 /* 大纲：折叠箭头 / 跟随滚动的高亮 */
 .ol-item .ol-fold {
-  flex: 0 0 auto; width: 22px; height: 22px; padding: 0; line-height: 1;
+  flex: 0 0 auto; width: 18px; height: 18px; padding: 0; line-height: 1;
   display: inline-flex; align-items: center; justify-content: center;
-  font-size: 15px; color: var(--fg-soft); background: none; border: 0; border-radius: 6px; cursor: pointer;
+  font-size: 14px; color: var(--fg-soft); background: none; border: 0; border-radius: 6px; cursor: pointer;
 }
 .ol-item .ol-fold:hover { color: var(--fg); background: var(--border); }
-.ol-item .ol-fold-space { flex: 0 0 auto; width: 22px; }
+.ol-item .ol-fold-space { flex: 0 0 auto; width: 18px; }
 /* 大纲只有一种高亮：灰底（滚动跟随与点击选中共用，点击不带过渡动画） */
 .ol-item.on { background: var(--bubble); color: var(--fg); font-weight: 600; box-shadow: inset 2px 0 0 var(--border-strong); }
-.ol-item .ol-lv { flex: 0 0 auto; font-size: 9.5px; color: var(--fg-soft); background: var(--surface); border: 1px solid var(--border); border-radius: 5px; padding: 0 4px; }
 .ol-item.no-q .ol-num { color: var(--border-strong); }
-.ol-item .ic { flex: 0 0 auto; width: 13px; text-align: center; font-size: 11px; color: var(--faint); }
+.ol-item .ic { flex: 0 0 auto; width: 12px; text-align: center; font-size: 11px; color: var(--faint); }
 .ol-item .tx { flex: 1 1 auto; min-width: 0; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ol-item .lm { flex: 0 0 auto; font-size: 9.5px; color: var(--warn-fg); background: var(--warn-bg); border: 1px solid var(--warn-border); border-radius: 5px; padding: 0 4px; }
 .ol-band { display: flex; align-items: center; gap: 6px; font-size: 10.5px; color: var(--muted); padding: 7px 8px 3px; }
 .ol-band .line { flex: 1 1 auto; height: 1px; background: var(--border); }
 .sidebar-bottom { margin-top: auto; padding-top: 12px; display: flex; flex-direction: column; gap: 10px; }
@@ -227,9 +226,11 @@ table.data-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .section-title { font-size: 14.5px; font-weight: 600; margin: 0; }
 .section-hint { font-size: 12px; line-height: 1.75; color: var(--muted); margin: 0 0 12px; }
 .field { display: block; margin-bottom: 12px; }
-.field > span { display: block; font-size: 12.5px; color: var(--muted); margin-bottom: 7px; }
+/* 字段名与字段内容一律小四 16px（大纲标题 / 标准答案 / 输入框提示语 / 选项 / 打分题等）；
+   AI 思考稿（.param-think）此前已是 16px，口径一致 */
+.field > span { display: block; font-size: 16px; color: var(--muted); margin-bottom: 7px; }
 .field input[type=text], .field input[type=number], .field textarea, .field select {
-  width: 100%; font: inherit; font-size: 13.5px; line-height: 1.75; color: var(--fg); background: #fff;
+  width: 100%; font: inherit; font-size: 16px; line-height: 1.75; color: var(--fg); background: #fff;
   border: 1px solid var(--border); border-radius: 12px; padding: 10px 13px; outline: none;
   transition: border-color .18s ease, box-shadow .18s ease;
 }
@@ -268,7 +269,7 @@ table.data-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .rich-color-tag { font-size: 10.5px; color: var(--muted); }
 .rich-edit {
   min-height: 84px; max-height: 520px; overflow: auto; resize: vertical;
-  padding: 11px 13px; font-size: 14px; line-height: 1.8; color: var(--fg); outline: none;
+  padding: 11px 13px; font-size: 16px; line-height: 1.8; color: var(--fg); outline: none;   /* 小四：正文默认字号，与 Richtext.BODY_FONT_PX 一致 */
 }
 .rich-edit:empty::before { content: '在这里写正文…'; color: var(--faint); }
 .rich-edit p { margin: 0 0 .6em; }
@@ -283,7 +284,7 @@ table.data-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .rich-edit ul, .rich-edit ol { margin: 0 0 .6em; padding-left: 1.4em; }
 .rich-edit blockquote { margin: 0 0 .6em; padding-left: 10px; border-left: 3px solid var(--border-strong); color: var(--muted); }
 
-.inline-check { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--fg-soft); margin: 4px 0 10px; cursor: pointer; }
+.inline-check { display: flex; align-items: center; gap: 7px; font-size: 16px; color: var(--fg-soft); margin: 4px 0 10px; cursor: pointer; }   /* 小四 */
 .inline-check input { width: 14px; height: 14px; accent-color: #111213; }
 
 /* ---------------------------------------------------------------- 题卡 */
@@ -300,28 +301,28 @@ table.data-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .drag { flex: 0 0 auto; cursor: grab; color: var(--faint); font-size: 13px; letter-spacing: -1px; padding: 2px 4px; user-select: none; }
 .drag:active { cursor: grabbing; }
 .qtype { flex: 0 0 auto; font-size: 11px; font-weight: 600; color: var(--fg-soft); background: var(--bubble); border: 1px solid var(--border); border-radius: 7px; padding: 3px 8px; }
-.qtitle { flex: 1 1 auto; min-width: 0; font-size: 13.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qtitle { flex: 1 1 auto; min-width: 0; font-size: 16px; font-weight: 600;   /* 小四：显示作者填的标题 */ overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .qbadges { display: flex; gap: 6px; flex: 0 0 auto; }
 .qbadge { font-size: 10.5px; color: var(--muted); background: var(--surface); border: 1px solid var(--border); border-radius: 999px; padding: 2px 8px; white-space: nowrap; }
 .qbadge.limit { color: var(--warn-fg); background: var(--warn-bg); border-color: var(--warn-border); }
 .qtools { display: flex; gap: 6px; flex: 0 0 auto; }
-.qsum { font-size: 12px; color: var(--muted); line-height: 1.7; margin: 6px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qsum { font-size: 16px; color: var(--muted); line-height: 1.7;   /* 小四：显示作者填的正文首行 */ margin: 6px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .qbody { margin-top: 11px; padding-top: 11px; border-top: 1px dashed var(--border); }
 
 /* 题目参数区：与题目同框、横线分隔、下方标注「参数」；无参数时整块不出现，只留「＋ 添加参数」 */
 .params { margin: 4px 0 6px; }
 .param-band { display: flex; align-items: center; gap: 10px; margin: 14px 0 9px; }
-.param-band .label { flex: 0 0 auto; font-size: 11.5px; font-weight: 600; color: var(--fg-soft); }
+.param-band .label { flex: 0 0 auto; font-size: 16px; font-weight: 600; color: var(--fg-soft); }   /* 小四 */
 .param-band .line { flex: 1 1 auto; height: 1px; background: var(--border); }
 .param-row { display: flex; align-items: center; gap: 9px; padding: 5px 0; }
-.param-row .param-name { flex: 1 1 auto; font-size: 12.5px; color: var(--fg-soft); }
-.param-num { width: 92px; font: inherit; font-size: 12.5px; padding: 6px 9px; border: 1px solid var(--border); border-radius: 9px; outline: none; }
+.param-row .param-name { flex: 1 1 auto; font-size: 16px; color: var(--fg-soft); }   /* 小四 */
+.param-num { width: 92px; font: inherit; font-size: 16px; padding: 6px 9px; border: 1px solid var(--border); border-radius: 9px; outline: none; }   /* 小四 */
 /* 层级控件：题卡右上角、折叠按钮左边（下拉可选，也能双击输入数字） */
 .lv-ctl { position: relative; display: inline-flex; align-items: center; gap: 3px; margin-right: 2px; }
 .lv-ctl .lv-label { font-size: 10.5px; color: var(--faint); }
 .lv-input {
-  width: 30px; height: 24px; padding: 0 2px; text-align: center;
-  font: inherit; font-size: 11.5px; color: var(--fg-soft);
+  width: 32px; height: 26px; padding: 0 2px; text-align: center;
+  font: inherit; font-size: 16px; color: var(--fg-soft);   /* 小四 */
   background: #fff; border: 1px solid var(--border); border-radius: 7px; outline: none;
 }
 .lv-input:focus { border-color: var(--border-strong); }
@@ -333,18 +334,20 @@ table.data-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 }
 .param-check { width: 15px; height: 15px; accent-color: #111213; cursor: pointer; }
 .param-think-dur { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
-.param-unit { flex: 0 0 auto; font-size: 11px; color: var(--faint); white-space: nowrap; }
+.param-unit { flex: 0 0 auto; font-size: 16px; color: var(--faint); white-space: nowrap; }   /* 小四 */
 .param-row-think { display: block; }
 .param-head { display: flex; align-items: center; gap: 9px; }
 .param-head .param-name { flex: 1 1 auto; }
 .param-think {
-  width: 100%; margin-top: 7px; font: inherit; font-size: 12.5px; line-height: 1.75; color: var(--fg);
+  width: 100%; margin-top: 7px; font: inherit; font-size: 16px; line-height: 1.75; color: var(--fg);   /* 小四 */
   background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 9px 11px;
   outline: none; resize: none; overflow: hidden;
 }
 .param-think:focus { border-color: var(--border-strong); background: #fff; }
-/* 呈现前清空的说明行：开启后写清「怎么才会生效」，正文为空时转成警示色 */
-.param-clear-note { margin: 4px 0 0; grid-column: 1 / -1; }
+/* 参数行 + 独立一行的说明：说明行不进 .param-row 的 flex，勾选框位置不会被说明挤动 */
+.param-cell { display: block; }
+/* 呈现前清空的警示行：只在「正文为空 → 清屏不会生效」时出现（正常开启不写说明） */
+.param-clear-note { margin: 2px 0 4px; }
 .param-clear-note.warn { color: var(--warn-fg); }
 .param-note { font-size: 11px; color: var(--muted); line-height: 1.7; margin: 6px 0 0; }
 
@@ -355,7 +358,7 @@ table.data-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 }
 .param-opt {
   display: block; width: 100%; text-align: left; white-space: nowrap;
-  font: inherit; font-size: 12.5px; color: var(--fg-soft); background: none;
+  font: inherit; font-size: 16px; color: var(--fg-soft); background: none;   /* 小四 */
   border: 0; border-radius: 8px; padding: 8px 10px; cursor: pointer;
 }
 .param-opt:hover { background: var(--bubble); color: var(--fg); }
@@ -393,7 +396,7 @@ table.data-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .add-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
 .add-row .lbl { font-size: 12px; color: var(--muted); }
 .add-select { font: inherit; font-size: 12.5px; color: var(--fg-soft); background: #fff; border: 1px solid var(--border); border-radius: 10px; padding: 7px 10px; outline: none; }
-.add-num { width: 62px; font: inherit; font-size: 12.5px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 10px; outline: none; }
+.add-num { width: 70px; font: inherit; font-size: 16px;   /* 小四 */ padding: 7px 9px; border: 1px solid var(--border); border-radius: 10px; outline: none; }
 
 /* 「插入题目」二级选择：一级列出题型，悬停到有二级形态的题型时右侧展开二级栏 */
 .ins-picker { position: relative; display: inline-block; }
@@ -494,6 +497,29 @@ table.data-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   .grid2 { grid-template-columns: 1fr; }
 }
 
+/* ---------------------------------------------------------------- 显示全卷
+   每道题的正文拼成一份全文：题与题之间一条分割线，每题上方一行不可编辑的题目标识 */
+.fullview-bar { display: flex; align-items: flex-start; gap: 10px; margin: 0 0 12px; }
+.fullview-tip { flex: 1 1 auto; font-size: 12px; line-height: 1.8; color: var(--muted); }
+.fullview-note { font-size: 11.5px; line-height: 1.75; color: var(--faint); margin: 9px 0 0; }
+.fullview .rich-edit { max-height: none; }        /* 全卷要看全文：不限高 */
+/* 题目标识：视图内的定位行，不参与切分（切回分题时会被丢掉） */
+.fullv-head {
+  display: inline-block; margin: 16px 0 8px; padding: 3px 9px;
+  font-size: 11.5px; color: var(--muted); background: var(--surface);
+  border: 1px solid var(--border); border-radius: 7px;
+  user-select: none; -webkit-user-select: none;
+}
+/* 工具条（字号 / 加粗…）吸顶跟随：全卷很长，选中一段文字后不必再滚回顶部改字号。
+   top 的像素值由 showFullView / 窗口缩放时用脚本量「顶部操作条」的高度写进 style（见 admin.js stickFullToolbar） */
+.fullview .rich-bar {
+  position: sticky; top: 0; z-index: 5;
+  border-radius: 0;                       /* 吸住时上下沿齐平，不留圆角缺口 */
+}
+.fullv-head:first-child { margin-top: 0; }
+/* 分割线 = 题目分界（加粗虚线，一眼能认出来；字号 / 加粗怎么改都动不到它） */
+.fullview .rich-edit hr.fullv-sep { border: 0; border-top: 2px dashed var(--border-strong); margin: 20px 0; }
+
 /* ---------------------------------------------------------------- v4.1 新增：题号 / 就地插入 / 题组 / 预览模拟 */
 
 /* 题号（题卡与大纲共用 .qnum / .ol-num） */
@@ -501,7 +527,7 @@ table.data-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   flex: 0 0 auto; font-size: 11px; font-weight: 600; color: var(--fg-soft);
   background: var(--bubble); border-radius: 999px; padding: 3px 9px;
 }
-.ol-item .ol-num { flex: 0 0 auto; min-width: 16px; font-size: 10.5px; color: var(--faint); text-align: right; }
+.ol-item .ol-num { flex: 0 0 auto; min-width: 14px; font-size: 10.5px; color: var(--faint); text-align: right; }
 
 /* 选中题下方的「插入到这里」 */
 .insert-row {

@@ -38,7 +38,7 @@
   };
   const STYLE_PROPS = ['color', 'background-color', 'font-size', 'font-weight', 'font-style', 'text-decoration', 'text-align'];
   // 字号档位（Word 中文号数 ↔ px ↔ pt）：编辑器下拉、粘贴识别、吸附共用这一张表
-  const BODY_FONT_PX = 14;                                                        // 「正文（默认）」字号
+  const BODY_FONT_PX = 16;                                                        // 「正文（默认）」字号 = 小四（被试端正文、题干、输入框也都是它）
   const FONT_SIZE_PRESETS = [
     { px: 10, pt: 7.5, label: '六号' },
     { px: 12, pt: 9, label: '小五' },
@@ -97,7 +97,7 @@
       const n = Number(m[1]);
       const unit = m[2].toLowerCase();
       // 复制过来的字号一律折算成 px 并归到最近的号数档位：
-      //   pt → px（×4/3）；em/rem/% 按「正文 14px」为基准折算；
+      //   pt → px（×4/3）；em/rem/% 按「正文 16px」为基准折算；
       //   上下限 9–48px（以前上限是 44px，导致「小初 48px / 36pt」被压成 44px，识别不出来）
       let px = null;
       if (unit === 'pt') px = n * 4 / 3;
@@ -154,9 +154,19 @@
     return '';
   }
 
+  // Word / WPS 的列表编号用「downlevel-revealed 条件注释」包着：
+  //   <![if !supportLists]>1.&nbsp;<![endif]>您在多大程度上…
+  // 它既不是合法注释（没有 <!--），也不是合法标签，清洗时会被当成普通文字转义，
+  // 于是正文里就留下 <![if !supportLists]>1.&nbsp;<![endif]> 这一串。
+  // 这里先摘掉条件标记本身、**保留里面的编号文字**（浏览器看 Word 内容时本来就显示它）；
+  // <!--[if …]> 这类带注释语法的写法仍走下面的注释丢弃逻辑。
+  const stripConditionalMarkers = (s) => String(s)
+    .replace(/<!\[if[^\]]*\]>/gi, '')
+    .replace(/<!\[endif\]\s*>/gi, '');
+
   // 清洗：白名单标签 + 白名单样式；不认识的标签只脱壳、保留里面的文字
   function sanitizeHtml(html) {
-    const src = String(html == null ? '' : html);
+    const src = stripConditionalMarkers(html);
     if (!src) return '';
     const out = [];
     const stack = [];
@@ -227,7 +237,9 @@
       const text = src.slice(last, m.index);
       last = TAG_RE.lastIndex;
       // 注意：这里不能用 continue 短路——文本与标签要各自处理，否则「文本后面的标签」会被整段跳过
-      if (text && !skipTag) out.push(escapeText(text));
+      // 先解开实体再转义：Word 粘贴里的 &nbsp; / &#160; 这类写法要落成真正的字符，
+      // 否则会原样显示成「&nbsp;」；再转义一遍是幂等的（&amp; → & → &amp;）。
+      if (text && !skipTag) out.push(escapeText(decodeEntities(text)));
       if (m[0].startsWith('<!--')) continue;                            // 注释丢弃
       if (m[1]) {                                                       // 结束标签
         const rawName = m[1].toLowerCase();
@@ -251,8 +263,10 @@
     if (last < src.length && !skipTag) out.push(escapeText(src.slice(last)));
     while (stack.length) closeTop();
     return out.join('')
-      .replace(/<p(?:\s[^>]*)?>(?:\s|<br>|&nbsp;)*<\/p>/gi, '')      // 空段落（Word 常留）
-      .replace(/<span(?:\s[^>]*)?>\s*<\/span>/gi, '')
+      .replace(/<p(?:\s[^>]*)?>(?:\s|\u00a0|<br>|&nbsp;)*<\/p>/gi, '')      // 空段落（Word 常留；含解开的 nbsp）
+      .replace(/<span(?:\s[^>]*)?>(?:\s|\u00a0)*<\/span>/gi, '')
+      // Word 列表编号后面跟一串制表空格（解成多个空格）：收成一个，HTML 里不显、导出也干净
+      .replace(/(^|>)((?:\d{1,2}|[一二三四五六七八九十]+)[.、．)）])(?:[ \u00a0]{2,})/g, '$1$2 ')
       .trim();
   }
 

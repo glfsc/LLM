@@ -7,7 +7,9 @@ const { fastForwardGates } = require('./direct-db');
 const RT = require('../../public/assets/richtext.js');
 
 // 确定性作答：按题型给出可预期的值（同一份问卷两次走查结果可比对）
-function answerBody(action, seed) {
+// matchAnswers：itemId → 标准答案。「需输入指定内容」的文本题的标准答案不下发给被试端，
+// 走查时只能由调用方显式给；没给就会按普通文本作答、被断言拦下（报错信息即服务端返回的提示文案）。
+function answerBody(action, seed, matchAnswers) {
   switch (action.type) {
     case 'gate': return { consent: true, text: 'AUTO-01' };   // 「含编号」形态要求填编号；普通形态会忽略它
     case 'confirm': return { ack: true };
@@ -16,7 +18,10 @@ function answerBody(action, seed) {
     case 'single': return { value: action.options.length >= 3 ? 3 : 2 };
     case 'multi': return { values: [1, Math.min(2, action.options.length)] };
     case 'rank': return { order: action.options.map((o) => o.value) };
-    case 'text': return { text: `作品${seed}` };
+    case 'text': {
+      const known = action.variant === 'match' ? (matchAnswers || {})[action.itemId] : '';
+      return { text: known || `作品${seed}` };
+    }
     case 'group': return { answers: (action.subs || []).map((sub) => (sub.type === 'text' ? { text: `作品${seed}` } : { value: 1 })) };
     default: return {};
   }
@@ -26,7 +31,8 @@ function answerBody(action, seed) {
 //   messages：AI 消息 + 占位的用户回显，用于跨会话/跨组逐字比对
 //   flags：门控类型是否出现过（延迟发出 / 强制等待 / 时间窗 / 共用窗口 / 题组窗口）
 //   gates：门控快进的实况（被拒次数、回拨总时长）
-async function walk({ request, questionnaireId, record }) {
+//   matchAnswers：可选，itemId → 标准答案（供「需输入指定内容」的文本题作答）
+async function walk({ request, questionnaireId, record, matchAnswers }) {
   const created = await request('/api/session', { body: { q: questionnaireId } });
   if (!created.ok) throw new Error('创建会话失败: ' + JSON.stringify(created.data));
   const sessionId = created.data.session.id;
@@ -49,7 +55,7 @@ async function walk({ request, questionnaireId, record }) {
     if (action.type === 'group' && (action.minSubmitAtMs || action.deadlineMs)) flags.groupWindow = true;
 
     if (action.type === 'text' || action.type === 'group') seed += 1;
-    const res = await request('/api/step', { body: { sessionId, elapsedMs: 400, ...answerBody(action, seed) } });
+    const res = await request('/api/step', { body: { sessionId, elapsedMs: 400, ...answerBody(action, seed, matchAnswers) } });
     if (res.status === 400 && res.data.error === 'too_early') {
       // 门控确实会拦：真发一次请求、断言被拒（保留覆盖），但不真实等待——
       // 直接把时间基准往前拨过门控，立刻重发。

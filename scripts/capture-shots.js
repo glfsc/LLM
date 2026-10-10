@@ -22,8 +22,17 @@ const DEMO_NAME = '演示问卷（走查用）';
 const TIMEOUT_Q = '【走查·时间已到停止作答】';
 // 门控压到秒级：走查只需要「这些状态出现过」，不需要真实时长
 // （真实门控由 consistency-check 用回拨快进覆盖）
-const DEMO_TIMING = { wait: 2, minSubmit: 2, maxAnswer: 5 };   // maxAnswer 也留一段，走查里能看到「作答倒计时」
+// maxAnswer 留 30 秒：走查里能看到「作答倒计时」，又不至于在「跳到最后一题后先播回放」时把窗口耗光
+// （压到 5 秒时，最后一道创作题会在回放还没播完就超时停止，走不到终态页）
+const DEMO_TIMING = { wait: 2, minSubmit: 2, maxAnswer: 30 };
 const DEMO_THINK_MS = 600;                                               // 思考面板时长（走查只看状态，不等真实 8 秒）
+// 「需输入指定内容」的文本题：标准答案不下发被试端，走查时由这里显式喂给自动作答（与 consistency-check 同一套做法）
+let MATCH_ANSWERS = {};
+const setMatchAnswers = (items) => {
+  MATCH_ANSWERS = Object.fromEntries(items
+    .filter((i) => i.variant === 'match')
+    .map((i) => [i.id, String(i.answer || '').split('\n')[0].trim()]));
+};
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -54,12 +63,12 @@ async function ensureDemo() {
     if (limits.minSubmit) limits.minSubmit = DEMO_TIMING.minSubmit;
     if (limits.maxAnswer) limits.maxAnswer = DEMO_TIMING.maxAnswer;
     if (limits.thinkMs) limits.thinkMs = DEMO_THINK_MS;
-    if (/内容创作（再次）/.test(it.title)) limits.refresh = 1;   // 批次5：走查覆盖「呈现前清空」端到端
+    if (/广告语和创作说明/.test(it.title)) limits.refresh = 1;   // 批次5：走查覆盖「呈现前清空」端到端（最后一题）
     return { ...it, limits };
   });
   console.log('  含计时限制的题目：' + items.filter((i) => Object.keys(i.limits).length).map((i) => `${i.title}[${JSON.stringify(i.limits)}]`).join(' '));
-  // 走查要覆盖「阅读确认页（内联块）」：组别3 原卷没有这题型，这里插一道在「内容创作（再次）」之后
-  const confirmAt = items.findIndex((i) => /内容创作（再次）/.test(i.title));
+  // 走查要覆盖「阅读确认页（内联块）」：线上原卷已改用「需输入指定内容」的题，这里插一道确认页在最后一题之后
+  const confirmAt = items.findIndex((i) => /广告语和创作说明/.test(i.title));
   if (confirmAt >= 0) {
     items.splice(confirmAt + 1, 0, {
       id: 'demo_confirm', type: 'confirm', title: '请确认你已阅读上面的反馈',
@@ -70,7 +79,9 @@ async function ensureDemo() {
   await adminFetch(token, '/api/admin/questionnaire/update', {
     body: { id: created.id, title: DEMO_NAME, timing: created.timing, items }
   });
-  console.log(`演示问卷：${DEMO_NAME}（${created.id}）· 题目 ${items.length} 道`);
+  setMatchAnswers(items);
+  console.log(`演示问卷：${DEMO_NAME}（${created.id}）· 题目 ${items.length} 道`
+    + (Object.keys(MATCH_ANSWERS).length ? ` · 需输入指定内容 ${Object.keys(MATCH_ANSWERS).length} 道` : ''));
   return { token, questionnaire: created };
 }
 
@@ -88,6 +99,64 @@ async function ensureTimeoutFixture(token) {
     { id: 'to_e', type: 'debrief', title: '结束说明', text: '到此结束，感谢参与。' }
   ];
   const created = (await adminFetch(token, '/api/admin/questionnaire/create', { body: { title: TIMEOUT_Q, items } })).questionnaire;
+  return created;
+}
+
+// AI 消息呈现自检用的小问卷：开场两条连续消息（第一条短、第二条长到超过一屏）+ 一条带思考面板的反馈。
+// 用来验证两件事：① 长消息流式输出时「还没输出的部分不占高度」（否则视口会被顶到一片空白行上）；
+// ② 思考面板的文字按目标时长铺满（字数多就走得快），末尾不再干等。
+const FEEDBACK_Q = '【走查·AI 反馈呈现】';
+const FEEDBACK_Q_THINK_MS = 3000;      // 面板时长（真实配置是 20 秒，走查只验证节奏关系）
+
+async function ensureFeedbackFixture(token) {
+  const list = await adminFetch(token, '/api/admin/questionnaires');
+  for (const q of list.questionnaires.filter((x) => x.title === FEEDBACK_Q)) {
+    await adminFetch(token, '/api/admin/questionnaire/delete', { body: { id: q.id, force: true } });
+  }
+  // 第二条消息要比视口还高（约 40 行），这样才能验证「跟随滚动不会停在没写字的空白底部」
+  const longLines = Array.from({ length: 40 }, (_, i) => `第 ${i + 1} 行：占位文字。`);
+  const items = [
+    { id: 'fb_g', type: 'gate', title: '知情同意', text: '请阅读并勾选同意。', check: '我已阅读并同意', button: '开始实验' },
+    { id: 'fb_m1', type: 'message', title: '第一条消息', text: '第一条消息：先把背景说清楚。' },
+    { id: 'fb_m2', type: 'message', title: '第二条消息（长）', text: longLines.join('\n') },
+    {
+      id: 'fb_m3', type: 'message', title: '带思考面板的反馈',
+      text: '反馈正文：这条消息前面有一块按固定时长铺满的思考面板。',
+      thinking: '先看评价标准，再逐条对照。'.repeat(28),
+      limits: { thinkMs: FEEDBACK_Q_THINK_MS }
+    },
+    { id: 'fb_t', type: 'text', title: '收尾文本题', text: '随便写一句。', rows: 1 },
+    // 「交完卷、AI 还在长篇回应」的真实情形（创作 → 反馈 就是这样）：
+    // 交上去之后紧接着一条 18 行的 AI 消息在逐字输出，这期间输入框必须是空的
+    { id: 'fb_m4', type: 'message', title: '交卷后的 AI 回应', text: longLines.slice(0, 18).join('\n') },
+    { id: 'fb_t2', type: 'text', title: '最后一道文本题', text: '随便写第二句。', rows: 1 }
+  ];
+  const created = (await adminFetch(token, '/api/admin/questionnaire/create', { body: { title: FEEDBACK_Q, items } })).questionnaire;
+  return created;
+}
+
+// 致谢页置顶自检用的小问卷：知情同意页 + 一页很长的致谢（手机上必然可滚）。
+// 手机上填编号一定会在知情同意页里往下滚，而这两页共用同一个全屏滚动容器 ——
+// 以前浏览器会把知情同意页的滚动偏移沿用到致谢页，于是致谢页一进来就停在最下面。
+const TOP_Q = '【走查·致谢页置顶】';
+async function ensureTopFixture(token) {
+  const list = await adminFetch(token, '/api/admin/questionnaires');
+  for (const q of list.questionnaires.filter((x) => x.title === TOP_Q)) {
+    await adminFetch(token, '/api/admin/questionnaire/delete', { body: { id: q.id, force: true } });
+  }
+  const items = [
+    {
+      // 知情同意页要够长：手机上必须超过一屏，它才会被滚动（真实知情同意页就是这种长度）
+      id: 'tp_g', type: 'gate', title: '知情同意说明',
+      text: Array.from({ length: 22 }, (_, i) => `第 ${i + 1} 行：知情同意说明的正文，手机上要滚动才能读完。`).join('\n'),
+      check: '我已阅读并同意', button: '开始实验'
+    },
+    {
+      id: 'tp_e', type: 'debrief', title: '致谢与事后解释',
+      text: Array.from({ length: 24 }, (_, i) => `第 ${i + 1} 行：致谢与事后解释的正文，用来把这一页撑到手机上必须滚动的高度。`).join('\n')
+    }
+  ];
+  const created = (await adminFetch(token, '/api/admin/questionnaire/create', { body: { title: TOP_Q, items } })).questionnaire;
   return created;
 }
 
@@ -211,9 +280,73 @@ async function main() {
   await shot('v6-03-admin-exp-list');
   await hashTo('#/exp/group3-high-clarity', 1200);
   await shot('v6-04-admin-exp-editor');
-  await evaluate(`document.querySelectorAll('#sidebar-outline .ol-item')[6].click()`);
-  await sleep(700);
+  // 本轮：进入编辑页，大纲**默认折叠到最高层**（只显示最大级别，下属不显示）。
+  // 「最高层」= 前面没有任何更深层级的题（用与大纲同一套层级规则独立算一遍，不直接读它的内部集合）
+  const olFirst = JSON.parse(await evaluate(`(() => {
+    const rows = [...document.querySelectorAll('#sidebar-outline .ol-item')];
+    const items = (state.editingExp && state.editingExp.items) || [];
+    const rank = (lv) => { const v = Math.min(4, Math.max(0, Math.round(Number(lv) || 0))); return v === 0 ? 0 : 5 - v; };
+    const roots = items.filter((it, i) => items.slice(0, i).every((p) => rank(p.level) <= rank(it.level)));
+    const rootIds = roots.map((it) => it.id);
+    return JSON.stringify({
+      rows: rows.length, total: items.length, roots: rootIds.length,
+      onlyRoots: rows.every((r) => rootIds.includes(r.dataset.id)),
+      folded: rows.filter((r) => { const f = r.querySelector('.ol-fold'); return f && f.textContent === '▸'; }).length,
+      unfoldArrow: rows.filter((r) => { const f = r.querySelector('.ol-fold'); return f && f.textContent === '▾'; }).length
+    });
+  })()`));
+  hardCheck(olFirst.rows > 0 && olFirst.rows < olFirst.total && olFirst.onlyRoots && olFirst.unfoldArrow === 0,
+    '进入编辑页：大纲默认折叠到最高层（只显示最大级别，下属不显示）',
+    `显示 ${olFirst.rows} 行 / 共 ${olFirst.total} 题（最高层 ${olFirst.roots} 行）· 展开态的父题 ${olFirst.unfoldArrow} 个`);
+  // 折叠 / 展开：点箭头 → 下属出现；箭头方向跟着变
+  const foldCheck = JSON.parse(await evaluate(`(() => {
+    const rows = () => [...document.querySelectorAll('#sidebar-outline .ol-item')];
+    const before = rows().length;
+    const parent = rows().find((r) => r.querySelector('.ol-fold'));
+    if (!parent) return JSON.stringify({ skip: true });
+    const id = parent.dataset.id;
+    parent.querySelector('.ol-fold').click();
+    const after = rows();
+    const row = after.find((r) => r.dataset.id === id);
+    return JSON.stringify({ skip: false, id, before, opened: after.length, arrow: row.querySelector('.ol-fold').textContent });
+  })()`));
+  hardCheck(!foldCheck.skip && foldCheck.opened > foldCheck.before && foldCheck.arrow === '▾',
+    '大纲：点箭头展开下属（折叠 → 展开，箭头变向）',
+    foldCheck.skip ? '没有可折叠的父题' : `${foldCheck.before} 行 → ${foldCheck.opened} 行，箭头 ${foldCheck.arrow}`);
+  // 本轮：离开再进来要恢复「大纲长什么样」与「看到哪一题」（默认折叠只在没有记录时生效）
+  const olSaved = JSON.parse(await evaluate(`(() => {
+    const rows = () => [...document.querySelectorAll('#sidebar-outline .ol-item')];
+    const folded = rows().find((r) => { const f = r.querySelector('.ol-fold'); return f && f.textContent === '▸'; });
+    if (folded) folded.querySelector('.ol-fold').click();            // 再折一道：让状态与默认不同
+    const list = rows();
+    const target = list[list.length - 1];                             // 选最后一行（离第一题最远）
+    target.click();
+    return JSON.stringify({ id: target.dataset.id, rows: rows().length, scrollTop: Math.round(document.querySelector('.editor-scroll').scrollTop) });
+  })()`));
+  await sleep(900);
+  await hashTo('#/q', 800);                                          // 离开编辑页
+  await hashTo('#/exp/group3-high-clarity', 1500);                   // 再进来
+  const olBack = JSON.parse(await evaluate(`(() => {
+    const rows = [...document.querySelectorAll('#sidebar-outline .ol-item')];
+    const on = document.querySelector('#sidebar-outline .ol-item.on');
+    const sc = document.querySelector('.editor-scroll');
+    const card = on ? document.querySelector('.qcard[data-id="' + on.dataset.id + '"]') : null;
+    return JSON.stringify({
+      rows: rows.length, selected: state.selected || '', onId: on ? on.dataset.id : '',
+      cardTop: card && sc ? Math.round(card.getBoundingClientRect().top - sc.getBoundingClientRect().top) : null
+    });
+  })()`));
+  hardCheck(olBack.rows === olSaved.rows && olBack.selected === olSaved.id && olBack.onId === olSaved.id,
+    '大纲：退出再进入，恢复上次的展开状态与所在题目',
+    `回来 ${olBack.rows} 行（离开前 ${olSaved.rows} 行）· 选中 ${olBack.selected || '（空）'} / 高亮 ${olBack.onId || '（无）'}（期望 ${olSaved.id}）`);
+  hardCheck(olBack.cardTop !== null && olBack.cardTop >= -4 && olBack.cardTop < 200,
+    '大纲：恢复时编辑区落回那一题（瞬时落位，不再是回到第一题）',
+    `题卡距编辑区顶 ${olBack.cardTop}px`);
   await shot('v6-05-admin-exp-outline');
+  // 点大纲第 7 行：选中 + 平滑滑到该题开头（沿用原有的落点断言）
+  await evaluate(`(() => { const rows=[...document.querySelectorAll('#sidebar-outline .ol-item')]; const r = rows[Math.min(6, rows.length - 1)]; r.click(); return 'ok'; })()`);
+  await sleep(700);
+  await shot('v6-28-admin-exp-outline-jump');
   // 选中「内容创作」题组并滚动到视口中央（选中态会展开为完整编辑器，含子题）
   await evaluate(`(() => { const c=[...document.querySelectorAll('.qcard')].find(x=>/内容创作/.test(x.querySelector('.qtitle').textContent)); if (c) c.querySelector('.qcard-head').click(); return 'ok'; })()`);
   await sleep(600);
@@ -279,6 +412,72 @@ async function main() {
   hardCheck(phoneFit.w >= 150 && phoneFit.bottom <= phoneFit.mainBottom + 2 && phoneFit.overflow <= 1,
     '右侧手机栏完整可见（未被裁、未撑出滚动）',
     phoneFit.w + '×' + phoneFit.h + '，栏底 ' + phoneFit.bottom + ' / 主区域底 ' + phoneFit.mainBottom + '，隐藏溢出 ' + phoneFit.overflow + 'px');
+
+  // ---- 显示全卷：把每道题的正文拼成一份全文（每题之间一条分割线）→ 全选改字号 → 切回分题
+  const fullInfo = JSON.parse(await evaluate(`(() => {
+    const btn = [...document.querySelectorAll('.editor-actionbar-right button')].find((b) => /显示全卷/.test(b.textContent));
+    if (!btn) return JSON.stringify({ ok: false });
+    btn.click();
+    const view = document.querySelector('.fullview');
+    const ed = view && view.querySelector('.rich-edit');
+    const items = state.editingQ.items;
+    return JSON.stringify({
+      ok: true,
+      visible: !!(view && !view.classList.contains('hidden')),
+      seps: ed ? ed.querySelectorAll('hr.fullv-sep').length : -1,
+      locators: ed ? ed.querySelectorAll('.fullv-head').length : -1,
+      items: items.length,
+      textLen: items.reduce((n, i) => n + String(i.text || '').length, 0)
+    });
+  })()`));
+  hardCheck(fullInfo.ok && fullInfo.visible && fullInfo.seps === fullInfo.items - 1 && fullInfo.locators === fullInfo.items,
+    '显示全卷：每题之间一条分割线 + 每题一行题目标识（不可编辑）',
+    `分割线 ${fullInfo.seps} 条 / 标识行 ${fullInfo.locators} 行 / 共 ${fullInfo.items} 题`);
+  await shot('v6-09b-admin-fullview');
+  // 全选 → 改字号「小四 16px」：走的是编辑器工具条那条路（也覆盖「选区被下拉抢走 / 同值不触发」的修复）
+  const fullApply = JSON.parse(await evaluate(`(() => {
+    const view = document.querySelector('.fullview');
+    const ed = view.querySelector('.rich-edit');
+    const range = document.createRange();
+    range.selectNodeContents(ed);
+    const sel = window.getSelection();
+    sel.removeAllRanges(); sel.addRange(range);
+    const sizeSel = view.querySelectorAll('.rich-bar select')[1];
+    sizeSel.value = '16px';
+    sizeSel.dispatchEvent(new Event('change'));
+    return JSON.stringify({ value: sizeSel.value, spans: ed.querySelectorAll('[style*="font-size"]').length });
+  })()`));
+  hardCheck(fullApply.value === '16px' && fullApply.spans > 0,
+    '全卷视图：全选后能改字号（下拉回显 = 刚应用的档位，不再「点了没反应」）',
+    `下拉 ${fullApply.value} · 带字号的内联块 ${fullApply.spans} 处`);
+  // 切回分题：按分割线切分写回 → 题数不变、文本一字不少、题目标识与分割线不会写进正文
+  const fullBack = JSON.parse(await evaluate(`(() => {
+    const btn = [...document.querySelectorAll('.editor-actionbar-right button')].find((b) => /返回分题编辑/.test(b.textContent));
+    if (!btn) return JSON.stringify({ ok: false });
+    btn.click();
+    const items = state.editingQ.items;
+    const view = document.querySelector('.fullview');
+    return JSON.stringify({
+      ok: true,
+      items: items.length,
+      cards: document.querySelectorAll('.qcard').length,
+      textLen: items.reduce((n, i) => n + String(i.text || '').length, 0),
+      // 注意：这段在 JS 模板字符串里，正则里的 \s 要写成 \\s，否则反斜杠会被模板吃掉（/s*16px/ 匹配不上）
+      with16: items.filter((i) => /font-size:\\s*16px/.test(i.html || '')).length,
+      locatorLeak: items.filter((i) => /fullv-head/.test(i.html || '')).length,
+      hrLeak: items.filter((i) => /<hr/i.test(i.html || '')).length,
+      viewHidden: !view || view.classList.contains('hidden'),
+      sample: items.slice(0, 3).map((i) => String(i.html || '').replace(/\\s+/g, ' ').slice(0, 70))
+    });
+  })()`));
+  hardCheck(fullBack.ok && fullBack.viewHidden && fullBack.items === fullInfo.items
+    && fullBack.textLen === fullInfo.textLen && fullBack.locatorLeak === 0 && fullBack.hrLeak === 0,
+    '返回分题编辑：按分割线切回每题（题数不变、正文一字不少、标识行与分割线不写进正文）',
+    `题数 ${fullBack.items}（原 ${fullInfo.items}）· 文本 ${fullBack.textLen}（原 ${fullInfo.textLen}）`
+      + ` · 标识行泄漏 ${fullBack.locatorLeak} · 分割线泄漏 ${fullBack.hrLeak}`);
+  hardCheck(fullBack.with16 >= 1, '全卷里改的字号确实写回了分题正文', `带 16px 的题目 ${fullBack.with16} 道`);
+  console.log('全卷视图：' + fullBack.items + ' 题 · 切回后带 16px 的题 ' + fullBack.with16 + ' 道 · 文本 ' + fullBack.textLen + ' 字（原 ' + fullInfo.textLen + '）');
+  console.log('  样例正文：' + JSON.stringify(fullBack.sample));
 
   // ---- 手机预览（问卷编辑页）：真 iframe + 20× 倍速；并核对「预览 = 被试端同一份页面」
   await evaluate(`(() => { const s = document.querySelector('.pv-speed'); if (!s) return 'no-speed'; s.value = '20'; s.dispatchEvent(new Event('change')); return 'ok'; })()`);
@@ -420,42 +619,111 @@ async function main() {
   // 批次7：预览做完后刷新，必须**强制重进**（回到知情同意页从头再走），不能被上一份的终态页锁住 ——
   // 终态记录早先按「问卷短码」分桶，而预览没有短码（空串），于是所有预览共用一个键：
   // 做完一份预览再刷新 / 再开另一组问卷的预览，都会停在上一份的终态页，进不去也刷不掉。
-  const reenterPv = JSON.parse(await evaluate(`(async () => {
-    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  // 跳到最后一道题 → 一路答到会话结束（最后一道题之后可能还有确认页这类待作答的环节）。
+  // 一步只做一件短事：CDP 的 evaluate 有 25 秒上限，长等待都在 Node 侧轮询。
+  const pvSeekLast = JSON.parse(await evaluate(`(async () => {
     const w = document.querySelector('.phone-frame').contentWindow;
     const b = w.__preview;
-    const d = w.document;
     if (!b) return JSON.stringify({ ok: false });
-    const seekQuestion = (qno) => (b.seekQuestion ? b.seekQuestion(qno) : b.seek(qno - 1));
-    const title = () => (d.getElementById('page-title') || {}).textContent || '';
-    const pageUp = () => { const sc = d.getElementById('page-screen'); return !!sc && !sc.classList.contains('hidden'); };
-    await b.setSpeed(1);                           // 走查版问卷把作答窗口压成 5 秒；20× 下只剩 0.25 秒会在作答前就超时停止，这里用 1×
-    await seekQuestion(Math.max(1, (b.totalQuestions ? b.totalQuestions() : b.total()) || 1));   // 跳到最后一道题
-    await sleep(400);
-    const input = d.getElementById('composer-input');
-    const card = d.querySelector('.qcard.pending');
-    if (card) {                                    // 题卡式：点一个选项再提交
-      const btn = [...card.querySelectorAll('.rating-btn, .option-btn')][0];
-      if (btn) btn.click();
-      const submit = card.querySelector('.primary-btn');
-      if (submit && !submit.disabled) submit.click();
-    } else if (input) {                            // 消息式：在底部输入框作答
-      input.value = '终态自检用的一句话';
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      const send = d.getElementById('composer-send');
-      if (send && !send.disabled) send.click();
-    }
-    let ended = false;
-    for (let i = 0; i < 60 && !ended; i += 1) { await sleep(100); ended = pageUp() && !/知情同意/.test(title()); }
-    const endTitle = title();
-    const src = w.location.href;
-    await new Promise((resolve) => { w.location.reload(); setTimeout(resolve, 1200); });   // 刷新预览页
-    for (let i = 0; i < 40; i += 1) { await sleep(100); if (pageUp()) break; }
-    return JSON.stringify({ ok: true, ended, endTitle, src, backTitle: title(), backIsConsent: /知情同意/.test(title()) });
+    try {
+      await b.setSpeed(1);                         // 20× 下作答窗口会先到点，这里用 1×
+      await (b.seekQuestion ? b.seekQuestion(b.totalQuestions()) : b.seek(b.total() - 1));   // 跳到最后一道题
+    } catch (e) { return JSON.stringify({ ok: false, msg: e.message }); }
+    return JSON.stringify({ ok: true, total: b.totalQuestions() });
   })()`));
+  // 逐帧观察：题面是否就绪（输入框可用 / 有可提交的按钮）、是否已到终态
+  const pvPose = async () => JSON.parse(await evaluate(`(() => {
+    const w = document.querySelector('.phone-frame').contentWindow;
+    const d = w.document;
+    const input = d.getElementById('composer-input');
+    const card = d.querySelector('.qcard.pending, .qmsg.pending');
+    const btn = card ? card.querySelector('.primary-btn') : null;
+    return JSON.stringify({
+      completed: !!(w.state && w.state.completed),
+      pageUp: !d.getElementById('page-screen').classList.contains('hidden'),
+      title: (d.getElementById('page-title') || {}).textContent || '',
+      hasCard: !!card,
+      cardReady: !!(btn && !btn.disabled),
+      composerReady: !!(input && !input.disabled),
+      kind: card ? card.className : (input && !input.disabled ? 'composer' : 'none')
+    });
+  })()`));
+  let answeredVia = 'none';
+  for (let round = 0; round < 14; round += 1) {
+    let pose = null;
+    for (let i = 0; i < 100; i += 1) {            // 等题面就绪（含：跳题后先播回放）
+      await sleep(300);
+      pose = await pvPose();
+      if (pose.completed || pose.pageUp && !/知情同意/.test(pose.title)) break;
+      if (pose.cardReady || pose.composerReady) break;
+    }
+    if (!pose || pose.completed) { if (pose) answeredVia += '+done'; break; }
+    if (pose.cardReady) {                          // 题卡 / 确认页：点提交
+      await evaluate(`(() => {
+        const d = document.querySelector('.phone-frame').contentWindow.document;
+        const card = d.querySelector('.qcard.pending, .qmsg.pending');
+        if (!card) return 'none';
+        const first = card.querySelector('.rating-btn, .option-btn');
+        if (first && !first.classList.contains('selected')) first.click();
+        const btn = card.querySelector('.primary-btn');
+        if (btn && !btn.disabled) { btn.click(); return 'card'; }
+        return 'card-wait';
+      })()`);
+      answeredVia = 'card';
+      await sleep(600);
+      continue;
+    }
+    if (pose.composerReady) {                      // 消息式题面：底部输入框作答
+      await evaluate(`(() => {
+        const w = document.querySelector('.phone-frame').contentWindow;
+        const d = w.document;
+        const input = d.getElementById('composer-input');
+        input.value = '终态自检用的一句话';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        const send = d.getElementById('composer-send');
+        if (send && !send.disabled) send.click();
+        return 'ok';
+      })()`);
+      answeredVia = 'composer';
+      await sleep(600);
+      continue;
+    }
+    break;                                          // 门控没放行 / 时间已到：交给下面的断言报错
+  }
+  let ended = false;
+  for (let i = 0; i < 60 && !ended; i += 1) {
+    await sleep(300);
+    const st2 = await pvPose();
+    ended = st2.completed || (st2.pageUp && !/知情同意/.test(st2.title));
+    if (ended) break;
+  }
+  const pvEnd = await pvPose();
+  const pvDiag = JSON.parse(await evaluate(`(() => {
+    const w = document.querySelector('.phone-frame').contentWindow;
+    const d = w.document;
+    const last = d.getElementById('chat-stream').lastElementChild;
+    return JSON.stringify({
+      action: w.state && w.state.action ? (w.state.action.type + ':' + w.state.action.itemId) : null,
+      busy: !!(w.state && w.state.busy),
+      deadFired: !!(w.state && w.state.deadlineFired),
+      err: (d.getElementById('composer-error') || {}).textContent || '',
+      kids: d.getElementById('chat-stream').children.length,
+      last: last ? (last.className + ' | ' + String(last.textContent).slice(0, 30)) : null
+    });
+  })()`));
+  // 刷新预览页：必须**强制重进**（回到知情同意页），不能被上一次的终态页锁住
+  await evaluate(`(() => { document.querySelector('.phone-frame').contentWindow.location.reload(); return 'ok'; })()`);
+  let backTitle = '';
+  for (let i = 0; i < 60; i += 1) {
+    await sleep(300);
+    const st3 = await pvPose();
+    if (st3.pageUp) { backTitle = st3.title; break; }
+  }
+  const reenterPv = { ok: pvSeekLast.ok, via: answeredVia, ended, endTitle: pvEnd.title, backTitle, backIsConsent: /知情同意/.test(backTitle) };
   hardCheck(reenterPv.ok && reenterPv.ended && reenterPv.backIsConsent,
     '预览：做完后刷新强制重进（回到知情同意页，不再被终态页锁住）',
-    reenterPv.ok ? ('终态「' + reenterPv.endTitle + '」→ 刷新后「' + reenterPv.backTitle + '」') : '预览桥不可用');
+    reenterPv.ok ? ('作答路径 ' + reenterPv.via + ' · 终态「' + reenterPv.endTitle + '」→ 刷新后「' + reenterPv.backTitle + '」'
+      + ' · 诊断 ' + JSON.stringify(pvDiag)) : '预览桥不可用');
   const pvOk = pvBridge.ok && pvBridge.kept && pvBridge.qno1 === 3 && pvBridge.cardQno === 3 && pvBridge.speedNow === 5;
   hardCheck(pvBridge.speedNow === 5, '预览：改倍速后客户端立刻拿到新倍速（倒计时与弹字都按它加速）', 'speed=' + pvBridge.speedNow);
   console.log('预览进度/倍速：会话共 ' + pvBridge.totalQ + ' 题（' + pvBridge.total + ' 个作答单元）· 跳到第 3 题后卡面显示第 ' + pvBridge.cardQno + ' 题（作答卡 ' + pvBridge.done1 + '）'
@@ -534,6 +802,32 @@ async function main() {
   hardCheck(speedScreen.markAfter1 && speedScreen.markAfter2,
     '切倍速不会重画聊天流（已输出的内容继续保留，不会清掉重来）',
     `切 20× 后标记${speedScreen.markAfter1 ? '仍在 ✔' : '丢了 ✘'} · 切 5× 后${speedScreen.markAfter2 ? '仍在 ✔' : '丢了 ✘'}`);
+  // 知情同意 → 开场材料 / 任务要求 / 阅读确认（需输入指定内容）→ 首个打分题：
+  // 材料自动播放（1× 逐字输出，两份材料加起来约 20 秒），阅读确认题要把标准答案原样打进底部输入框再发送，
+  // 打分题出现才算到位。预算给足 3 分钟（中间只等待，不做断言）。
+  const advanceToFirstRating = async () => {
+    for (let i = 0; i < 360; i += 1) {
+      const t = await evaluate(`(() => { const a = state.action; return a ? a.type : null; })()`);
+      if (t === 'rating') return;
+      if (t === 'text') {
+        await evaluate(`(() => {
+          const a = state.action;
+          const inp = document.getElementById('composer-input');
+          if (!inp || inp.disabled) return 'skip';
+          inp.value = (${JSON.stringify(MATCH_ANSWERS)})[a.itemId] || '轻负担，一口青柠爽';
+          inp.dispatchEvent(new Event('input', { bubbles: true }));
+          const send = document.getElementById('composer-send');
+          if (send && !send.disabled) send.click();
+          return 'ok';
+        })()`);
+        await sleep(700);
+      } else {
+        await sleep(500);
+      }
+    }
+    await waitFor(`(() => { const a=state.action; return !!(a && a.type==='rating' && state.questionNodes.get(a.itemId)); })()`, 120000, '首个打分题');
+  };
+
   await evaluate(`localStorage.clear()`);
   await goto(`${BASE}/chat?q=${questionnaire.id}&fresh=1`, 1200);
   await waitFor(`!document.getElementById('page-screen').classList.contains('hidden')`, 30000, '知情同意页');
@@ -544,7 +838,7 @@ async function main() {
   await evaluate(`(() => { const cb=document.getElementById('page-check'); if (cb && !cb.checked) { cb.checked=true; cb.dispatchEvent(new Event('change')); } return 'ok'; })()`);
   await sleep(300);
   await evaluate(`document.getElementById('page-btn').click()`);
-  await waitFor(`(() => { const a=state.action; return !!(a && a.type==='rating' && state.questionNodes.get(a.itemId)); })()`, 120000, '首个打分题');
+  await advanceToFirstRating();
   await shot('v6-11-chat-rating');
 
   // 批次5 #7：禁止选中 / 复制 / 右键（输入框内放行）
@@ -564,14 +858,14 @@ async function main() {
   hardCheck(antiCopy.sel === 'none', '被试端正文不可选中（user-select: none）', 'user-select=' + antiCopy.sel);
   hardCheck(antiCopy.copy && antiCopy.cut && antiCopy.menu, '复制 / 剪切 / 右键菜单已拦截', JSON.stringify({ copy: antiCopy.copy, cut: antiCopy.cut, menu: antiCopy.menu }));
   hardCheck(antiCopy.inpSel === 'text' && antiCopy.inpCopy === false, '输入框内可正常选中与复制', 'input user-select=' + antiCopy.inpSel);
-  // 第三轮补丁：被试端正文与编辑器「正文（默认 14px）」严格一致（此前被试端是 14.5px）
+  // 被试端正文与编辑器「正文（默认 16px）」严格一致（2026-10-09 起统一为小四 16px）
   const fontFit = JSON.parse(await evaluate(`(() => {
     const ai = document.querySelector('#chat-stream .msg.ai .ai-text');
     const page = document.getElementById('page-text');
     return JSON.stringify({ ai: ai ? getComputedStyle(ai).fontSize : null, page: page ? getComputedStyle(page).fontSize : null });
   })()`));
-  hardCheck(fontFit.ai === '14px' && (fontFit.page == null || fontFit.page === '14px'),
-    '被试端正文 14px（与编辑器「正文（默认 14px）」一致）',
+  hardCheck(fontFit.ai === '16px' && (fontFit.page == null || fontFit.page === '16px'),
+    '被试端正文 16px（小四，与编辑器「正文（默认 16px）」一致）',
     'AI 正文 ' + fontFit.ai + ' · 页面正文 ' + fontFit.page);
 
   // 内联作答：直接点卡片内的控件（打分局/单选点选即提交；题组/文本点提交）
@@ -598,10 +892,15 @@ async function main() {
         card.querySelectorAll('.option-btn').forEach((b2, i) => { if (i === 0) b2.click(); });
       } else if (a.type === 'text') {
         // 消息式题面：题干像一条 AI 消息，作答在底部常驻输入框（本轮改动）
+        // 「需输入指定内容」的题必须输入标准答案：服务端会先断言，不符时这一笔不发送、走查会卡住
+        const need = (${JSON.stringify(MATCH_ANSWERS)})[a.itemId];
         const inp0 = document.getElementById('composer-input');
-        if (inp0 && !inp0.disabled && !inp0.value) {
-          inp0.value = '轻负担，一口青柠爽';
-          inp0.dispatchEvent(new Event('input', { bubbles: true }));
+        if (inp0 && !inp0.disabled) {
+          const want = need || '轻负担，一口青柠爽';
+          if (inp0.value !== want) {
+            inp0.value = want;
+            inp0.dispatchEvent(new Event('input', { bubbles: true }));
+          }
         }
       } else if (a.type === 'group') {
         const inputs = card.querySelectorAll('.answer-input');
@@ -771,6 +1070,8 @@ async function main() {
       const key = `${info.type}:${info.itemId}`;
       if (!seen.includes(key)) seen.push(key);
       if (info.type === 'debrief' && !seen.includes('SHOT-DEBRIEF')) {
+        // 注意：当前配置下结束说明会直接转成「终态页」（applyPayload 自动 ack → showFinalPage），
+        // 所以这一支通常不触发；「致谢页置顶」由终态页检查与手机端那支专项检查覆盖。
         seen.push('SHOT-DEBRIEF');
         await sleep(600);
         await shot('v6-15-chat-debrief');
@@ -780,6 +1081,9 @@ async function main() {
         await sleep(250);
         await evaluate(`(() => { const cb=document.getElementById('page-check'); if (cb && !cb.checked) { cb.checked=true; cb.dispatchEvent(new Event('change')); } return 'ok'; })()`);
         await sleep(250);
+        // 本轮：把知情同意页滚到下半屏（手机上填编号必然要滚）——这样后面「致谢页从最上方开始」才有验证意义
+        await evaluate(`(() => { const p=document.getElementById('page-screen'); p.scrollTop = p.scrollHeight; return 'ok'; })()`);
+        await sleep(120);
       }
       await evaluate(`document.getElementById('page-btn').click()`);
       await sleep(700);
@@ -817,14 +1121,18 @@ async function main() {
       buttons: others,
       hint: document.getElementById('page-hint').textContent,
       body: document.getElementById('page-text').textContent,
-      title: document.getElementById('page-title').textContent
+      title: document.getElementById('page-title').textContent,
+      scrollTop: Math.round(document.getElementById('page-screen').scrollTop)
     });
   })()`));
   // 收尾小字（「可以关闭本页面」）现在是结束说明正文的一部分，由作者在管理端编辑
   const finalOk = finalInfo.visible && !finalInfo.buttonHidden && /重做/.test(finalInfo.buttonText) && finalInfo.buttons.length === 1;
-  hardCheck(finalOk && /关闭/.test(finalInfo.body),
+  // 收尾小字由作者在管理端编辑（当前文案见 seed-content.js 的 DEBRIEF_CLOSING），这里只要求正文非空
+  hardCheck(finalOk && finalInfo.body.trim().length > 0,
     '结束页终态只留一个「重做」按钮（想再来一遍不必刷新或关标签页）',
     `按钮=${JSON.stringify(finalInfo.buttons)} · 标题「${finalInfo.title}」`);
+  hardCheck(finalInfo.scrollTop === 0, '终止页也从最上方开始显示',
+    `scrollTop=${finalInfo.scrollTop}`);
   if (finalInfo.visible) await shot('v6-22-chat-final');
   const done = await evaluate('JSON.stringify({ answered: state.answeredCount, total: state.totalAnswers, completed: state.completed })');
   // issue 5：每道新题出现时，滚动位置是否落在「本轮新增内容的开头」（内容不足一屏则贴底也算合格）
@@ -835,7 +1143,7 @@ async function main() {
       ? bad.length + ' 处题卡未完整可见 ✘ ' + bad.map((r) => r.type + ' 卡' + ((r.trace && r.trace[0]) || '-')).join('；')
       : '待答题卡均完整可见 ✔'));
   // 批次5 #9：呈现前清空 —— 到达清屏点后，之前答过的题卡不应再留在屏幕上
-  const demoRefresh = Object.entries(firstSight).find(([, v]) => /内容创作（再次）/.test(v.title));
+  const demoRefresh = Object.entries(firstSight).find(([, v]) => /广告语和创作说明/.test(v.title));
   if (demoRefresh) {
     const [rid, rv] = demoRefresh;
     const beforeClear = Object.entries(firstSight).filter(([id]) => id !== rid);
@@ -854,6 +1162,104 @@ async function main() {
   console.log('  被试端右上角倒计时：共 ' + chatTimers.length + ' 种取值' + (chatTimers.length ? '（' + chatTimers.slice(0, 3).map((t) => `「${t}」`).join(' ') + '…）' : '')
     + '；作答倒计时（剩余）' + (answeringTimer ? `出现过「${answeringTimer}」✔` : '本轮未被采样到（取决于走查作答节奏，非门禁）'));
 
+  // ---- AI 消息呈现（本轮）：① 连发两条记录不刷空白；② 思考面板按目标时长铺满（不干等）
+  console.log(`\nAI 消息呈现：连发两条消息（第二条超过一屏）+ 思考面板 ${FEEDBACK_Q_THINK_MS / 1000} 秒铺满`);
+  const fbQ = await ensureFeedbackFixture(token);
+  try {
+    await evaluate(`localStorage.clear()`);
+    await goto(`${BASE}/chat?q=${fbQ.id}&fresh=1`, 1200);
+    await waitFor(`!document.getElementById('page-screen').classList.contains('hidden')`, 30000, '反馈夹具知情同意页');
+    await evaluate(`(() => { const cb=document.getElementById('page-check'); cb.checked=true; cb.dispatchEvent(new Event('change')); return 'ok'; })()`);
+    // 从点「开始实验」那一刻开始采样（每 60ms）：正文的光标位置 + 思考面板里文字的长度
+    await evaluate(`(() => {
+      const sc = document.getElementById('chat-scroll');
+      const p = { panelSeen: false, t0: 0, panelEnd: 0, lastGrowAt: 0, len: 0, samples: 0, phantomMax: 0, frontAbove: 0 };
+      window.__fbProbe = p;
+      const timer = setInterval(() => {
+        const inner = document.querySelector('.think-inner');
+        if (inner) {
+          if (!p.panelSeen) { p.panelSeen = true; p.t0 = performance.now(); }
+          const t = Math.round(performance.now() - p.t0);
+          const len = (inner.textContent || '').length;
+          if (len !== p.len) { p.len = len; p.lastGrowAt = t; }
+          if (!p.panelEnd && document.querySelector('.think-done')) p.panelEnd = t;
+        }
+        const texts = [...document.querySelectorAll('.ai-text')];
+        const el = texts[texts.length - 1];
+        const cur = el && el.querySelector('.type-cursor');
+        if (el && cur) {
+          p.samples += 1;
+          const phantom = Math.round(el.getBoundingClientRect().bottom - cur.getBoundingClientRect().bottom);
+          if (phantom > p.phantomMax) p.phantomMax = phantom;
+          if (cur.getBoundingClientRect().bottom < sc.getBoundingClientRect().top + 8) p.frontAbove += 1;
+        }
+      }, 60);
+      window.__fbProbeStop = () => clearInterval(timer);
+      return 'ok';
+    })()`);
+    await evaluate(`document.getElementById('page-btn').click()`);
+    await waitFor(`state.action && state.action.itemId === 'fb_t' && !!state.questionNodes.get('fb_t')`, 90000, '反馈夹具走到收尾文本题');
+    await sleep(800);
+    const fbProbe = JSON.parse(await evaluate(`(() => {
+      window.__fbProbeStop();
+      const p = window.__fbProbe;
+      const inner = document.querySelector('.think-inner');
+      return JSON.stringify({
+        panelSeen: p.panelSeen, panelEnd: Math.round(p.panelEnd), lastGrowAt: Math.round(p.lastGrowAt),
+        thinkingLen: (inner ? inner.textContent : '').length, panelDone: !!document.querySelector('.think-done'),
+        samples: p.samples, phantomMax: p.phantomMax, frontAbove: p.frontAbove,
+        messages: document.querySelectorAll('#chat-stream .msg.ai').length,
+        tall: Math.round((document.querySelectorAll('.ai-text')[1] || document.body).getBoundingClientRect().height),
+        viewport: Math.round(document.getElementById('chat-scroll').clientHeight)
+      });
+    })()`));
+    const growRatio = fbProbe.panelEnd ? fbProbe.lastGrowAt / fbProbe.panelEnd : 0;
+    hardCheck(fbProbe.panelSeen && fbProbe.panelDone,
+      '思考面板按目标时长走完（出现「思考已完成」）',
+      `面板 ${fbProbe.panelEnd}ms · 思考稿 ${fbProbe.thinkingLen} 字 · AI 消息 ${fbProbe.messages} 条`);
+    hardCheck(growRatio >= 0.8,
+      '思考面板：文字一直写到时长末尾（按字数调速铺满，不是先铺一段再干等）',
+      `最后一次增长在面板结束的 ${(growRatio * 100).toFixed(0)}%（旧实现约 78% 就停笔、剩下干等）`);
+    hardCheck(fbProbe.samples > 20 && fbProbe.phantomMax <= 60,
+      '长消息流式输出：还没输出的部分不占高度（光标下方没有成片空白）',
+      `光标下方最大空白 ${fbProbe.phantomMax}px · 采样 ${fbProbe.samples} 次 · 第二条消息高 ${fbProbe.tall}px / 视口 ${fbProbe.viewport}px`);
+    hardCheck(fbProbe.frontAbove <= Math.max(2, Math.round(fbProbe.samples * 0.05)),
+      '长消息流式输出：视口跟着正在输出的文字走（没有停在空白底部）',
+      `输出位置落到视口上方的采样 ${fbProbe.frontAbove}/${fbProbe.samples} 次`);
+    await shot('v6-29-chat-thinking-panel');
+    // 本轮：发送后输入框**立刻**清空（内容已作为用户气泡进流；留在框里会被当成「没发出去」）
+    await evaluate(`(() => { const i=document.getElementById('composer-input'); i.value='轻负担，一口青柠爽'; i.dispatchEvent(new Event('input', { bubbles: true })); return 'ok'; })()`);
+    await sleep(200);
+    await evaluate(`document.getElementById('composer-send').click()`);
+    await sleep(250);
+    const afterSend = JSON.parse(await evaluate(`(() => {
+      const i = document.getElementById('composer-input');
+      return JSON.stringify({
+        value: i.value, disabled: i.disabled, placeholder: i.placeholder,
+        bubbles: document.querySelectorAll('#chat-stream .msg.user.answered').length
+      });
+    })()`));
+    hardCheck(afterSend.value === '' && afterSend.disabled && afterSend.bubbles === 1 && /已提交|已完成/.test(afterSend.placeholder),
+      '发送后输入框立刻清空（内容已进聊天流，不再留在框里）',
+      `框内「${afterSend.value}」· 停用 ${afterSend.disabled ? '✔' : '✘'} · 用户气泡 ${afterSend.bubbles} 个 · 提示「${afterSend.placeholder}」`);
+    // 关键的那一段：交完卷、AI 的长篇回应还在逐字输出（创作 → 反馈就是这样），
+    // 这期间输入框必须一直是空的 —— 以前会把刚交上去的内容留到「下一题出现」为止。
+    await sleep(2200);
+    const duringReply = JSON.parse(await evaluate(`(() => {
+      const i = document.getElementById('composer-input');
+      return JSON.stringify({
+        value: i.value, disabled: i.disabled, typing: !!document.querySelector('.type-cursor'),
+        action: (state.action && state.action.itemId) || '', bubble: document.querySelector('#chat-stream .msg.user.answered') ? 1 : 0
+      });
+    })()`));
+    hardCheck(duringReply.value === '' && duringReply.disabled && duringReply.typing && duringReply.action === 'fb_t',
+      'AI 回应还在输出期间，输入框保持为空（创作交卷后看反馈的那一段）',
+      `框内「${duringReply.value}」· 停用 ${duringReply.disabled ? '✔' : '✘'} · 仍在逐字输出 ${duringReply.typing ? '✔' : '✘'} · 当前题 ${duringReply.action}`);
+  } finally {
+    await adminFetch(token, '/api/admin/questionnaire/delete', { body: { id: fbQ.id, force: true } });
+    console.log('已清理 AI 反馈呈现自检问卷');
+  }
+
   // ---- 手机端
   await cdp.send('Emulation.setDeviceMetricsOverride', { width: 375, height: 812, deviceScaleFactor: 2, mobile: true });
   await evaluate(`localStorage.clear()`);
@@ -862,6 +1268,7 @@ async function main() {
   await evaluate(`(() => { const id=document.getElementById('page-id-input'); if (id && !id.value) { id.value='PV-01'; id.dispatchEvent(new Event('input', { bubbles: true })); } const cb=document.getElementById('page-check'); if (cb && !cb.checked) { cb.checked=true; cb.dispatchEvent(new Event('change')); } return 'ok'; })()`);
   await sleep(300);
   await evaluate(`document.getElementById('page-btn').click()`);
+  await advanceToFirstRating();
   await waitFor(`(() => { const a=state.action; return !!(a && a.type==='rating' && state.questionNodes.get(a.itemId)); })()`, 120000, '手机端打分题');
   await shot('v6-16-mobile-rating');
 
@@ -883,6 +1290,43 @@ async function main() {
   console.log('切屏提醒（手机 ' + notice.vw + '×' + notice.vh + '）：' + (notice.inside
     ? `居中弹窗完整可见 ✔（${notice.w}×${notice.h}，带遮罩 ${notice.backdrop ? '✔' : '✘'}）`
     : `超出屏幕 ✘ ${JSON.stringify(notice)}`));
+
+  // 本轮：致谢页置顶（手机视口下才看得出问题 —— 桌面视口往往窄到不滚，偏移被夹成 0 也可能「看着正常」）
+  const topQ = await ensureTopFixture(token);
+  try {
+    console.log('\n致谢页置顶（手机 375×812）：先在知情同意页滚到底，再看致谢页的滚动位置');
+    await evaluate(`localStorage.clear()`);
+    await goto(`${BASE}/chat?q=${topQ.id}&fresh=1`, 1200);
+    await waitFor(`!document.getElementById('page-screen').classList.contains('hidden')`, 30000, '置顶自检知情同意页');
+    const gateAt = JSON.parse(await evaluate(`(() => {
+      const cb=document.getElementById('page-check'); cb.checked=true; cb.dispatchEvent(new Event('change'));
+      const p = document.getElementById('page-screen');
+      p.scrollTop = p.scrollHeight;            // 知情同意页滚到底（手机上填编号必然要滚）
+      return JSON.stringify({ top: Math.round(p.scrollTop), max: Math.round(p.scrollHeight - p.clientHeight) });
+    })()`));
+    await evaluate(`document.getElementById('page-btn').click()`);
+    await waitFor(`(() => {
+      const p = document.getElementById('page-screen');
+      return !p.classList.contains('hidden') && /致谢/.test(document.getElementById('page-title').textContent);
+    })()`, 60000, '手机端致谢页');
+    await sleep(500);
+    const topAt = JSON.parse(await evaluate(`(() => {
+      const p = document.getElementById('page-screen');
+      const t = document.getElementById('page-title');
+      return JSON.stringify({
+        top: Math.round(p.scrollTop), max: Math.round(p.scrollHeight - p.clientHeight),
+        titleTop: Math.round(t.getBoundingClientRect().top - p.getBoundingClientRect().top),
+        title: t.textContent
+      });
+    })()`));
+    hardCheck(gateAt.top > 0 && topAt.max > 0 && topAt.top === 0 && topAt.titleTop >= -2 && topAt.titleTop < 160,
+      '致谢页从最上方开始显示（知情同意页滚过之后，致谢页仍从顶部开始）',
+      `知情同意页滚到 ${gateAt.top}px（可滚 ${gateAt.max}px）→ 致谢页 scrollTop=${topAt.top}（可滚 ${topAt.max}px）· 标题「${topAt.title}」距顶 ${topAt.titleTop}px`);
+    await shot('v6-30-chat-debrief-top');
+  } finally {
+    await adminFetch(token, '/api/admin/questionnaire/delete', { body: { id: topQ.id, force: true } });
+    console.log('已清理致谢页置顶自检问卷');
+  }
 
   await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1000, deviceScaleFactor: 2, mobile: false });
 

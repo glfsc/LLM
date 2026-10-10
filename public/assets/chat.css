@@ -70,7 +70,7 @@ input, textarea, [contenteditable="true"] {
 .msg.user { justify-content: flex-end; }
 .msg.user .bubble {
   background: var(--bubble); border-radius: 16px; padding: 11px 15px; max-width: 78%;
-  font-size: 14px; font-weight: 500; line-height: 1.75; word-break: break-word;
+  font-size: 16px; font-weight: 500; line-height: 1.75; word-break: break-word;   /* 小四：被试自己的输出 */
 }
 /* 占满整行（扣掉左侧圈圈图标）：宽度不能跟着内容走，否则思考面板流式输出时会边写边变宽 */
 .msg.ai { align-items: flex-start; gap: 10px; }
@@ -81,7 +81,7 @@ input, textarea, [contenteditable="true"] {
   background: var(--accent); position: relative; margin-top: 2px;
 }
 .ai-avatar::after { content: ""; position: absolute; inset: 7px; border-radius: 50%; background: #fff; }
-.msg.ai .ai-text { font-size: 14px; font-weight: 500; line-height: 1.9; color: var(--fg-soft); word-break: break-word; }
+.msg.ai .ai-text { font-size: 16px; font-weight: 500; line-height: 1.9; color: var(--fg-soft); word-break: break-word; }   /* 小四 */
 /* ---------------------------------------------------------------- 富文本正文（.rich）
    管理端「类 Word」编辑器能用的格式，在这里一一落地：六级标题、加粗 / 斜体 / 下划线 / 删除线、
    字号 / 字体色 / 背景色（内联样式直通）、对齐、有序 / 无序列表、引用、分割线。
@@ -143,10 +143,12 @@ input, textarea, [contenteditable="true"] {
   padding: 13px 16px 13px 18px;
   border: 1px solid var(--border); border-left: 2px solid var(--border-strong); border-radius: 12px;
   background: var(--surface);
-  font-size: 13px; line-height: 1.85; color: #8a8a91;   /* 正文 14px / #3a3a3f */
+  font-size: 14px; line-height: 1.85; color: #8a8a91;   /* 五号；正文小四 16px / #3a3a3f */
   white-space: pre-wrap; word-break: break-word;
 }
 .think-divider { border-top: 1px solid var(--border); margin: 13px 0 12px; }
+/* 思考结束后的提示行：思考面板 → 分割线 → 「思考已完成」 → 正文 */
+.think-done { font-size: 13px; color: var(--muted); margin: -4px 0 10px; }
 
 /* ---------------------------------------------------------------- 退出重进卡片 / 时间已到
    重进时先给一张确认卡片；时间已到则直接停止作答（作答能力销毁），只提示可以点顶部「重做」。 */
@@ -210,11 +212,11 @@ input, textarea, [contenteditable="true"] {
   flex: 0 0 auto; font-size: 11px; font-weight: 600; color: var(--ok-fg);
   background: var(--ok-bg); border-radius: 999px; padding: 3px 9px;
 }
-.qtext { font-size: 14px; font-weight: 500; line-height: 1.85; color: var(--fg-soft); margin-bottom: 12px; }
+.qtext { font-size: 16px; font-weight: 500; line-height: 1.85; color: var(--fg-soft); margin-bottom: 12px; }   /* 小四 */
 .qcard.done { background: var(--surface); border-color: var(--border); box-shadow: none; opacity: .82; }
 /* 输入框驱动的题：作答回显（卡片内原本没有输入控件） */
 .qcard-echo {
-  font-size: 14px; font-weight: 500; line-height: 1.85; color: var(--fg-soft);
+  font-size: 16px; font-weight: 500; line-height: 1.85; color: var(--fg-soft);   /* 小四 */
   word-break: break-word;
   background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 11px 14px;
 }
@@ -236,7 +238,7 @@ input, textarea, [contenteditable="true"] {
 .subs { display: flex; flex-direction: column; gap: 18px; }
 .subs.row { flex-direction: row; gap: 16px; }
 .subs.row .sub-control { flex: 1 1 0; min-width: 0; }
-.sub-title { font-size: 14.5px; font-weight: 600; color: var(--fg); margin-bottom: 9px; }
+.sub-title { font-size: 16px; font-weight: 600; color: var(--fg); margin-bottom: 9px; }   /* 小四 */
 .sub-note { font-size: 11.5px; font-weight: 400; color: var(--muted); margin-left: 4px; }
 .sub-anchor { font-size: 11.5px; color: var(--muted); margin-top: 7px; }
 .sub-count { font-size: 11.5px; color: var(--muted); text-align: right; margin-top: 5px; }
@@ -248,7 +250,7 @@ input, textarea, [contenteditable="true"] {
 .rating-row { display: flex; gap: 8px; flex-wrap: wrap; }
 .option-btn, .rating-btn, .primary-btn, .mini-btn { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
 .option-btn {
-  font: inherit; font-size: 13.5px; line-height: 1.6; text-align: left; color: var(--fg-soft);
+  font: inherit; font-size: 16px; line-height: 1.6; text-align: left; color: var(--fg-soft);   /* 小四 */
   background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 11px 14px;
   cursor: pointer; transition: border-color .16s ease, background .16s ease, color .16s ease;
 }
@@ -265,7 +267,7 @@ input, textarea, [contenteditable="true"] {
 /* 门控期间控件照常可用：只有提交按钮置灰（见 .primary-btn:disabled） */
 
 .answer-input {
-  width: 100%; font: inherit; font-size: 14px; line-height: 1.85; color: var(--fg);
+  width: 100%; font: inherit; font-size: 16px; line-height: 1.85; color: var(--fg);   /* 小四 */
   background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
   padding: 11px 14px; outline: none; resize: none; overflow: hidden;
   transition: border-color .18s ease, background .18s ease, height .12s ease;
@@ -278,7 +280,7 @@ input, textarea, [contenteditable="true"] {
   border-radius: 12px; padding: 9px 12px; background: var(--surface);
 }
 .rank-seq { flex: 0 0 auto; min-width: 18px; font-size: 12px; font-weight: 600; color: var(--muted); }
-.rank-label { flex: 1 1 auto; font-size: 13.5px; color: var(--fg-soft); }
+.rank-label { flex: 1 1 auto; font-size: 16px; color: var(--fg-soft); }   /* 小四 */
 .mini-btn {
   font: inherit; font-size: 11.5px; color: var(--fg-soft); background: #fff;
   border: 1px solid var(--border); border-radius: 8px; padding: 4px 9px; cursor: pointer;
@@ -301,21 +303,21 @@ input, textarea, [contenteditable="true"] {
 .page-screen.visible { opacity: 1; }
 .page-card { max-width: 720px; margin: 0 auto; padding: 56px 24px 60px; animation: rise-in .4s var(--ease-out) both; }
 .page-card h2 { font-size: 21px; margin: 0 0 18px; }
-.page-text { font-size: 14px; font-weight: 500; line-height: 1.95; color: var(--fg-soft); word-break: break-word; }
+.page-text { font-size: 16px; font-weight: 500; line-height: 1.95; color: var(--fg-soft); word-break: break-word; }   /* 小四 */
 .page-check {
   display: flex; align-items: flex-start; gap: 10px; margin: 26px 0 0;
-  font-size: 13.5px; line-height: 1.7; color: var(--fg-soft); cursor: pointer;
+  font-size: 16px; line-height: 1.7; color: var(--fg-soft); cursor: pointer;   /* 小四 */
 }
 .page-check input { width: 16px; height: 16px; margin-top: 2px; accent-color: #111213; }
 /* 知情同意页的「含编号」形态：勾选同意之后、进入按钮之前，填写编号才能进入 */
 .page-id { margin: 20px 0 0; }
-.page-id label { display: block; font-size: 13.5px; font-weight: 600; color: var(--fg); margin-bottom: 8px; }
+.page-id label { display: block; font-size: 16px; font-weight: 600; color: var(--fg); margin-bottom: 8px; }   /* 小四 */
 .page-id .answer-input { max-width: 340px; }
 .page-hint { font-size: 12.5px; color: var(--muted); margin: 0 0 14px; }
 /* 勾选与按钮同属一块：按钮紧随勾选项、整行宽度，勾选后方可点击 */
 .page-go {
   display: block; width: 100%; margin-top: 18px;
-  font: inherit; font-size: 14px; font-weight: 600; color: #fff; background: var(--accent);
+  font: inherit; font-size: 16px; font-weight: 600; color: #fff; background: var(--accent);   /* 小四 */
   border: 0; border-radius: 999px; padding: 13px; cursor: pointer;
   transition: background .16s ease, opacity .16s ease;
 }
@@ -358,7 +360,7 @@ input, textarea, [contenteditable="true"] {
   display: flex; align-items: flex-end; gap: 10px;
 }
 .composer-input {
-  flex: 1 1 auto; font: inherit; font-size: 14px; line-height: 1.7; color: var(--fg);
+  flex: 1 1 auto; font: inherit; font-size: 16px; line-height: 1.7; color: var(--fg);   /* 小四 */
   background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
   padding: 11px 14px; outline: none; resize: none; overflow: hidden; max-height: 168px;
   transition: border-color .18s ease, background .18s ease;
@@ -366,6 +368,18 @@ input, textarea, [contenteditable="true"] {
 .composer-input:focus { border-color: var(--border-strong); background: #fff; }
 .composer-input:disabled { background: #f7f7f8; color: var(--faint); cursor: not-allowed; }
 .composer-send { border-radius: 14px; padding: 11px 20px; }
+/* 「需输入指定内容」的题：断言没过时的提示（只提示、不发送；输入内容原样保留） */
+.composer-error {
+  max-width: 860px; margin: 0 auto; padding: 7px 20px 0;
+  font-size: 12px; line-height: 1.6; color: #b3261e;
+}
+.composer-error::before { content: '⚠ '; }
+.composer-inner.shake { animation: composer-shake .24s var(--ease-out); }
+@keyframes composer-shake {
+  0%, 100% { transform: none; }
+  25% { transform: translateX(-5px); }
+  75% { transform: translateX(5px); }
+}
 .composer-hint {
   max-width: 860px; margin: 0 auto; padding: 7px 20px 11px;
   font-size: 11.5px; line-height: 1.6; color: var(--muted); min-height: 30px;
@@ -377,13 +391,13 @@ input, textarea, [contenteditable="true"] {
 @media (max-width: 640px) {
   .topbar-inner { padding: 10px 14px; }
   .chat-stream { padding: 14px 13px 48px; gap: 12px; }
-  .msg.ai .ai-text { font-size: 14px; }
+  .msg.ai .ai-text { font-size: 16px; }   /* 小四（手机端一致） */
   .qcard { padding: 13px 14px; border-radius: 14px; }
   .qtitle { font-size: 14px; }
   .opt-row { gap: 7px; }
-  .option-btn { font-size: 12.5px; padding: 10px 11px; border-radius: 10px; }
+  .option-btn { font-size: 16px; padding: 10px 11px; border-radius: 10px; }   /* 小四 */
   .rating-btn { width: 38px; height: 38px; font-size: 12.5px; }
   .subs.row { flex-direction: column; gap: 18px; }
   .page-card { padding: 40px 18px 48px; }
-  .answer-input { font-size: 15px; }
+  .answer-input { font-size: 16px; }
 }
