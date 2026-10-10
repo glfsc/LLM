@@ -312,6 +312,12 @@
       if (!code) return;
       location.href = '/chat?q=' + encodeURIComponent(code);
     });
+
+    // 一账号单设备：被新设备登录 / 改密挤下线时，管理端会带 ?kicked=1 回到这里，给一句明确提示
+    if (new URLSearchParams(location.search).get('kicked') === '1') {
+      showErr('login-error', '该账号已在其他设备登录或已修改密码，本设备登录已失效，请重新登录。');
+      try { history.replaceState(null, '', location.pathname); } catch (e) { /* 忽略 */ }
+    }
   </script>
 </body>
 </html>

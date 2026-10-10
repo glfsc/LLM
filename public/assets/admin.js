@@ -21,19 +21,37 @@ const $segOutline = $('seg-outline');
 
 const TOKEN_KEY = 'expchat_admin_token';
 const TOKEN_REMEMBER_KEY = 'expchat_admin_token_remember';   // { token, username, expiresAt }：勾了「记住密码」才有
+const LOGIN_REMEMBER_KEY = 'expchat_login_remember';         // { username, password, expiresAt }：登录页的「记住账号密码」（index.html 维护）
 
 // 「记住密码」= 登录页勾选后签发的 30 天 token（存 localStorage，重开浏览器仍免登录）
-function loadRememberedToken() {
+function loadRememberedTokenRecord() {
   try {
     const rec = JSON.parse(localStorage.getItem(TOKEN_REMEMBER_KEY) || 'null');
-    if (!rec || !rec.token) return '';
-    if (Number(rec.expiresAt) && Number(rec.expiresAt) < Date.now()) { localStorage.removeItem(TOKEN_REMEMBER_KEY); return ''; }
-    return rec.token;
-  } catch { return ''; }
+    if (!rec || !rec.token) return null;
+    if (Number(rec.expiresAt) && Number(rec.expiresAt) < Date.now()) { localStorage.removeItem(TOKEN_REMEMBER_KEY); return null; }
+    return rec;
+  } catch { return null; }
+}
+function loadRememberedToken() {
+  const rec = loadRememberedTokenRecord();
+  return rec ? rec.token : '';
 }
 function clearTokens() {
   sessionStorage.removeItem(TOKEN_KEY);
   try { localStorage.removeItem(TOKEN_REMEMBER_KEY); } catch { /* 忽略 */ }
+}
+// 记一次登录态（改密换发新 token 时复用）：remember 为真则同步刷新 30 天记录
+function storeToken(token, remember) {
+  state.token = token;
+  try { sessionStorage.setItem(TOKEN_KEY, token); } catch { /* 忽略 */ }
+  if (!remember) return;
+  try {
+    localStorage.setItem(TOKEN_REMEMBER_KEY, JSON.stringify({
+      token,
+      username: state.user ? state.user.username : '',
+      expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000
+    }));
+  } catch { /* 忽略 */ }
 }
 
 const initialToken = sessionStorage.getItem(TOKEN_KEY) || loadRememberedToken();
@@ -742,18 +760,24 @@ async function enterAdmin() {
   handleRoute();
 }
 
+// 401：登录已失效（被其他设备顶下线 / 已改密 / 已过期）→ 清掉本机登录态回登录页；
+// 「被顶下线」带 ?kicked=1，登录页会给一句明确的提示
+function backToLogin(err) {
+  state.token = '';
+  clearTokens();
+  location.replace(err && err.code === 'kicked' ? '/?kicked=1' : '/');
+}
+
 async function boot() {
   if (!state.token) { location.replace('/'); return; }
   try { await enterAdmin(); } catch (err) {
-    if (err.status === 401) { state.token = ''; clearTokens(); location.replace('/'); }
+    if (err.status === 401) backToLogin(err);
   }
 }
 
 function maybeSessionExpired(err) {
   if (err.status !== 401) return false;
-  state.token = '';
-  clearTokens();
-  location.reload();
+  backToLogin(err);
   return true;
 }
 
@@ -3795,7 +3819,7 @@ function renderSettings() {
   panel.appendChild(secInfo);
 
   // 修改密码
-  const secPwd = sectionHead('修改密码', '修改后需要使用新密码重新登录。');
+  const secPwd = sectionHead('修改密码', '修改后其他设备上的登录会立即失效（需用新密码重新登录），本设备继续使用。');
   const oldField = makeField('当前密码', '');
   oldField.input.type = 'password';
   const newField = makeField('新密码（至少 6 位）', '');
@@ -3811,10 +3835,22 @@ function renderSettings() {
     if (!oldPassword || newPassword.length < 6) { toast('请填写当前密码，新密码至少 6 位'); return; }
     if (newPassword !== newField2.input.value) { toast('两次输入的新密码不一致'); return; }
     pwdBtn.disabled = true;
+    // 改密会让旧 token 全部失效（踢下线），当前设备用服务端换发的新 token 继续
+    const remembered = !!loadRememberedTokenRecord();
     try {
-      await api('/api/auth/password', { body: { oldPassword, newPassword } });
+      const res = await api('/api/auth/password', { body: { oldPassword, newPassword, remember: remembered } });
+      if (res && res.token) storeToken(res.token, remembered);
+      // 「记住账号密码」里存的是旧密码：同步成新密码，下次自动填充才能登录
+      try {
+        const rec = JSON.parse(localStorage.getItem(LOGIN_REMEMBER_KEY) || 'null');
+        if (rec && rec.username) {
+          rec.password = newPassword;
+          rec.expiresAt = Date.now() + 30 * 24 * 60 * 60 * 1000;
+          localStorage.setItem(LOGIN_REMEMBER_KEY, JSON.stringify(rec));
+        }
+      } catch { /* 忽略 */ }
       oldField.input.value = newField.input.value = newField2.input.value = '';
-      toast('密码已修改');
+      toast('密码已修改，其他设备上的登录已失效');
     } catch (err) {
       if (!maybeSessionExpired(err)) toast(err.message || '密码修改失败');
     } finally {

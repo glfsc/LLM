@@ -1207,9 +1207,12 @@ async function handlePreviewFinish(req, res) {
 // 签名 token（HMAC，密钥持久化在 settings）：
 //   旧实现是内存 Map → 服务一重启所有登录态就失效，做不到「勾记住密码后 30 天免登录」。
 //   现在 token 自带过期时间且可离线校验签名，重启后仍然有效；登出走内存黑名单（本机工具够用）。
+// 一账号单设备在线：token 另带用户当前的「登录世代号」（users.token_epoch），
+//   登录 / 登出 / 改密各 +1 —— 此前签发的 token 世代号对不上即失效（改密踢下线同此机制）；
+//   世代号落库，重启服务也不会让旧 token 复活。
 const TOKEN_TTL = 24 * 60 * 60 * 1000;                       // 默认：1 天
 const TOKEN_TTL_REMEMBER = 30 * 24 * 60 * 60 * 1000;         // 勾了「记住密码」：30 天
-const revokedTokens = new Set();                             // 已登出的 token 摘要（内存）
+const revokedTokens = new Set();                             // 已登出的 token 摘要（内存，作即时兜底）
 
 function tokenSecret() {
   let secret = store.getSetting('auth_secret');
@@ -1223,7 +1226,8 @@ function tokenDigest(token) {
   return crypto.createHmac('sha256', tokenSecret()).update(String(token)).digest('base64url');
 }
 function issueToken(user, ttlMs = TOKEN_TTL) {
-  const payload = Buffer.from(JSON.stringify({ uid: user.id, u: user.username, exp: Date.now() + ttlMs }), 'utf8').toString('base64url');
+  // v = 签发时的登录世代号：任何一次登录 / 登出 / 改密都会使它过期（见文件头注释）
+  const payload = Buffer.from(JSON.stringify({ uid: user.id, u: user.username, v: store.getTokenEpoch(user.id), exp: Date.now() + ttlMs }), 'utf8').toString('base64url');
   return `${payload}.${tokenDigest(payload)}`;
 }
 // 校验：签名正确 + 未过期 + 未被登出
@@ -1252,7 +1256,7 @@ function revokeToken(token) {
   if (dot > 0) revokedTokens.add(str.slice(0, dot));
 }
 
-// 返回当前登录用户；未登录 / 过期则已发送 401 并返回 null
+// 返回当前登录用户；未登录 / 过期 / 被其他设备顶下线则已发送 401 并返回 null
 function requireUser(req, res) {
   const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
   const hit = readToken(token);
@@ -1264,6 +1268,11 @@ function requireUser(req, res) {
   if (!user) {
     revokeToken(token);
     sendJson(res, 401, { error: 'unauthorized', message: '账号不存在，请重新登录' });
+    return null;
+  }
+  // 一账号单设备：世代号对不上 = 已在别处登录 / 已登出 / 已改密，本设备即刻下线
+  if (Number(hit.v) !== store.getTokenEpoch(user.id)) {
+    sendJson(res, 401, { error: 'kicked', message: '该账号已在其他设备登录或已修改密码，本设备登录已失效' });
     return null;
   }
   return user;
@@ -1300,13 +1309,19 @@ async function handleLogin(req, res) {
   if (!user || !store.verifyPassword(user, String(body.password || ''))) {
     return sendJson(res, 401, { error: 'bad_credentials', message: '账号或密码不正确' });
   }
+  // 一账号单设备在线：登录即 +1 世代号，此前所有设备上的登录随之失效
+  store.bumpTokenEpoch(user.id);
   // 记住密码：勾选后签发 30 天的 token（前端存 localStorage，重开浏览器仍免登录）
   const ttl = body.remember ? TOKEN_TTL_REMEMBER : TOKEN_TTL;
   sendJson(res, 200, { token: issueToken(user, ttl), ttlMs: ttl, user: { id: user.id, username: user.username, role: user.role, avatar: user.avatar } });
 }
 
 async function handleLogout(req, res) {
-  revokeToken(String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim());
+  const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+  const hit = readToken(token);
+  // 登出也 +1 世代号：登出是持久化生效的，服务重启不会让旧 token 复活
+  if (hit && store.getUser(hit.uid)) store.bumpTokenEpoch(hit.uid);
+  revokeToken(token);
   sendJson(res, 200, { ok: true });
 }
 
@@ -1328,7 +1343,11 @@ async function handleChangePassword(req, res) {
   } catch (err) {
     return sendJson(res, 400, { error: 'bad_password', message: err.message || '密码修改失败' });
   }
-  sendJson(res, 200, { ok: true });
+  // 改密踢下线：世代号 +1，所有旧 token（含被复制留存的）立即失效；
+  // 当前设备当场换发一张新 token 继续使用，去登录页的是其他设备。
+  store.bumpTokenEpoch(user.id);
+  const ttl = body.remember ? TOKEN_TTL_REMEMBER : TOKEN_TTL;
+  sendJson(res, 200, { ok: true, token: issueToken(user, ttl), ttlMs: ttl });
 }
 
 async function handleAvatar(req, res) {
@@ -1371,7 +1390,10 @@ async function handleUserUpdate(req, res) {
   const target = store.getUser(String(body.id || '').trim());
   if (!target) return sendJson(res, 404, { error: 'user_not_found', message: '用户不存在' });
   try {
-    sendJson(res, 200, { user: store.updateUser(target.id, body) });
+    const updated = store.updateUser(target.id, body);
+    // 管理员为他人重置密码：与本人改密同口径 —— 该账号所有旧登录立即失效
+    if (body.password) store.bumpTokenEpoch(target.id);
+    sendJson(res, 200, { user: updated });
   } catch (err) {
     sendJson(res, 400, { error: 'user_update_failed', message: err.message || '修改失败' });
   }

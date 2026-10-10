@@ -119,6 +119,7 @@ db.exec(`
     salt       TEXT NOT NULL,
     role       TEXT NOT NULL DEFAULT 'user',
     avatar     TEXT,
+    token_epoch INTEGER NOT NULL DEFAULT 1,   -- 登录世代号：登录 / 登出 / 改密 +1，此前签发的 token 全部失效
     created_at TEXT,
     updated_at TEXT
   );
@@ -151,6 +152,8 @@ ensureColumn('sessions', 'retry_json');       // 每道题的重试次数（{"un
 ensureColumnInt('responses', 'retry_count');  // 该题提交前的重试次数
 ensureColumnInt('responses', 'timed_out');    // 是否曾经到点未交（0/1）
 ensureColumnInt('sessions', 'clear_seq');
+ensureColumnInt('users', 'token_epoch');       // 旧库补齐：登录世代号（一账号单设备 / 改密踢下线）
+db.exec('UPDATE users SET token_epoch = 1 WHERE token_epoch IS NULL');
 
 // 旧库升级：早期版本遗留的表一并清理（本轮为重建式升级，不做数据迁移）
 for (const t of [
@@ -768,8 +771,8 @@ function createUser({ username, password, role, avatar }) {
   const id = randomUUID();
   const now = nowIso();
   const salt = randomBytes(16).toString('hex');
-  db.prepare('INSERT INTO users (id, username, pass_hash, salt, role, avatar, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-    .run(id, name, hashPassword(password, salt), salt, role === 'admin' ? 'admin' : 'user', avatar || null, now, now);
+  db.prepare('INSERT INTO users (id, username, pass_hash, salt, role, avatar, token_epoch, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(id, name, hashPassword(password, salt), salt, role === 'admin' ? 'admin' : 'user', avatar || null, 1, now, now);
   return userPayload(getUser(id));
 }
 
@@ -817,6 +820,17 @@ function deleteUser(id) {
 
 function listUsers() {
   return db.prepare('SELECT * FROM users ORDER BY created_at ASC, rowid ASC').all().map(userPayload);
+}
+
+// 登录世代号（一账号单设备 / 改密踢下线）：签发的 token 带上当时的值，
+// 登录 / 登出 / 改密各 +1 —— 旧 token 的世代号对不上即失效（重启服务也不会复活）。
+function getTokenEpoch(id) {
+  const row = db.prepare('SELECT token_epoch FROM users WHERE id = ?').get(String(id || ''));
+  return row ? (Number(row.token_epoch) || 1) : 0;
+}
+function bumpTokenEpoch(id) {
+  db.prepare('UPDATE users SET token_epoch = COALESCE(token_epoch, 1) + 1 WHERE id = ?').run(String(id || ''));
+  return getTokenEpoch(id);
 }
 
 // 计时窗口以下为原设置区
@@ -1395,6 +1409,8 @@ module.exports = {
   updateUserPassword,
   deleteUser,
   listUsers,
+  getTokenEpoch,
+  bumpTokenEpoch,
   getExperiment,
   getExperimentPayload,
   listExperiments,
