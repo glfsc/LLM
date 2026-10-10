@@ -1959,6 +1959,16 @@ function handleConnect(res) {
   res.end(buildConnectHtml());
 }
 
+// 管理端「被试链接 / 二维码」用：返回端口与本机所有可用局域网地址（无尾斜杠，前端自行拼路径）。
+// 前端在 localhost 打开时用这里的地址，避免把 localhost 链接/二维码发给手机；公网部署时前端直接用自身域名。
+function handleNetInfo(res) {
+  sendJson(res, 200, {
+    port: PORT,
+    local: `http://localhost:${PORT}`,
+    urls: lanAddresses().map((ip) => `http://${ip}:${PORT}`)
+  });
+}
+
 function handleQrSvg(res, url) {
   const target = (url.searchParams.get('u') || '').trim();
   if (!target || target.length > 512 || !/^https?:\/\//.test(target)) {
@@ -1977,6 +1987,7 @@ const server = http.createServer(async (req, res) => {
     const pathname = decodeURIComponent(url.pathname);
 
     if (pathname === '/api/health' && req.method === 'GET') return sendJson(res, 200, { ok: true });
+    if (pathname === '/api/net-info' && req.method === 'GET') return handleNetInfo(res);
 
     // 预实验 · 局域网连接页与二维码
     if (pathname === '/connect' && req.method === 'GET') return handleConnect(res);
@@ -2051,11 +2062,11 @@ server.listen(PORT, () => {
   console.log('');
   console.log(qrAsciiFor(primary));
   console.log('');
-  console.log('  ↑ 用手机相机扫码进入；手机需与本机在同一 WiFi 或热点。');
+  console.log('  ↑ 手机扫码可进系统入口；各组直达二维码在管理端「问卷管理」生成（可保存图片）。');
   console.log('  停止服务：关闭本窗口（进行中的被试会话数据已实时落库，不会丢失）。');
-  if (process.env.OPEN_CONNECT === '1') {
+  if (process.env.OPEN_PAGE === '1') {
     try {
-      require('node:child_process').exec(`start "" "http://localhost:${PORT}/connect"`, { windowsHide: true });
+      require('node:child_process').exec(`start "" "http://localhost:${PORT}/"`, { windowsHide: true });
     } catch { /* 自动打开浏览器失败不影响服务 */ }
   }
 });

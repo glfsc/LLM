@@ -149,14 +149,15 @@ async function main() {
   console.log('  请注意：');
   console.log('   1. 若弹出 Windows 防火墙提示，请勾选「专用网络」并点「允许访问」，');
   console.log('      否则手机将无法连接。');
-  console.log('   2. 启动后会自动打开「手机扫码进入实验」页面，用手机相机扫码即可。');
+    console.log('   2. 启动后会自动打开登录页；手机二维码登录后在管理端「问卷管理」生成，');
+    console.log('      可保存成图片打印或发给被试（扫码直达作答页）。');
   console.log('   3. 手机需与本机连接同一个 WiFi（或本机开出的移动热点）。');
   console.log('   4. 实验期间请勿关闭本窗口；关闭 = 停止服务，数据不会丢失。');
   console.log('   5. 重复双击本 bat = 结束旧实例并重新启动；被试正在作答时请勿双击。');
   console.log('');
 
-  // 启动后自动打开「手机扫码进入实验」页；脚本化启动时可用 OPEN_CONNECT=0 关掉
-  if (process.env.OPEN_CONNECT !== '0') process.env.OPEN_CONNECT = '1';
+  // 启动后自动打开登录页（登录后到管理端出二维码）；脚本化启动时可用 OPEN_PAGE=0 关掉
+  if (process.env.OPEN_PAGE !== '0') process.env.OPEN_PAGE = '1';
   require(path.join(ROOT, 'server.js'));
 }
 
