@@ -21,6 +21,7 @@ const Q_C = '【自检夹具C·消息式题面与清屏点】';
 const Q_D = '【自检夹具D·超时重试】';
 const Q_B = '自检·平台层B';
 const Q_M = '【自检夹具M·需输入指定内容】';
+const Q_R = '【自检夹具R·打分题重做】';
 const RUN_STARTED = Date.now();
 
 let passed = 0;
@@ -116,6 +117,15 @@ function fixtureD() {
   ];
 }
 
+// 夹具 R：专门验证「打分题单独重做」：改已交的分数只动那一行，进度与后续作答不受影响
+function fixtureR() {
+  return [
+    { id: 'r_open', type: 'rating', title: '【夹具R】重做·默认开', min: 1, max: 5, anchor: '1 = 完全不同意　·　5 = 完全同意' },
+    { id: 'r_closed', type: 'rating', title: '【夹具R】重做·已关闭', min: 1, max: 5, limits: { redo: 0 } },
+    { id: 'r_single', type: 'single', title: '【夹具R】单选收尾（非打分题）', options: ['甲', '乙'], correct: 0 }
+  ];
+}
+
 // 由夹具推导的期望值（不写死数字）
 function expectations(items) {
   const units = items.filter((it) => it.type !== 'message');
@@ -139,11 +149,12 @@ async function main() {
 
   const { request, login, bindAdmin } = makeHttp(BASE, ADMIN_PASSWORD);
   const token = await login();
-  const admin = bindAdmin(token);
+  // let：[10.4] 的再登录会触发「一账号单设备在线」把最初的 token 踢下线，之后要换新 token 重新绑定
+  let admin = bindAdmin(token);
 
-  // 清掉上次可能的残留
+  // 清掉上次可能的残留（中途崩溃会漏掉 [11] 的清理）
   for (const q of (await admin('/api/admin/questionnaires')).questionnaires) {
-    if ([Q_A, Q_B, Q_M].includes(q.title)) await admin('/api/admin/questionnaire/delete', { body: { id: q.id, force: true } });
+    if ([Q_A, Q_B, Q_M, Q_C, Q_D, Q_R].includes(q.title)) await admin('/api/admin/questionnaire/delete', { body: { id: q.id, force: true } });
   }
 
   const itemsA = fixture(TASK_TEXT_A);
@@ -583,6 +594,8 @@ async function main() {
   const secretRow = withDb((db) => db.prepare("SELECT value FROM settings WHERE key = 'auth_secret'").get());
   check('签名密钥持久化在 settings（服务重启后 token 仍然有效）',
     !!secretRow && String(secretRow.value).length >= 32, secretRow ? String(secretRow.value).length + ' 字符' : '缺失');
+  // 单设备在线：上面两次再登录已把最初那张 token 踢下线 —— 换记住密码的 30 天 token 重新绑定后续管理端调用
+  admin = bindAdmin(loginRemember.data.token);
 
   // 改倍速：最短提交 / 最长作答窗口必须一起折算 —— 否则客户端按新倍速显示会变成「设定值 × 倍速」
   const pvGate = await admin('/api/admin/preview', { body: { items: [
@@ -783,13 +796,76 @@ async function main() {
   check('预览里输入一致则正常推进', mPvRight.ok && mPvRight.data.action && mPvRight.data.action.itemId === 'm_t2');
   await request('/api/preview/destroy', { body: { previewId: mPv.previewId } });
 
+  section('[10.8] 打分题单独重做：只改那一行的值，不推进进度');
+  const itemsR = fixtureR();
+  const qR = (await admin('/api/admin/questionnaire/create', { body: { title: Q_R, items: itemsR } })).questionnaire;
+  const sesR = (await request('/api/session', { body: { q: qR.id } })).data;
+  const sidR = sesR.session.id;
+  check('action 下发 allowRedo（默认开 = 1）',
+    Number(sesR.action && sesR.action.allowRedo) === 1,
+    JSON.stringify(sesR.action && sesR.action.allowRedo));
+  const rAns1 = await request('/api/step', { body: { sessionId: sidR, itemId: 'r_open', value: 2 } });
+  check('正常作答推进到下一题；redo:0 的题 allowRedo = 0',
+    rAns1.ok && rAns1.data.action && rAns1.data.action.itemId === 'r_closed' && Number(rAns1.data.action.allowRedo) === 0,
+    JSON.stringify(rAns1.data.action && { id: rAns1.data.action.itemId, allowRedo: rAns1.data.action.allowRedo }));
+  const redo1 = await request('/api/step', { body: { sessionId: sidR, itemId: 'r_open', value: 4, redo: true } });
+  check('重做已答打分题：只回 redone，不带下一题 / 消息',
+    redo1.ok && redo1.data.redone && Number(redo1.data.redone.value) === 4
+      && redo1.data.action === undefined && redo1.data.messages === undefined && redo1.data.clearStream === undefined,
+    JSON.stringify(redo1.data).slice(0, 140));
+  const bootR = await request(`/api/bootstrap?q=${qR.id}&session=${sidR}`);
+  check('重做不推进进度：当前题不变、已完成单元数不变',
+    bootR.ok && bootR.data.action && bootR.data.action.itemId === 'r_closed' && bootR.data.answeredCount === 1,
+    JSON.stringify({ action: bootR.data.action && bootR.data.action.itemId, answered: bootR.data.answeredCount }));
+  const detR = await admin(`/api/admin/questionnaire/session?id=${qR.id}&sid=${sidR}`);
+  const rowsOpen = detR.responses.filter((r) => r.itemId === 'r_open');
+  check('重做不新增作答行：明细为终值 4 分',
+    rowsOpen.length === 1 && Number(rowsOpen[0].value) === 4,
+    JSON.stringify(rowsOpen.map((r) => r.value)));
+  check('「我的选择」回显同步更新为新值',
+    (detR.messages || []).some((m) => m.role === 'user' && String(m.content).includes('4 分')),
+    JSON.stringify((detR.messages || []).filter((m) => m.role === 'user').map((m) => m.content)));
+  const redoBad = await request('/api/step', { body: { sessionId: sidR, itemId: 'r_open', value: 9, redo: true } });
+  check('重做越界值被拒（invalid_answer）',
+    redoBad.status === 400 && redoBad.data.error === 'invalid_answer',
+    `${redoBad.status} ${redoBad.data.error || ''}`);
+  const redoUnanswered = await request('/api/step', { body: { sessionId: sidR, itemId: 'r_single', value: 1, redo: true } });
+  check('未作答 / 非打分题不能走重做（redo_not_allowed）',
+    redoUnanswered.status === 400 && redoUnanswered.data.error === 'redo_not_allowed',
+    `${redoUnanswered.status} ${redoUnanswered.data.error || ''}`);
+  const rAns2 = await request('/api/step', { body: { sessionId: sidR, itemId: 'r_closed', value: 3 } });
+  check('重做后继续作答不受影响', rAns2.ok && rAns2.data.action && rAns2.data.action.itemId === 'r_single',
+    JSON.stringify(rAns2.data.action && rAns2.data.action.itemId));
+  const redoOff = await request('/api/step', { body: { sessionId: sidR, itemId: 'r_closed', value: 4, redo: true } });
+  check('关闭「允许重做」的打分题拒绝重做',
+    redoOff.status === 400 && redoOff.data.error === 'redo_not_allowed',
+    `${redoOff.status} ${redoOff.data.error || ''}`);
+  const finR = await request('/api/step', { body: { sessionId: sidR, itemId: 'r_single', value: 1 } });
+  check('交卷完成', finR.ok && finR.data.session && finR.data.session.status === 'completed',
+    JSON.stringify(finR.data.session));
+  const redoAfterFinish = await request('/api/step', { body: { sessionId: sidR, itemId: 'r_open', value: 5, redo: true } });
+  check('会话结束后不能重做（session_closed）',
+    redoAfterFinish.status === 409 && redoAfterFinish.data.error === 'session_closed',
+    `${redoAfterFinish.status} ${redoAfterFinish.data.error || ''}`);
+  // 预览（内存会话）走同一套状态机，重做分支天然可用
+  const pvR = await admin('/api/admin/preview', { body: { items: itemsR } });
+  const pvRBoot = await request('/api/preview/session', { body: { previewId: pvR.previewId } });
+  const pvRSid = pvRBoot.data.session.id;
+  await request('/api/preview/step', { body: { previewId: pvR.previewId, sessionId: pvRSid, itemId: 'r_open', value: 2 } });
+  const pvRedo = await request('/api/preview/step', { body: { previewId: pvR.previewId, sessionId: pvRSid, itemId: 'r_open', value: 5, redo: true } });
+  check('预览（内存会话）同样支持重做',
+    pvRedo.ok && pvRedo.data.redone && Number(pvRedo.data.redone.value) === 5,
+    JSON.stringify(pvRedo.data).slice(0, 140));
+  await request('/api/preview/destroy', { body: { previewId: pvR.previewId } });
+
   section('[11] 清理与设置还原');
   await admin('/api/admin/questionnaire/delete', { body: { id: qC.id, force: true } });
   await admin('/api/admin/questionnaire/delete', { body: { id: qA.id, force: true } });
   await admin('/api/admin/questionnaire/delete', { body: { id: qB.id, force: true } });
   await admin('/api/admin/questionnaire/delete', { body: { id: qM.id, force: true } });
+  await admin('/api/admin/questionnaire/delete', { body: { id: qR.id, force: true } });
   const restQ = (await admin('/api/admin/questionnaires')).questionnaires;
-  check('夹具问卷已清理', restQ.every((q) => ![Q_A, Q_B, Q_C, Q_D, Q_M].includes(q.title)));
+  check('夹具问卷已清理', restQ.every((q) => ![Q_A, Q_B, Q_C, Q_D, Q_M, Q_R].includes(q.title)));
   await admin('/api/admin/settings', { body: { resumeWindowHours: settings.resumeWindowHours } });
   const restored = (await admin('/api/admin/settings')).settings;
   check('全局设置已还原', restored.resumeWindowHours === settings.resumeWindowHours);

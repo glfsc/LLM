@@ -235,7 +235,7 @@ const ITEM_LIMITS = {
   confirm: ['refresh', 'wait'],
   debrief: ['refresh'],
   group: ['refresh', 'wait', 'minSubmit', 'maxAnswer'],
-  rating: ['refresh', 'wait', 'minSubmit', 'maxAnswer'],
+  rating: ['refresh', 'wait', 'minSubmit', 'maxAnswer', 'redo'],
   single: ['refresh', 'wait'],
   multi: ['refresh', 'wait'],
   text: ['refresh', 'wait', 'minSubmit', 'maxAnswer'],
@@ -245,23 +245,25 @@ const ITEM_LIMITS = {
 // 题目参数：作答门控（秒）+ 呈现节奏（毫秒）+ 刷新点（开关）
 // 默认值只在代码里定义一处（DEFAULT_LIMITS）——不再有「问卷级默认值 + 题目覆盖」两层，
 // 作者不必在心算「这题到底生效的是哪个值」，未配置的参数一律回落到这里。
-const LIMIT_KEYS = ['refresh', 'wait', 'minSubmit', 'maxAnswer', 'thinkMs', 'typeMs'];
+const LIMIT_KEYS = ['refresh', 'wait', 'minSubmit', 'maxAnswer', 'thinkMs', 'typeMs', 'redo'];
 const LIMIT_META = {
-  refresh: { label: '呈现前清空聊天流', unit: '开关', hint: '呈现本题（或本条消息）之前，把屏内已呈现的内容整体清空。清屏点记在服务端：刷新页面也看不到清空之前的内容，数据仍完整保留在管理端' },
+  refresh: { label: '呈现前清空聊天流', unit: '开关', switchText: '呈现前清空', hint: '呈现本题（或本条消息）之前，把屏内已呈现的内容整体清空。清屏点记在服务端：刷新页面也看不到清空之前的内容，数据仍完整保留在管理端' },
   wait: { label: '作答前强制等待', unit: '秒', hint: '需先停留 N 秒才能作答（如强制阅读）' },
   minSubmit: { label: '最短提交时间', unit: '秒', hint: '提交前的最短等待' },
   maxAnswer: { label: '最长作答时间', unit: '秒', hint: '到点自动提交已输入内容' },
   thinkMs: { label: 'AI 思考时长', unit: '毫秒', hint: '该消息配了思考内容时就是「深度思考面板」的时长（在「思考过程」行里改，单位是秒）；未配思考稿时只是「正在思考」转圈时长。0 = 不显示', group: 'rhythm' },
-  typeMs: { label: '流式输出速度', unit: '毫秒/字', hint: '每字间隔；0 = 立即整段显示（数值越小越快）', group: 'rhythm' }
+  typeMs: { label: '流式输出速度', unit: '毫秒/字', hint: '每字间隔；0 = 立即整段显示（数值越小越快）', group: 'rhythm' },
+  redo: { label: '允许重做', unit: '开关', switchText: '允许重做', hint: '打分题提交后，被试可点卡片上的「重做」单独改这一题的分数（不影响后面的作答进度；刷新页面后不能再改）。关闭后该题不提供重做' }
 };
-// 各参数的默认值与取值范围（门控以秒计，节奏以毫秒计，刷新点为 0/1）
+// 各参数的默认值与取值范围（门控以秒计，节奏以毫秒计，刷新点/重做为 0/1）
 const LIMIT_SPEC = {
   refresh: { def: 0, min: 0, max: 1 },
   wait: { def: 0, min: 0, max: 86400 },
   minSubmit: { def: 0, min: 0, max: 86400 },
   maxAnswer: { def: 0, min: 0, max: 86400 },
   thinkMs: { def: 20000, min: 0, max: 60000 },
-  typeMs: { def: 11, min: 0, max: 500 }
+  typeMs: { def: 11, min: 0, max: 500 },
+  redo: { def: 1, min: 0, max: 1 }
 };
 // 未配置任何参数时的生效值（服务端与两个前端共用同一份，避免兜底路径分叉）
 const DEFAULT_LIMITS = LIMIT_KEYS.reduce((o, k) => { o[k] = LIMIT_SPEC[k].def; return o; }, {});
@@ -573,7 +575,7 @@ function scaleItems(idPrefix, spec, opts = {}) {
     ...(opts.limits ? { limits: opts.limits } : {})
   }];
   spec.questions.forEach((q, i) => {
-    out.push({ id: `${idPrefix}_${i + 1}`, type: 'rating', title: q.title, html: body16(q.text), min: 1, max: 5, anchor: spec.anchor });
+    out.push({ id: `${idPrefix}_${i + 1}`, type: 'rating', title: q.title, html: body16(q.text), min: 1, max: 5, anchor: spec.anchor, limits: { redo: 1 } });
   });
   return out;
 }
@@ -596,7 +598,8 @@ function valenceItems() {
       html: body16(q.text),
       min: 1,
       max: 5,
-      anchor: VALENCE.anchor
+      anchor: VALENCE.anchor,
+      limits: { redo: 1 }
     }))
   ];
 }
@@ -1196,6 +1199,26 @@ function addResponse({ sessionId, itemId, itemIndex, itemType, unitIndex, subInd
   return Number(info.lastInsertRowid);
 }
 
+// 打分题「单独重做」：就地更新那一行的终值（呈现/作答时间与耗时保持原样——原始计时口径不被污染）。
+// 不加行、不改 unit_index：进度（COUNT DISTINCT unit_index）与汇总均分自动保持正确。
+// 返回更新的行数（0 = 找不到原作答记录）。
+function redoResponse({ sessionId, itemId, unitIndex, value, valueText, optionLabel }) {
+  const info = db.prepare(
+    'UPDATE responses SET value = ?, value_text = ?, option_label = ? WHERE session_id = ? AND item_id = ? AND unit_index = ?'
+  ).run(
+    value == null ? null : Number(value), String(valueText || ''), String(optionLabel || ''),
+    sessionId, String(itemId), Number(unitIndex) || 0
+  );
+  return Number(info.changes) || 0;
+}
+
+// 重做后同步该题的「我的选择」回显消息：管理端聊天记录与被试端刷新后的回放共用这一条
+function updateUserEcho(sessionId, itemId, content) {
+  const info = db.prepare("UPDATE messages SET content = ? WHERE session_id = ? AND item_id = ? AND role = 'user'")
+    .run(String(content), sessionId, String(itemId));
+  return Number(info.changes) || 0;
+}
+
 // 会话摘要列表（数据页）
 function listSessionSummaries(questionnaireId) {
   return db.prepare(
@@ -1449,6 +1472,8 @@ module.exports = {
   unitFirstResponse,
   listResponses,
   addResponse,
+  redoResponse,
+  updateUserEcho,
   listSessionSummaries,
   listResponseRows,
   listQuestionnaireSummaryRows

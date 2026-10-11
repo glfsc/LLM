@@ -230,6 +230,16 @@ input, textarea, [contenteditable="true"] {
 .qcard-body.readonly .answer-input:focus { background: #fff; cursor: default; }
 /* 已答题目默认整体隐藏：顶栏「显示已答题」或卡片上的「显示」按钮可临时恢复 */
 .qcard.done.answered-hidden { display: none; }
+/* 打分题重做中：卡片临时回到可改状态——高亮描边 + 不降透明度，与待答卡片一眼区分；
+   此刻徽标文字是「未提交」，warn 配色（黄）正对应这个语义；处置完回「✓ 已提交」（绿） */
+.qcard.redoing { background: #fff; border-color: var(--fg); box-shadow: var(--shadow-soft); opacity: 1; }
+.qcard.redoing .qdone-mark { color: var(--warn-fg); background: var(--warn-bg); }
+@keyframes redo-nudge {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-5px); }
+  75% { transform: translateX(5px); }
+}
+.qcard.redo-nudge { animation: redo-nudge .45s var(--ease-out); }
 .qcard-foot { display: flex; align-items: center; gap: 12px; margin-top: 13px; }
 .qfoot-hint { flex: 1 1 auto; font-size: 12px; line-height: 1.6; color: var(--warn-fg); }
 .qcard.locked .qfoot-hint { color: var(--muted); }
@@ -345,6 +355,14 @@ input, textarea, [contenteditable="true"] {
   transform: translateY(10px) scale(.98); transition: transform .2s var(--ease-out);
 }
 .confirm-mask.visible .confirm-card { transform: none; }
+/* 弹窗顶部圆形徽标（如重做断言的 ⚠）：与「未提交」徽标同一套 warn 配色 */
+.confirm-icon {
+  width: 48px; height: 48px; margin: 0 auto 14px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 26px; line-height: 1;
+  color: var(--warn-fg); background: var(--warn-bg);
+  border: 1px solid var(--warn-border); border-radius: 50%;
+}
 .confirm-card h3 { margin: 0 0 8px; font-size: 16px; }
 .confirm-text { margin: 0 0 18px; font-size: 13.5px; line-height: 1.8; color: var(--fg-soft); white-space: pre-wrap; }
 .confirm-actions { display: flex; gap: 10px; justify-content: flex-end; }

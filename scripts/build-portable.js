@@ -1,12 +1,12 @@
 // 打包「局域网预实验便携包」：dist/预实验便携包.zip —— 唯一的分发件。
 // 产物特征（缺一不可，实验人员电脑上不需要安装任何东西）：
 //   ① 内置当前运行的 node.exe（与开发/自检同版本，规避兼容性）；解压后双击「启动预实验.bat」即可；
-//   ② 内置一份**干净数据库**（两个实验模板 + 两份预设问卷 + 0 会话 + 默认管理员 admin/admin123），
-//      首次启动就能直接扫码做实验，不用自己建问卷；
+//   ② 内置一份**数据库快照**：当前 data.db 里的实验模板 / 问卷 / 账号原样带走（研究者准备什么就带走什么），
+//      只清空被试数据（会话、作答、对话消息）——不给实验人员留下历史被试记录；
 //   ③ 只带运行必需文件，不带 design/ documents/ screenshots/ .tmp/ .git 等开发脚手架，
 //      也不带会清库的开发脚本（scripts/ 下只留启动器 pilot-start.js）。
 // 用法：node scripts/build-portable.js   （或 npm run portable）
-// 校验：打包前后都做完整性检查 —— 暂存目录里生成数据库并核对种子数量、内置 node.exe 可执行且版本达标、
+// 校验：打包前后都做完整性检查 —— 核对快照里「问卷/实验保留、被试数据清零」、内置 node.exe 可执行且版本达标、
 //       zip 条目数与暂存文件数一致。任何一步不过就中止，不产出可疑的 zip。
 // 注意：fs.cpSync 在 Windows 上目标路径含中文时会静默失败（不复制也不报错），
 //       所以先复制到 ASCII 临时目录、压缩前再改名（rename 是单次系统调用，无此问题）。
@@ -75,44 +75,70 @@ function fail(message) {
   process.exit(1);
 }
 
-// 在暂存目录里生成一份干净数据库：借用 reset-db.js（删库 → 重新建表 → 灌种子），跑完即删。
-// 这样产出的 data.db 永远来自当前代码里的种子内容，而不是某台机器上的历史库。
-function buildCleanDb() {
-  const seedScript = path.join(STAGE_ASCII, 'scripts', 'reset-db.js');
-  fs.copyFileSync(path.join(ROOT, 'scripts', 'reset-db.js'), seedScript);
-  const r = spawnSync(process.execPath, [seedScript], { cwd: STAGE_ASCII, encoding: 'utf8' });
-  fs.rmSync(seedScript, { force: true });
-  if (r.status !== 0) fail(`生成干净数据库失败：${String(r.stderr || r.stdout || '').trim().slice(0, 300)}`);
-  const summary = String(r.stdout || '').trim().split(/\r?\n/).slice(0, 4).join(' / ');
-  console.log(`  · 已生成干净数据库：${summary}`);
+// 从开发机的 data.db 导出打包用快照：实验模板 / 问卷 / 账号原样保留，只清空被试数据。
+// 两个关键点：
+//   ① 不能直接复制文件 —— data.db-wal 里往往还有未合并的近期写入，复制主库会漏掉它们，
+//      所以走 SQLite 的 VACUUM INTO 导出（顺带把库压成单文件，包里不会多出 -wal/-shm）；
+//   ② 源库以只读方式打开（只读连接同样支持 VACUUM INTO），保证打包动作不会改动开发机上的 data.db。
+// 想发「从代码种子重建的库」时：先在开发机跑 npm run reset-db，再执行打包即可。
+function buildSanitizedDb() {
+  const { DatabaseSync } = require('node:sqlite');
+  const liveDb = path.join(ROOT, 'data.db');
+  if (!fs.existsSync(liveDb)) {
+    fail('找不到 data.db：打包要带上一份含实验模板与问卷的库；请先准备好内容，或 npm run reset-db 用代码种子重建。');
+  }
+  const stageDb = path.join(STAGE_ASCII, 'data.db');
+  const snapshot = path.join(STAGE_ASCII, 'data.snapshot.db');
+  fs.rmSync(snapshot, { force: true });
 
-  // 收起 -wal：把库 VACUUM 成单文件（否则 zip 里会多出 data.db-wal，解压后首次启动还会改库），
-  // 并顺手数一遍种子数量，确保发出去的库里确实有模板、有预设问卷、没有会话数据。
-  const dbFile = path.join(STAGE_ASCII, 'data.db');
-  const cleanFile = path.join(STAGE_ASCII, 'data.clean.db');
-  const checkScript = path.join(STAGE_ASCII, '__dbcheck.js');
-  // SQLite 的字符串字面量用单引号（双引号会被当成标识符）；Windows 路径统一转成 / 免转义
-  const vacuumSql = `VACUUM INTO '${cleanFile.replace(/\\/g, '/')}'`;
-  fs.writeFileSync(checkScript, `
-    const { DatabaseSync } = require('node:sqlite');
-    const db = new DatabaseSync(${JSON.stringify(dbFile)});
-    const n = (t) => db.prepare('SELECT COUNT(*) c FROM "' + t + '"').get().c;
-    const counts = { exp: n('experiments'), q: n('questionnaires'), users: n('users'), sessions: n('sessions'), responses: n('responses') };
-    db.exec(${JSON.stringify(vacuumSql)});
+  const count = (db, table) => db.prepare(`SELECT COUNT(*) c FROM "${table}"`).get().c;
+  const readCounts = (db) => ({
+    exp: count(db, 'experiments'),
+    q: count(db, 'questionnaires'),
+    users: count(db, 'users'),
+    sessions: count(db, 'sessions'),
+    responses: count(db, 'responses'),
+    messages: count(db, 'messages')
+  });
+
+  const src = new DatabaseSync(liveDb, { readOnly: true });
+  let before;
+  try {
+    before = readCounts(src);
+    src.exec(`VACUUM INTO '${snapshot.replace(/\\/g, '/')}'`);
+  } finally {
+    src.close();
+  }
+  if (before.exp < 1 || before.q < 1) {
+    fail(`当前 data.db 里没有可发的实验内容（实验模板 ${before.exp} 个 / 问卷 ${before.q} 份），先准备好内容再打包。`);
+  }
+
+  const db = new DatabaseSync(snapshot);
+  let after;
+  try {
+    db.exec(`
+      BEGIN;
+      DELETE FROM responses;
+      DELETE FROM messages;
+      DELETE FROM sessions;
+      DELETE FROM sqlite_sequence WHERE name IN ('responses', 'messages');
+      COMMIT;
+    `);
+    db.exec('VACUUM');
+    after = readCounts(db);
+  } finally {
     db.close();
-    process.stdout.write(JSON.stringify(counts));
-  `, 'utf8');
-  const check = spawnSync(process.execPath, [checkScript], { encoding: 'utf8' });
-  fs.rmSync(checkScript, { force: true });
-  if (check.status !== 0) fail(`数据库自检失败：${String(check.stderr || '').trim().slice(0, 300)}`);
-  let counts = {};
-  try { counts = JSON.parse(String(check.stdout).trim()); } catch { fail(`数据库自检输出无法解析：${String(check.stdout).slice(0, 200)}`); }
-  if (counts.sessions !== 0 || counts.responses !== 0) fail(`干净数据库里还有会话数据（sessions=${counts.sessions}）—— 种子流程不对，中止打包。`);
-  if (counts.users !== 1) fail(`干净数据库应只有 1 个账号（admin），实际 ${counts.users} 个。`);
-  if (!(counts.exp >= 2 && counts.q >= 2)) fail(`干净数据库缺少种子内容（实验模板 ${counts.exp} 个 / 问卷 ${counts.q} 份）。`);
-  fs.rmSync(dbFile, { force: true });
-  fs.renameSync(cleanFile, dbFile);
-  console.log(`  · 库自检：实验模板 ${counts.exp} 个 / 预设问卷 ${counts.q} 份 / 账号 ${counts.users} 个 / 会话 ${counts.sessions} 份`);
+  }
+  if (after.sessions || after.responses || after.messages) {
+    fail(`被试数据没清干净（会话 ${after.sessions} / 作答 ${after.responses} / 消息 ${after.messages}），中止打包。`);
+  }
+  if (after.exp !== before.exp || after.q !== before.q || after.users !== before.users) {
+    fail('清空被试数据后，实验 / 问卷 / 账号的数量发生了变化，中止打包。');
+  }
+  fs.rmSync(stageDb, { force: true });
+  fs.renameSync(snapshot, stageDb);
+  console.log(`  · 库快照：实验模板 ${after.exp} 个 / 问卷 ${after.q} 份 / 账号 ${after.users} 个（原样保留）`);
+  console.log(`  · 已清空被试数据：会话 ${before.sessions} 份 / 作答 ${before.responses} 条 / 对话消息 ${before.messages} 条`);
 }
 
 // 内置运行时的体检：能跑、版本达标（node:sqlite 需要 ≥ 22.13）
@@ -151,7 +177,7 @@ function main() {
   }
   console.log(`  · 已复制运行必需文件（${COPY_FILES.length} 个文件 + ${COPY_DIRS.join(' / ')} + ${COPY_NESTED.length} 个脚本）`);
 
-  buildCleanDb();
+  buildSanitizedDb();
 
   // 捆绑当前 Node 运行时（与开发 / 自检同版本）——没装 Node 的电脑靠它才能双击即用
   fs.copyFileSync(process.execPath, path.join(STAGE_ASCII, 'node.exe'));
@@ -197,7 +223,7 @@ function main() {
 
   const sizeMb = (fs.statSync(ZIP_PATH).size / 1024 / 1024).toFixed(1);
   console.log('');
-  console.log(`OK: dist/${STAGE_NAME}.zip（${sizeMb} MB，${zipEntries} 个文件，内置 node.exe + 干净数据库，完整性校验通过）`);
+  console.log(`OK: dist/${STAGE_NAME}.zip（${sizeMb} MB，${zipEntries} 个文件，内置 node.exe + 保留问卷/实验并已清空被试数据的库，完整性校验通过）`);
   console.log('把这个 zip 发给实验人员即可：对方解压后双击「启动预实验.bat」，无需安装 Node 或任何其他软件。');
 }
 

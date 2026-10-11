@@ -26,6 +26,7 @@ const $scroll = document.getElementById('chat-scroll');
 const $btnCollapseAll = document.getElementById('btn-collapse-all');
 const $btnRedo = document.getElementById('btn-redo');
 const $confirmMask = document.getElementById('confirm-mask');
+const $confirmIcon = document.getElementById('confirm-icon');
 const $confirmTitle = document.getElementById('confirm-title');
 const $confirmText = document.getElementById('confirm-text');
 const $confirmOk = document.getElementById('confirm-ok');
@@ -67,7 +68,8 @@ const state = {
   timeScale: 1,             // 预览倍速：倒计时按「设定秒数 × 倍速」显示（真实会话恒为 1）
   showAnswered: true,       // 问答过程默认不隐藏（需求 4）：已答题降权呈现，需要时可手动折叠
   draft: {},                // itemId -> { subIndex: text }
-  deadlineFired: false
+  deadlineFired: false,
+  redoing: null             // 打分题重做中：{ itemId, action, card, control, submitBtn, hint, busy }（最多一张卡片）
 };
 
 // 时间已到后的统一提示：停止作答，只能重做（被试端各处共用同一句，避免口径不一致）
@@ -439,12 +441,22 @@ function clearStream() {
   clearSeen();
   state.showAnswered = true;
   state.questionNodes.clear();
+  state.redoing = null;                            // 屏都清了：不可能还有「未提交」的卡片
+  notifyRedoSettled();                             // 保险：若有挂起的断言流程一并放行（世代号守卫会拦住旧续集）
   composerTarget = null;
   $composerInput.value = '';
   clearComposerError();
   refreshAnsweredBtn();
   scrollToBottom(false);
 }
+
+// 有未提交的重做时才拦浏览器刷新 / 关闭（平时不打扰「填完即释放设备」的流程）：
+// 原生弹窗只能让被试选择留下或离开——留下就能先在卡片上提交/取消，然后再刷新。
+window.addEventListener('beforeunload', (e) => {
+  if (!state.redoing) return;
+  e.preventDefault();
+  e.returnValue = '';
+});
 
 // 打字机与思考节奏由服务端按消息下发（think_ms / type_ms；题目可覆盖，否则用内置默认）
 // 标点在基础速度上额外停顿，读起来更像真实输入
@@ -1016,6 +1028,8 @@ async function abandonAndRestart() {
   $stream.replaceChildren();
   state.sessionId = null;
   state.questionNodes.clear();
+  state.redoing = null;                            // 整份重开：撤销任何未提交的卡片修改
+  notifyRedoSettled();                             // 同上：放行可能挂起的断言流程（世代号守卫兜底）
   state.draft = {};
   state.answeredCount = 0;
   state.completed = false;
@@ -1422,12 +1436,20 @@ function finalizeQuestionCard(action, answerText) {
   card.querySelector('.qcard-timer')?.remove();      // 已提交：撤掉倒计时
   const head = card.querySelector('.qcard-head');
   if (head) head.appendChild(el('span', 'qdone-mark', '✓ 已提交'));
-  const toggle = el('button', 'mini-btn qcard-toggle', '隐藏');
+  // 打分题（开了「允许重做」）的已答卡片：这里的按钮是「重做」——单独改这一题的分数，不影响后面的作答；
+  // 其余题型仍是「隐藏 / 显示」折叠开关（顶栏「隐藏已答题」对两类卡片都有效）。
+  // 刷新 / 重进后重建的已答卡片（renderDoneCard）不带重做：清屏点之前的题本就不再呈现，设计如此。
+  const redoable = action.type === 'rating' && Number(action.allowRedo) === 1;
+  const toggle = el('button', 'mini-btn qcard-toggle' + (redoable ? ' redo-entry' : ''), redoable ? '重做' : '隐藏');
   toggle.type = 'button';
-  toggle.addEventListener('click', () => {
-    const hidden = card.classList.toggle('answered-hidden');
-    toggle.textContent = hidden ? '显示' : '隐藏';
-  });
+  if (redoable) {
+    toggle.addEventListener('click', () => startRedo(action, card));
+  } else {
+    toggle.addEventListener('click', () => {
+      const hidden = card.classList.toggle('answered-hidden');
+      toggle.textContent = hidden ? '显示' : '隐藏';
+    });
+  }
   head.appendChild(toggle);
 }
 
@@ -1440,17 +1462,159 @@ function refreshAnsweredBtn() {
 }
 
 // 顶栏按钮：临时显示全部已答题目 / 再次整体隐藏
+// 打分题的「重做」按钮不是折叠开关：只改 answered-hidden，文字不动
 function setAnsweredVisible(flag) {
   state.showAnswered = flag;
   const hidden = !flag;
   document.querySelectorAll('.qcard.done').forEach((card) => {
     card.classList.toggle('answered-hidden', hidden);
-    const t = card.querySelector('.qcard-toggle');
+    const t = card.querySelector('.qcard-toggle:not(.redo-entry)');
     if (t) t.textContent = hidden ? '显示' : '隐藏';
   });
   // 作答回显的用户气泡也一起隐藏 / 显示（它们同样是「已答题」的一部分）
   document.querySelectorAll('.msg.user.answered').forEach((n) => n.classList.toggle('answered-hidden', hidden));
   refreshAnsweredBtn();
+}
+
+/* ---------------------------------------------------------------- 打分题单独重做
+   已提交的打分题卡片上有一个「重做」按钮：点它只把这一张卡片临时变回可改状态——
+   当前题、倒计时、进度、聊天流都不受影响；改完点「确认提交」才落库。
+   没有取消路径：点了重做就必须提交（想保留原分数就重新选回原值再提交）。
+   状态徽标只有两种：重做中（改动未落库）=「未提交」，其余 =「✓ 已提交」。
+   同一时刻最多一张卡片处于修改中；刷新点 / 交卷前会先点名未提交的卡片，
+   被试回卡片上提交后流程才继续——弹窗不替被试提交（settlePendingRedo）。 */
+
+// 进入重做：卡片重建为可改状态（原分数保持选中），底部给「取消 / 确认提交」
+function startRedo(action, card) {
+  if (state.completed) return;
+  if (state.redoing) {
+    const cur = state.redoing.card;
+    if (cur && cur !== card) {
+      cur.scrollIntoView({ behavior: 'smooth', block: 'center' });   // 已有一张在改：带到它面前去处置
+      cur.classList.remove('redo-nudge');
+      void cur.offsetWidth;
+      cur.classList.add('redo-nudge');
+    }
+    return;
+  }
+  if (state.busy) return;                          // 当前题正在提交：稍后再点（几秒内就会空闲）
+  const bodyEl = card.querySelector('.qcard-body');
+  const selected = bodyEl.querySelector('.rating-btn.selected');
+  const original = selected ? Number(selected.textContent) : null;
+  card.classList.add('redoing');
+  card.classList.remove('answered-hidden');
+  bodyEl.classList.remove('readonly');
+  bodyEl.replaceChildren();
+  const control = buildSubControl(action, original, () => {}, () => refreshRedoFoot(), false);
+  bodyEl.appendChild(control.node);
+  const foot = el('div', 'qcard-foot');
+  const hint = el('span', 'qfoot-hint');
+  const submitBtn = el('button', 'primary-btn', '确认提交');
+  submitBtn.type = 'button';
+  submitBtn.addEventListener('click', () => submitRedo());
+  foot.append(hint, submitBtn);                    // 没有「取消」：点重做 = 必须提交（原值可选回再交）
+  card.appendChild(foot);
+  const mark = card.querySelector('.qdone-mark');
+  if (mark) mark.textContent = '未提交';           // 改动还没落库：黄底「未提交」（.redoing 的 warn 配色）
+  const toggle = card.querySelector('.qcard-toggle');
+  if (toggle) toggle.disabled = true;
+  state.redoing = { itemId: action.itemId, action, card, control, submitBtn, hint, busy: false };
+  refreshRedoFoot();
+  card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+function refreshRedoFoot() {
+  const r = state.redoing;
+  if (!r || !r.submitBtn) return;
+  r.submitBtn.disabled = r.busy || !r.control.isReady();
+}
+
+// 卡片被处置（确认提交）后的放行通知：settlePendingRedo 挂起的清屏 / 交卷流程据此继续
+const redoSettleWaiters = [];
+function notifyRedoSettled() {
+  while (redoSettleWaiters.length) redoSettleWaiters.pop()();
+}
+
+// 重做提交成功后的收尾：把卡片重建为只读展示并恢复「✓ 已提交」与「重做」入口
+// （不再有「已更新为 N 分」的一次性提示——那要靠定时器改回文案，卡片再次进入重做时会
+//   被过期的定时器改回「已提交」字样、却套着 .redoing 的黄色配色；状态只有两种，定时器就不需要存在）
+function rebuildDoneRatingCard(card, action, value) {
+  card.classList.remove('redoing');
+  const bodyEl = card.querySelector('.qcard-body');
+  bodyEl.classList.add('readonly');
+  bodyEl.replaceChildren();
+  const control = buildSubControl(action, value, () => {}, () => {}, false);
+  bodyEl.appendChild(control.node);
+  bodyEl.querySelectorAll('button').forEach((btn) => { btn.disabled = true; });
+  card.querySelector('.qcard-foot')?.remove();
+  const mark = card.querySelector('.qdone-mark');
+  if (mark) mark.textContent = '✓ 已提交';
+  const toggle = card.querySelector('.qcard-toggle');
+  if (toggle) toggle.disabled = false;             // 点击监听还在（闭包里就是这张卡和这道题），重新点亮即可
+}
+
+// 提交重做：POST /api/step { redo: true, itemId, value }——服务端只更新那一行，不推进进度。
+// 返回是否成功（失败时原因写在卡片脚注里，弹窗场景会把提示带进弹窗文案）。
+async function submitRedo() {
+  const r = state.redoing;
+  if (!r || r.busy) return false;
+  const value = r.control.getPayload().value;
+  if (value == null) return false;
+  r.busy = true;
+  refreshRedoFoot();
+  try {
+    const res = await api(stepUrl(), {
+      method: 'POST',
+      body: stepBody({ sessionId: state.sessionId, itemId: r.action.itemId, value, redo: true })
+    });
+    if (res.ignored) {
+      if (r.hint) r.hint.textContent = '这次修改没有被接受，请重试。';
+      return false;
+    }
+    if (res.nowMs != null) state.serverOffsetMs = res.nowMs - Date.now();
+    const done = state.redoing;
+    state.redoing = null;
+    rebuildDoneRatingCard(done.card, done.action, value);
+    notifyRedoSettled();                             // 若清屏 / 交卷正被这张卡挡着：放行
+    return true;
+  } catch (err) {
+    if (r.hint) r.hint.textContent = err.message || '提交失败，请重试。';
+    return false;
+  } finally {
+    r.busy = false;
+    refreshRedoFoot();                               // 失败后把「确认提交」重新点亮（改动还在卡上）
+  }
+}
+
+// 未提交重做的断言（刷新点 / 交卷共用）：不替被试提交、也不给取消——
+// 先把页面带到未提交的那张卡片（居中 + 高亮晃动），再弹窗点名「还未提交的题目：第 N 题」；
+// 被试必须回到卡片上「确认提交」，流程才会自动继续（弹窗的「确认」只是收起提示并再跳一次）。
+function settlePendingRedo() {
+  if (!state.redoing) return Promise.resolve();
+  const jumpToRedoing = () => {
+    const r = state.redoing;
+    if (!r) return;
+    r.card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    r.card.classList.remove('redo-nudge');
+    void r.card.offsetWidth;
+    r.card.classList.add('redo-nudge');
+  };
+  jumpToRedoing();
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => { if (!settled) { settled = true; resolve(); } };
+    redoSettleWaiters.push(finish);
+    const qno = state.redoing.action.qno ? `第 ${state.redoing.action.qno} 题` : '一道打分题';
+    openConfirm({
+      title: '还有题目未提交',
+      text: `还未提交的题目：${qno}\n\n请先完成这道题：回到题卡作答后点「确认提交」。全部提交后才能继续。`,
+      icon: '⚠',
+      okLabel: '确认',
+      cancelLabel: null,
+      lockMask: true,
+      onOk: jumpToRedoing
+    });
+  });
 }
 
 /* ---------------------------------------------------------------- 提交 */
@@ -1501,6 +1665,11 @@ function echoOf(action, payload) {
 
 async function submit(action, payload) {
   if (state.busy || state.completed || !state.sessionId) return;
+  // 交卷断言：这一步就是最后一题、而上面还有没提交的重做 → 先提交或放弃，再交卷跳转结束页
+  if (state.redoing && Number(state.totalAnswers) > 0 && state.answeredCount + 1 >= Number(state.totalAnswers)) {
+    await settlePendingRedo();
+    if (state.busy || state.completed || !state.sessionId) return;    // 断言期间状态变了就收手
+  }
   state.busy = true;
   const node = state.questionNodes.get(action.itemId);
   if (node && node.submitBtn) node.submitBtn.disabled = true;
@@ -1585,12 +1754,16 @@ function applyPayload(payload) {
     return;
   }
 
-  // 结束说明是终态页：没有按钮，自动确认收尾（会话转为已完成），再由 showFinalPage 渲染终态
+  // 结束说明是终态页：没有按钮，自动确认收尾（会话转为已完成），再由 showFinalPage 渲染终态。
+  // 交卷断言：自动确认之后会话就完成了、重做通道随之关闭——所以确认前先处置未提交的重做。
   if (action.type === 'debrief') {
     const gen = streamEpoch;
-    api(stepUrl(), { method: 'POST', body: stepBody({ sessionId: state.sessionId, ack: true, elapsedMs: 800 }) })
-      .then((res) => afterStep(action, '', res, gen))
-      .catch(() => { if (gen === streamEpoch) showFinalPage(action); });
+    settlePendingRedo().then(() => {
+      if (gen !== streamEpoch || state.completed || !state.sessionId) return;
+      api(stepUrl(), { method: 'POST', body: stepBody({ sessionId: state.sessionId, ack: true, elapsedMs: 800 }) })
+        .then((res) => afterStep(action, '', res, gen))
+        .catch(() => { if (gen === streamEpoch) showFinalPage(action); });
+    });
     return;
   }
 
@@ -1613,8 +1786,13 @@ async function afterStep(action, echo, res, gen) {
   }
   state.serverOffsetMs = (res.nowMs || Date.now()) - Date.now();
   let appended = 0;
-  // 清屏点（题目上或消息上）：先清空聊天流，再呈现清屏点之后的新内容（顺序不能反）
-  if (res.clearStream) clearStream();
+  // 清屏点（题目上或消息上）：先清空聊天流，再呈现清屏点之后的新内容（顺序不能反）。
+  // 上面的题还在重做中就先断言：提交或放弃这次修改，然后才清屏（清屏会连卡片一起清掉）。
+  if (res.clearStream) {
+    await settlePendingRedo();
+    if (stale()) return;
+    clearStream();
+  }
   for (const m of res.messages) {
     if (stale()) return;
     if (m.role !== 'assistant') continue;
@@ -1882,26 +2060,59 @@ async function init() {
 $btnCollapseAll.addEventListener('click', () => setAnsweredVisible(!state.showAnswered));
 
 // 应用内确认弹窗（替代浏览器原生 confirm）
+// 扩展项：cancelLabel/onCancel = 自定义取消按钮；lockMask = 点遮罩不关闭（断言弹窗必须二选一）；
+//         manualClose = 点「确定」不自动收起，由 onOk 处理完自己调 closeConfirm（失败时留在弹窗里重试）
 let confirmHandler = null;
-function openConfirm({ title, text, okLabel, onOk }) {
+let confirmCancelHandler = null;
+let confirmLockMask = false;
+let confirmManualClose = false;
+function openConfirm({ title, text, okLabel, cancelLabel, icon, onOk, onCancel, lockMask, manualClose }) {
   $confirmTitle.textContent = title || '提示';
   $confirmText.textContent = text || '';
   $confirmOk.textContent = okLabel || '确定';
+  if (icon) {
+    $confirmIcon.textContent = icon;               // 顶部圆形徽标（如重做断言的 ⚠）
+    $confirmIcon.classList.remove('hidden');
+  } else {
+    $confirmIcon.classList.add('hidden');
+  }
+  if (cancelLabel === null) {
+    $confirmCancel.classList.add('hidden');        // 单按钮弹窗：处置动作都在别处（如题卡上），只留「确认」
+  } else {
+    $confirmCancel.classList.remove('hidden');
+    $confirmCancel.textContent = cancelLabel || '取消';
+  }
   confirmHandler = onOk || null;
+  confirmCancelHandler = onCancel || null;
+  confirmLockMask = !!lockMask;
+  confirmManualClose = !!manualClose;
   $confirmMask.classList.remove('hidden');
   requestAnimationFrame(() => $confirmMask.classList.add('visible'));
 }
 function closeConfirm() {
   $confirmMask.classList.remove('visible');
   confirmHandler = null;
+  confirmCancelHandler = null;
+  confirmLockMask = false;
+  confirmManualClose = false;
+  $confirmCancel.classList.remove('hidden');
+  $confirmIcon.classList.add('hidden');
   setTimeout(() => $confirmMask.classList.add('hidden'), 200);
 }
-$confirmCancel.addEventListener('click', closeConfirm);
-$confirmMask.addEventListener('click', (e) => { if (e.target === $confirmMask) closeConfirm(); });
+$confirmCancel.addEventListener('click', () => {
+  const fn = confirmCancelHandler;
+  closeConfirm();
+  if (fn) fn();
+});
+$confirmMask.addEventListener('click', (e) => {
+  if (e.target !== $confirmMask || confirmLockMask) return;
+  closeConfirm();
+});
 $confirmOk.addEventListener('click', async () => {
   const fn = confirmHandler;
-  closeConfirm();
-  if (fn) await fn();
+  if (!fn) return;
+  if (!confirmManualClose) closeConfirm();
+  await fn();
 });
 
 // 重做：作废当前会话（数据留档、导出默认排除）、清除本机草稿，回到知情同意页重新开始

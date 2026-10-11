@@ -1459,7 +1459,7 @@ function itemSummary(item) {
     case 'gate': return '进入实验前的伦理门槛，勾选后开始';
     case 'confirm': return (item.text || '').split('\n')[0].slice(0, 64) || '读完点确认继续';
     case 'debrief': return (item.text || '').split('\n')[0].slice(0, 64);
-    case 'rating': return `${item.min}–${item.max} 分 · ${item.anchor || '无锚点'}`;
+    case 'rating': return `${item.min}–${item.max} 分 · ${item.anchor || '无锚点'}${effLimit(item, 'redo') === 1 ? ' · 可重做' : ''}`;
     case 'single': case 'multi': return `${(item.options || []).length} 个选项${item.correct ? ' · 正确答案 ' + 'ABCDEFGH'[item.correct - 1] : ''}`;
     case 'rank': return `${(item.options || []).length} 项排序`;
     case 'text': {
@@ -2260,7 +2260,7 @@ const PARAM_PRESETS = [
   { key: 'maxAnswer', label: '创作窗口 · 最长 300 秒', value: 300 }
 ];
 
-// 参数行：名称 + 数值 + 单位 + 删除（refresh 是开关，没有数值）
+// 参数行：名称 + 数值 + 单位 + 删除（开关型参数用勾选框，没有数值）
 // onSyncClearNote：把「呈现前清空」那行的说明同步函数交回题目编辑器——
 // 正文一改（空 ↔ 非空）就要重算那句话，所以它得由 buildItemFields 持有。
 function buildParamRow(item, key, onInput, rerender, onSyncClearNote) {
@@ -2272,7 +2272,7 @@ function buildParamRow(item, key, onInput, rerender, onSyncClearNote) {
   // 勾上前后勾选框的位置一模一样。
   const cell = el('div', 'param-cell');
   let note = null;
-  if (key === 'refresh') {
+  if (meta.unit === '开关') {
     // 开关用真正的勾选框：之前固定显示「已启用」但存的是默认值 0，导致清屏点永远不生效（issue 7）
     const cb = el('input', 'param-check');
     cb.type = 'checkbox';
@@ -2280,21 +2280,27 @@ function buildParamRow(item, key, onInput, rerender, onSyncClearNote) {
     cb.title = meta.hint;
     // 只有「正文为空 → 这条消息被试端会跳过、清屏不会生效」这种会踩坑的情况才提示一句；
     // 正常开启不写任何说明（以前那句「已开启：……记得刷新预览」太啰嗦，已去掉）
-    note = el('p', 'param-note param-clear-note hidden', '');
-    const syncNote = () => {
-      const on = Number(item.limits.refresh) === 1;
-      const blankMsg = on && item.type === 'message' && !String(item.text || '').trim();
-      note.classList.toggle('hidden', !blankMsg);
-      note.classList.toggle('warn', blankMsg);
-      note.textContent = blankMsg
-        ? '⚠ 这条消息的正文是空的 —— 被试端会跳过它，清屏不会生效。请先写正文，或把「呈现前清空」配到题目上。'
-        : '';
-    };
-    cb.addEventListener('change', () => { item.limits[key] = cb.checked ? 1 : 0; syncNote(); onInput(); });
-    row.appendChild(cb);
-    row.appendChild(el('span', 'param-unit', '呈现前清空'));
-    if (onSyncClearNote) onSyncClearNote(syncNote);
-    syncNote();
+    if (key === 'refresh') {
+      note = el('p', 'param-note param-clear-note hidden', '');
+      const syncNote = () => {
+        const on = Number(item.limits.refresh) === 1;
+        const blankMsg = on && item.type === 'message' && !String(item.text || '').trim();
+        note.classList.toggle('hidden', !blankMsg);
+        note.classList.toggle('warn', blankMsg);
+        note.textContent = blankMsg
+          ? '⚠ 这条消息的正文是空的 —— 被试端会跳过它，清屏不会生效。请先写正文，或把「呈现前清空」配到题目上。'
+          : '';
+      };
+      cb.addEventListener('change', () => { item.limits[key] = cb.checked ? 1 : 0; syncNote(); onInput(); });
+      row.appendChild(cb);
+      row.appendChild(el('span', 'param-unit', meta.switchText || meta.label));
+      if (onSyncClearNote) onSyncClearNote(syncNote);
+      syncNote();
+    } else {
+      cb.addEventListener('change', () => { item.limits[key] = cb.checked ? 1 : 0; onInput(); });
+      row.appendChild(cb);
+      row.appendChild(el('span', 'param-unit', meta.switchText || meta.label));
+    }
   } else {
     const num = el('input', 'param-num');
     num.type = 'number';
@@ -2402,7 +2408,7 @@ function buildAddParam(item, onInput, rerender) {
     if (item.limits[k] != null) continue;                       // 已添加的不再列出
     if (k === 'thinkMs' && thinkingOn) continue;                // 时长已在「思考过程」行里
     const meta = LIMIT_META()[k];
-    // refresh 是开关：添加即启用（默认值 0 会让清屏点永远不生效）
+    // 开关型参数添加即启用：refresh 默认值 0（不启用就永远不生效），redo 的默认值本身就是 1
     const def = k === 'refresh' ? 1 : (Number(LIMIT_DEFAULTS()[k]) || 0);
     const b = el('button', 'param-opt', `${meta.label}（${meta.unit}）`);
     b.type = 'button';

@@ -275,6 +275,8 @@ function itemDescriptor(item) {
       min,
       max,
       anchor: item.anchor || '',
+      // 允许重做：被试端据此把已答卡片上的按钮渲染成「重做」（未配置时回落默认值 = 开）
+      allowRedo: effLimit(item, 'redo') === 1 ? 1 : 0,
       options: Array.from({ length: max - min + 1 }, (_, i) => ({ value: min + i, label: String(min + i) }))
     };
   }
@@ -509,6 +511,57 @@ async function handleCreateSession(req, res) {
   sendJson(res, 200, { questionnaireTitle: questionnaire.title, ...sessionPayload(store.getSession(session.id)) });
 }
 
+// 打分题「单独重做」：把某道**已提交**的打分题的分数改掉——只就地更新那一行与它的回显消息，
+// 不写新行、不推进进度、不下发下一题/消息/清屏：当前作答完全不受影响（真实会话与预览会话共用）。
+// body: { sessionId, itemId, value, redo: true }
+function applyRedoStep(st, session, body) {
+  if (session.status !== 'in_progress') {
+    return { status: 409, error: { error: 'session_closed', message: '会话已结束，不能再修改' } };
+  }
+  const itemId = String(body.itemId || '').trim();
+  if (!itemId) return { status: 400, error: { error: 'bad_request', message: '缺少 itemId' } };
+  const plan = parseSession(session, st);
+  const completedCount = st.countAnswerUnits(session.id);
+  const pos = plan.units.findIndex((u) => u.item.id === itemId);
+  // 只能改「已经交上去」的题：未作答的当前题走正常作答，不该用重做通道
+  if (pos < 0 || pos >= completedCount) {
+    return { status: 400, error: { error: 'redo_not_allowed', message: '只能修改已提交的题目' } };
+  }
+  const item = plan.units[pos].item;
+  if (item.type !== 'rating') {
+    return { status: 400, error: { error: 'redo_not_allowed', message: '该题型不支持重做' } };
+  }
+  if (effLimit(item, 'redo') !== 1) {
+    return { status: 400, error: { error: 'redo_not_allowed', message: '本题未开启重做' } };
+  }
+  const check = validateAnswer(item, body, false);
+  if (check.error || check.value == null) {
+    return { status: 400, error: { error: 'invalid_answer', message: check.error || '作答值不合法' } };
+  }
+  const changed = st.redoResponse({
+    sessionId: session.id,
+    itemId,
+    unitIndex: pos,
+    value: check.value,
+    valueText: check.valueText,
+    optionLabel: check.optionLabel
+  });
+  if (!changed) {
+    return { status: 409, error: { error: 'redo_not_allowed', message: '找不到原作答记录' } };
+  }
+  // 回显消息同步成新值（旧会话的消息可能没有 item_id 标记，更新不到就随它去——数据行已是新值）
+  st.updateUserEcho(session.id, itemId, `我的选择：${check.optionLabel}`);
+  st.touchSession(session.id);                        // 重做也算一次活动
+  return {
+    status: 200,
+    payload: {
+      redone: { itemId, value: check.value, optionLabel: check.optionLabel },
+      nowMs: Date.now(),
+      session: sessionBrief(session)
+    }
+  };
+}
+
 // 校验并归一化作答值
 function validateAnswer(item, body, deadlinePassed = false) {
   switch (item.type) {
@@ -609,6 +662,10 @@ async function applyStep(st, sessionId, body) {
   const session = st.getSession(sessionId);
   if (!session) return { status: 404, error: { error: 'session_not_found', message: '会话不存在' } };
   if (session.status !== 'in_progress') return { status: 409, error: { error: 'session_closed', message: '会话已结束' } };
+
+  // 打分题「单独重做」通道：redo: true 时 body.itemId 指向要改的那道**已答**题目（不是当前题），
+  // 走独立分支——不能落进下面的幂等忽略（itemId 必然对不上当前题）与当前题的作答门控
+  if (body.redo === true) return applyRedoStep(st, session, body);
 
   const plan = parseSession(session, st);
   const completedCount = st.countAnswerUnits(session.id);
@@ -900,6 +957,28 @@ class MemoryStore {
   listResponses(sessionId) { return [...(this.responses.get(sessionId) || [])]; }
   countAnswerUnits(sessionId) {
     return new Set((this.responses.get(sessionId) || []).map((r) => Number(r.unitIndex) || 0)).size;
+  }
+  // 打分题「单独重做」：就地更新那一行的终值（与 db.js 同名方法同语义；内存行是驼峰键）
+  redoResponse({ sessionId, itemId, unitIndex, value, valueText, optionLabel }) {
+    const rows = this.responses.get(sessionId) || [];
+    let changed = 0;
+    for (const r of rows) {
+      if (String(r.itemId) === String(itemId) && (Number(r.unitIndex) || 0) === (Number(unitIndex) || 0)) {
+        r.value = value == null ? null : Number(value);
+        r.valueText = String(valueText || '');
+        r.optionLabel = String(optionLabel || '');
+        changed += 1;
+      }
+    }
+    return changed;
+  }
+  updateUserEcho(sessionId, itemId, content) {
+    const rows = this.messages.get(sessionId) || [];
+    let changed = 0;
+    for (const m of rows) {
+      if (m.role === 'user' && String(m.item_id || '') === String(itemId)) { m.content = String(content); changed += 1; }
+    }
+    return changed;
   }
   unitFirstResponse(sessionId, unitIndex) {
     return (this.responses.get(sessionId) || []).find((r) => Number(r.unitIndex) === Number(unitIndex)) || null;
