@@ -1661,6 +1661,7 @@ function answerAtoms(items) {
   const atoms = [];
   let lastMessageTitle = '';
   const textSeen = new Map();
+  const ratingSeen = new Map();
   for (const it of items) {
     if (it.type === 'message') { lastMessageTitle = it.title || ''; continue; }
     const subs = it.type === 'group' ? (it.subs || []) : null;
@@ -1668,11 +1669,17 @@ function answerAtoms(items) {
     list.forEach((sub, si) => {
       const key = `${it.id}#${si}`;
       const isScale = sub.type === 'rating';
+      const seqNo = String(sub.id || '').match(/^.*_(\d+)$/);
       let label;
-      if (isScale) {
-        const m = String(sub.id || '').match(/^(.*)_(\d+)$/);
-        const idx = m ? Number(m[2]) : si + 1;
-        label = `${lastMessageTitle || sub.title || it.title} 第 ${idx} 题`;
+      if (isScale && seqNo) {
+        label = `${lastMessageTitle || sub.title || it.title} 第 ${Number(seqNo[1])} 题`;
+      } else if (isScale) {
+        // 不带 _N 序号的打分题（如两道「反馈效价」题共用一句引导语）：用题目标题，
+        // 否则两题会同名——导出的列名分不清是哪一题
+        const base = sub.title || it.title || lastMessageTitle || sub.id || it.id;
+        const n = (ratingSeen.get(base) || 0) + 1;
+        ratingSeen.set(base, n);
+        label = n > 1 ? `${base}（第 ${n} 题）` : base;
       } else if (sub.type === 'text') {
         const base = subs ? `${it.title} · ${sub.title}` : (sub.title || it.id);
         const n = (textSeen.get(base) || 0) + 1;
@@ -1688,6 +1695,8 @@ function answerAtoms(items) {
         key,
         type: sub.type,
         label,
+        // 导出用的短列名（可选）：量表/作品/选择题都可以在题目上单独配一个更好认的名字
+        colLabel: String(sub.colLabel || ''),
         scalePrefix: isScale ? String(sub.id || '').replace(/_\d+$/, '') : '',
         scaleName: isScale ? (lastMessageTitle || sub.title || it.title) : ''
       });
@@ -1703,16 +1712,25 @@ function itemLabelMap(items) {
   return map;
 }
 
-// 量表列：同一量表前缀取首个打分题的名称（沿用指导语消息标题）
+// 量表列：同一量表前缀 = 一组打分题。多题量表沿用指导语消息标题当列名，
+// 单题量表直接用该题自己的标签——否则两道单题量表各占一列「（均分）」时列名一模一样。
 function scaleColumns(items) {
-  const out = [];
-  const seen = new Set();
+  const groups = [];
+  const byPrefix = new Map();
   for (const a of answerAtoms(items)) {
-    if (a.type !== 'rating' || seen.has(a.scalePrefix)) continue;
-    seen.add(a.scalePrefix);
-    out.push({ prefix: a.scalePrefix, name: a.scaleName || a.scalePrefix });
+    if (a.type !== 'rating') continue;
+    let g = byPrefix.get(a.scalePrefix);
+    if (!g) {
+      g = { prefix: a.scalePrefix, name: '', atoms: [] };
+      byPrefix.set(a.scalePrefix, g);
+      groups.push(g);
+    }
+    g.atoms.push(a);
   }
-  return out;
+  for (const g of groups) {
+    g.name = g.atoms.length === 1 ? g.atoms[0].label : (g.atoms[0].scaleName || g.atoms[0].scalePrefix);
+  }
+  return groups;
 }
 
 function textColumns(items) { return answerAtoms(items).filter((a) => a.type === 'text'); }
@@ -1876,64 +1894,98 @@ function handleAdminQuestionnaireExport(req, res, url) {
   const items = payload.items;
   const labels = itemLabelMap(items);
 
-  const ratingPrefixes = scaleColumns(items);
+  const ratingGroups = scaleColumns(items);
   const textItems = textColumns(items);
   const choiceItems = choiceColumns(items);
 
-  // ---- sheet 1：汇总（一被试一行）
+  // ---- sheet 1：汇总（一被试一行）· 统计用精简表
+  // 一个变量一列、列名取短名、一被试一行——打开就能直接看、直接进统计软件。
+  //   · 量表：多题量表写成「目标清晰度测量 1…5」（去掉「N · 」小节前缀与「第 N 题」）；
+  //     单题量表（如两道「反馈准确性」）用题目自带的导出名 colLabel，没配就退回原标签
+  //   · 作品：两次创作各一列；两道固定口令的阅读确认页不算作品，不进这张表
+  //   · 选择题：答案一列 + 对错一列
+  // 状态 / 开始结束时间 / 时长 / 各题作答时间与耗时 / 量表均分不进这张表，要看去「作答明细」。
   const summaries = store.listQuestionnaireSummaryRows(id, { includeAbandoned });
+  const S_FONT = { font: 'Times New Roman', size: 11 };
+  const S_CELL = { ...S_FONT, align: 'center', valign: 'center' };   // 分值 / 选项 / 编号：居中
+  const S_WORK = { ...S_FONT, valign: 'center' };                     // 作品原文：左对齐
+  // 汇总表的列名一律取短名：去掉「N · 」小节前缀（「6 · 注意力检测」→「注意力检测」），
+  // 「第 N 题」收成序号。题号口径与「短量表名 + 序号」一致，列名不再随 id 前缀变样。
+  const stripSection = (name) => String(name || '')
+    .replace(/^\s*\d+\s*·\s*/, '')
+    .replace(/\s*第\s*(\d+)\s*题\s*$/, ' $1')
+    .trim();
+  const workItems = textItems.filter((c) => (c.sub ? c.sub.variant : c.item.variant) !== 'match');
+  // 列宽口径（与研究者确认过的统计表一致）：编号 10 / 14，量表列 20，作品列 30，选择题 26，对错列 16
+  const W_SCALE = 20;
   const summaryColumns = [
-    { title: '被试编号', width: 10 },
-    { title: '被试自填编号', width: 14 },   // 知情同意页「含编号」形态里被试填的；普通形态为空
-    { title: '状态', width: 10 },
-    { title: '开始时间', width: 20 },
-    { title: '结束时间', width: 20 },
-    { title: '时长（秒）', width: 11 },
-    ...ratingPrefixes.map((s) => ({ title: `${s.name}（均分）`, width: 18 })),
-    ...textItems.flatMap((c) => [
-      { title: c.label, width: 30 },
-      { title: `${c.label}·作答时间`, width: 20 },
-      { title: `${c.label}·耗时（秒）`, width: 16 }
-    ]),
+    { title: '被试编号', width: 10, style: S_CELL },
+    { title: '被试自填编号', width: 14, style: S_CELL },   // 知情同意页「含编号」形态里被试填的；普通形态为空
+    ...ratingGroups.flatMap((g) => {
+      if (g.atoms.length === 1) {
+        return [{ title: g.atoms[0].colLabel || stripSection(g.atoms[0].label), width: W_SCALE, style: S_CELL }];
+      }
+      const base = stripSection(g.name) || g.name;
+      return g.atoms.map((a, i) => ({ title: `${base} ${i + 1}`, width: W_SCALE, style: S_CELL }));
+    }),
+    ...workItems.map((c) => ({ title: c.colLabel || stripSection(c.label), width: 30, style: S_WORK })),
     ...choiceItems.flatMap((c) => {
-      const cols = [{ title: c.label, width: 26 }];
+      const label = c.colLabel || stripSection(c.label);
+      const cols = [{ title: label, width: 26, style: S_CELL }];
       const correct = c.sub ? c.sub.correct : c.item.correct;
-      if (c.type === 'single' && Number(correct)) cols.push({ title: `${c.label}·是否正确`, width: 16 });
-      cols.push({ title: `${c.label}·耗时（秒）`, width: 16 });
+      if (c.type === 'single' && Number(correct)) {
+        cols.push({ title: `${label}·是否正确`, width: 16, style: S_CELL });
+      }
       return cols;
     })
   ];
   const sec = (ms) => (ms == null ? '' : Math.round(Number(ms) / 100) / 10);
   const summaryRows = summaries.map((s) => {
-    const out = [
-      s.seq == null ? '' : s.seq,
-      s.enteredCode || '',
-      STATUS_LABELS[s.status] || s.status || '',
-      fmtLocal(s.startedAt),
-      fmtLocal(s.endedAt),
-      s.durationSec == null ? '' : s.durationSec
-    ];
-    for (const sp of ratingPrefixes) {
-      const acc = s.scales.get(sp.prefix);
-      out.push(acc && acc.n ? Math.round((acc.sum / acc.n) * 100) / 100 : '');
+    const out = [s.seq == null ? '' : s.seq, s.enteredCode || ''];
+    for (const g of ratingGroups) {
+      for (const a of g.atoms) {
+        const u = s.units.get(a.key);
+        out.push(u && u.value != null ? Number(u.value) : '');
+      }
     }
-    for (const c of textItems) {
-      const t = s.texts.get(c.key);
-      out.push(t ? t.text : '', t ? fmtLocal(t.answeredAt) : '', t ? sec(t.elapsedMs) : '');
+    for (const c of workItems) {
+      const u = s.units.get(c.key);
+      out.push(u ? u.text : '');
     }
     for (const col of choiceItems) {
-      const c = s.choices.get(col.key);
+      const u = s.units.get(col.key);
       const correct = col.sub ? col.sub.correct : col.item.correct;
-      out.push(c ? c.label : '');
+      out.push(u ? u.label : '');
       if (col.type === 'single' && Number(correct)) {
-        out.push(c ? (Number(c.value) === Number(correct) ? '正确' : '错误') : '');
+        out.push(u ? (Number(u.value) === Number(correct) ? '正确' : '错误') : '');
       }
-      out.push(c ? sec(c.elapsedMs) : '');
     }
     return out;
   });
 
-  // ---- sheet 2：作答明细
+  // ---- sheet 2：逐题作答（一被试一行，纯答案）
+  // 每题一列，只写答案本身：不打对错、不带呈现/作答时间与耗时。
+  // 只算「题目」（打分/单选/多选/文本/排序）；知情同意页、确认页、结束说明是页面，不占列。
+  const answerItems = answerAtoms(items).filter((a) => store.QUESTION_TYPES.includes(a.type));
+  const answerColumns = [
+    { title: '被试编号', width: 10 },
+    { title: '被试自填编号', width: 14 },
+    { title: '完成状态', width: 10 },
+    ...answerItems.map((a) => ({ title: a.label, width: a.type === 'text' ? 34 : 18 }))
+  ];
+  const answerRows = summaries.map((s) => {
+    const out = [s.seq == null ? '' : s.seq, s.enteredCode || '', STATUS_LABELS[s.status] || s.status || ''];
+    for (const a of answerItems) {
+      const u = s.units.get(a.key);
+      if (!u) { out.push(''); continue; }
+      if (a.type === 'rating') out.push(u.value == null ? '' : Number(u.value));
+      else if (a.type === 'text') out.push(u.text || '');
+      else out.push(u.label || (u.value == null ? '' : Number(u.value)));
+    }
+    return out;
+  });
+
+  // ---- sheet 3：作答明细
   const detailRows = store.listResponseRows(id, { includeAbandoned }).map((r) => [
     r.seq == null ? '' : Number(r.seq),
     STATUS_LABELS[r.session_status] || r.session_status || '',
@@ -1949,7 +2001,15 @@ function handleAdminQuestionnaireExport(req, res, url) {
   ]);
 
   const sheets = [
-    { name: '汇总（一被试一行）', columns: summaryColumns, rows: summaryRows },
+    {
+      // 统计用表：Times New Roman 11、表头加粗居中并自动换行（表头行加高，长列名才不会被截掉）
+      name: '汇总（一被试一行）',
+      header: { ...S_FONT, bold: true, align: 'center', valign: 'center', wrap: true },
+      headerRowHeight: 28.8,
+      columns: summaryColumns,
+      rows: summaryRows
+    },
+    { name: '逐题作答（一被试一行）', columns: answerColumns, rows: answerRows },
     {
       name: '作答明细',
       columns: [

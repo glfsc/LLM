@@ -144,6 +144,9 @@ body.col-dragging { cursor: col-resize; user-select: none; }
 .ol-band .line { flex: 1 1 auto; height: 1px; background: var(--border); }
 .sidebar-bottom { margin-top: auto; padding-top: 12px; display: flex; flex-direction: column; gap: 10px; }
 .sidebar-tip { font-size: 11.5px; line-height: 1.75; color: var(--faint); margin: 0; padding: 0 4px; }
+/* 备案号：工信部要求网站底部悬挂 ICP 备案号，并链接至工信部备案管理系统 */
+.sidebar-beian { font-size: 11px; line-height: 1.6; color: var(--faint); text-decoration: none; padding: 0 4px; word-break: break-all; }
+.sidebar-beian:hover { color: var(--muted); text-decoration: underline; }
 
 .admin-main { flex: 1 1 auto; min-width: 0; padding: 28px 32px 44px; }
 .admin-main.editing { padding: 0; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }

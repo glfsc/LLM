@@ -105,6 +105,11 @@
 
     .divider { text-align: center; margin: 14px 0 2px; font-size: 11.5px; color: var(--faint); }
 
+    /* 备案号：工信部要求网站底部悬挂 ICP 备案号，并链接至工信部备案管理系统 */
+    .site-foot { margin: 22px 0 0; font-size: 12px; color: var(--faint); text-align: center; }
+    .site-foot a { color: var(--faint); text-decoration: none; }
+    .site-foot a:hover { color: var(--muted); text-decoration: underline; text-underline-offset: 3px; }
+
     @keyframes page-in { from { opacity: 0; } to { opacity: 1; } }
     @keyframes rise-in { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
 
@@ -181,6 +186,10 @@
       </form>
     </div>
   </div>
+
+  <p class="site-foot">
+    <a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener">粤ICP备2026155269号</a>
+  </p>
 
   <script>
     var $ = function (id) { return document.getElementById(id); };

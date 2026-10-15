@@ -176,7 +176,7 @@ async function main() {
     new Set(taskMsg(aiA)).size === 1 && new Set(taskMsg(aiC)).size === 1,
     `组别3 出现 ${taskMsg(aiA).length} 次 / 组别4 出现 ${taskMsg(aiC).length} 次`, { config: true });
 
-  section('[3.5] 组间结构一致（除任务要求两处之外必须逐字段相同）');
+  section('[3.5] 组间结构一致（除文档写明的组别差异外必须逐字段相同）');
   const rawQ3 = (await admin('/api/admin/questionnaire?id=' + (await admin('/api/admin/questionnaires')).questionnaires.find((x) => /组别3/.test(x.title)).id)).questionnaire;
   const rawQ4 = (await admin('/api/admin/questionnaire?id=' + g4.id)).questionnaire;
   const normItems = (items) => items.map((it) => {
@@ -199,10 +199,33 @@ async function main() {
       if (JSON.stringify(a[k]) !== JSON.stringify(b[k])) fieldDiffs.push(`${a.id}.${k}`);
     }
   }
-  const taskReqDiffs = fieldDiffs.filter((d) => /task_req/.test(d));
-  check('除任务要求（正文 / html / text）外，两组逐字段完全一致',
-    fieldDiffs.length === taskReqDiffs.length && taskReqDiffs.length > 0,
-    fieldDiffs.filter((d) => !/task_req/.test(d)).slice(0, 8).join('；') || `差异 ${fieldDiffs.length} 处（均为任务要求）`, { config: true });
+  // 允许的组间差异（逐条对照两份 v4 文档的组别操纵）：
+  //   · task_info 正文：组别4 的欢迎语没有「你目前就职于…」那段
+  //   · task_req / task_req2 正文：详细版（组别3）vs 极简版（组别4）
+  //   · 反馈确认题的 limits：强制阅读 30 秒（组别3）vs 40 秒（组别4）
+  //     （该题线上 id 是管理端手工插入的别名，见 db.js 的 LIVE_ITEM_ID_ALIASES）
+  const FEEDBACK_CONFIRM_IDS = ['feedback_confirm', 'newmv10z3u5'];
+  const allowedDiff = (d) => {
+    const cut = d.lastIndexOf('.');
+    const id = d.slice(0, cut);
+    const field = d.slice(cut + 1);
+    if ((field === 'html' || field === 'text') && ['task_info', 'task_req', 'task_req2'].includes(id)) return true;
+    return field === 'limits' && FEEDBACK_CONFIRM_IDS.includes(id);
+  };
+  const unexpectedDiffs = fieldDiffs.filter((d) => !allowedDiff(d));
+  check('除文档写明的组别差异外，两组逐字段完全一致',
+    unexpectedDiffs.length === 0 && fieldDiffs.length > 0,
+    unexpectedDiffs.slice(0, 8).join('；') || `差异 ${fieldDiffs.length} 处（均为文档写明的组别差异）`, { config: true });
+  // 另外两处文档写明的组别差异，单独盯一下（避免哪天被"顺手对齐"抹掉）
+  const taskInfoOf = (items) => items.find((i) => i.id === 'task_info');
+  const feedbackConfirmOf = (items) => items.find((i) => FEEDBACK_CONFIRM_IDS.includes(i.id));
+  const hasRole = (items) => /你目前就职于/.test(RT.htmlToText(taskInfoOf(items).html || ''));
+  check('欢迎语组间不同（组别4 的文档没有「你目前就职于…」那段）',
+    hasRole(n3) && !hasRole(n4),
+    `组别3 ${hasRole(n3) ? '有' : '无'} / 组别4 ${hasRole(n4) ? '有' : '无'}`, { config: true });
+  check('反馈强制阅读秒数组间不同（组别3 = 30 秒、组别4 = 40 秒）',
+    Number(feedbackConfirmOf(n3).limits.wait) === 30 && Number(feedbackConfirmOf(n4).limits.wait) === 40,
+    `组别3 ${feedbackConfirmOf(n3).limits.wait} 秒 / 组别4 ${feedbackConfirmOf(n4).limits.wait} 秒`, { config: true });
   check('两组的层级（大纲层级）完全对应',
     JSON.stringify(n3.map((i) => i.level || 0)) === JSON.stringify(n4.map((i) => i.level || 0)),
     JSON.stringify(n3.map((i) => i.level || 0).join(',')), { config: true });
@@ -212,8 +235,9 @@ async function main() {
   check('触发过最短提交 / 最长作答时间窗', recA.flags.window);
   // 题组承载窗口的机制由平台层夹具覆盖（check-platform 的 groupWindow 断言）；
   // 当前配置里两道创作题都是单框文本题（见 [1]），这里按配置快照核对它们的窗口参数
-  check('两道创作题都配了最长作答窗口（maxAnswer）',
-    soloText.length === 2 && soloText.every((i) => Number(i.limits.maxAnswer) > 0),
+  check('两道创作题的作答窗口一致（都是：2 分钟后方可提交 + 8 分钟内完成）',
+    soloText.length === 2
+      && soloText.every((i) => Number(i.limits.wait) === 120 && Number(i.limits.maxAnswer) === 480),
     JSON.stringify(soloText.map((i) => ({ title: i.title, limits: i.limits }))), { config: true });
   check('服务端拦截过未到时的提交（too_early）', recA.gates.rejected > 0, `拒绝 ${recA.gates.rejected} 次`);
   console.log(`  · 门控快进实况：一次走查被拒 ${recA.gates.rejected} 次，回拨合计 ${(recA.gates.fastForwardedMs / 1000).toFixed(0)}s`
@@ -249,14 +273,43 @@ async function main() {
   const buf = Buffer.from(await xlsxRes.arrayBuffer());
   check('xlsx 导出可用（PK 头）', xlsxRes.ok && buf.slice(0, 2).toString() === 'PK', `${buf.length} 字节`);
   const sheets = unzipSheetNames(buf);
-  check('含「汇总（一被试一行）」与「作答明细」两个 sheet',
-    sheets.includes('汇总（一被试一行）') && sheets.includes('作答明细'), sheets.join(' / '));
+  check('三个 sheet：汇总 / 逐题作答 / 作答明细（顺序固定）',
+    sheets.join('/') === '汇总（一被试一行）/逐题作答（一被试一行）/作答明细', sheets.join(' / '));
   const s1 = unzipEntry(buf, 'xl/worksheets/sheet1.xml');
-  check('汇总表含量表均分与两次创作列',
-    /目标清晰度测量（均分）/.test(s1) && /广告语和创作/.test(s1) && /广告语和创作说明/.test(s1) && /注意力检测·是否正确/.test(s1),
+  check('汇总表含两次创作列与注意力检测对错列',
+    /广告语和创作/.test(s1) && /再次广告语和创作/.test(s1) && /注意力检测·是否正确/.test(s1),
     undefined, { config: true });
-  // 走查时文本题的作答按出现顺序编号（「需输入指定内容」的阅读确认题占号，所以作品编号不是从 1 开始）
-  check('汇总表含被试作品文本', /作品\d/.test(s1));
+  // 打分题逐题原始分：列名 = 短量表名 + 序号（去掉「N · 」小节前缀与「第 N 题」）
+  check('汇总表含打分题逐题原始分列（短量表名 + 序号）',
+    /目标清晰度测量 1/.test(s1) && /目标清晰度测量 5/.test(s1)
+      && /反馈公平性 6/.test(s1) && /任务过程测量 4/.test(s1),
+    undefined, { config: true });
+  check('汇总表含两道「反馈准确性」短列名（题目的 colLabel）',
+    /反馈准确性1/.test(s1) && /反馈准确性2/.test(s1), undefined, { config: true });
+  check('汇总表不再单列「（均分）」（均分交给统计软件现算）',
+    !/（均分）/.test(s1), (s1.match(/<t[^>]*>([^<]*（均分）)<\/t>/) || [])[1]);
+  // 统计用精简表：状态 / 时间 / 耗时 / 两道固定口令的阅读确认页都不进这张表（要看去「作答明细」）
+  check('汇总表是统计用精简列（不带状态 / 时间 / 耗时 / 阅读确认列）',
+    !/状态|开始时间|结束时间|时长（秒）|作答时间|耗时（秒）|阅读材料确认|用户阅读确认反馈/.test(s1),
+    undefined, { config: true });
+  // 走查时文本题的作答按出现顺序编号（「需输入指定内容」的阅读确认题占号），作品列即广告语答案列
+  check('汇总表含被试作品文本', /广告语和创作/.test(s1));
+  const row1 = (s1.match(/<row r="1"[^>]*>([\s\S]*?)<\/row>/) || [])[1] || '';
+  const headers1 = [...row1.matchAll(/<t[^>]*>([^<]*)<\/t>/g)].map((m) => m[1]);
+  check(`汇总表表头无重名（${headers1.length} 列）`, new Set(headers1).size === headers1.length,
+    headers1.filter((h, i) => headers1.indexOf(h) !== i).join(' | '));
+  check('汇总表套了 Times New Roman 11 号 + 表头居中换行（表头行加高）',
+    /<name val="Times New Roman"\/>/.test(unzipEntry(buf, 'xl/styles.xml'))
+      && /wrapText="1"/.test(unzipEntry(buf, 'xl/styles.xml')) && /ht="28.8" customHeight="1"/.test(s1),
+    undefined, { config: true });
+  const s2 = unzipEntry(buf, 'xl/worksheets/sheet2.xml');
+  check('逐题作答表：每题一列、纯答案（无时间 / 耗时 / 对错）',
+    /完成状态/.test(s2) && /阅读材料确认/.test(s2) && /目标清晰度测量 第 1 题/.test(s2)
+      && !/呈现时间|作答时间|耗时（秒）|·是否正确/.test(s2),
+    undefined, { config: true });
+  const s3 = unzipEntry(buf, 'xl/worksheets/sheet3.xml');
+  check('作答明细表移到 sheet3，列不变',
+    /呈现时间/.test(s3) && /作答时间/.test(s3) && /耗时（秒）/.test(s3) && /重试次数/.test(s3) && /曾超时未交/.test(s3));
 
   section('[7] 中途退出与恢复窗口');
   const settings = (await admin('/api/admin/settings')).settings;

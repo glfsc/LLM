@@ -11,7 +11,8 @@ const path = require('node:path');
 const RT = require('./public/assets/richtext.js');
 // 实验材料文案：数据层只管存取与排版，文案集中在 seed-content.js（改文案不必动 db.js）
 const {
-  TASK_INFO, REQUIRE_HIGH, REQUIRE_LOW, CREATE_INTRO, CREATE2_GUIDE, CREATE2_INTRO,
+  TASK_INFO, GROUP_VARIANTS, REQUIRE_HIGH, REQUIRE_LOW, CREATE_INTRO, CREATE2_GUIDE, CREATE2_INTRO,
+  requirementsForSecondRound,
   FEEDBACK_TEXT, FEEDBACK_THINKING,
   AGREEMENT_ANCHOR, FAIRNESS_ANCHOR,
   GOAL_CLARITY, FAIRNESS, VALENCE, META_PROCESS, TASK_PROCESS,
@@ -305,6 +306,9 @@ function normalizeItem(raw, index) {
   };
   if (src.fromTemplateId) item.fromTemplateId = String(src.fromTemplateId);
   if (src.fromTemplateName) item.fromTemplateName = String(src.fromTemplateName);
+  // 导出列名（可选）：导出 Excel「汇总」表里这一列的名字。题目标题是给被试看的题干，
+  // 有时太长（如两道「反馈准确性」共用一句引导语），这里单独配一个统计时好认的短名；不配就用标题。
+  if (src.colLabel) item.colLabel = String(src.colLabel);
   // 层级：仅用于管理端大纲分组；1 级是默认，不落库以保持 JSON 干净
   const level = toClampedInt(src.level, 0, 0, 4);
   if (level > 0) item.level = level;        // 0 = 默认，不落库，保持 JSON 干净
@@ -595,6 +599,7 @@ function valenceItems() {
       id: `valence_${i + 1}`,
       type: 'rating',
       title: q.title,
+      ...(q.colLabel ? { colLabel: q.colLabel } : {}),
       html: body16(q.text),
       min: 1,
       max: 5,
@@ -613,6 +618,7 @@ function creationItems(idPrefix, intro, sectionNo, box) {
       id: `${idPrefix}_work`,
       type: 'text',
       title: box.title,
+      ...(box.colLabel ? { colLabel: box.colLabel } : {}),
       limits: box.limits,
       ...(box.level ? { level: box.level } : {}),
       required: true,
@@ -649,12 +655,19 @@ function textMatchItem(id, title, prompt, limits) {
 }
 const READ_CONFIRM_PROMPT = '请确认你已阅读上面的内容，并在下方输入框中输入「已完成阅读」后发送。回复后进入后续实验环节。';
 
-// 组别3 / 组别4 的题目（唯一差异：任务要求文本 requirementsText）
-//   与线上预设问卷同构：两道「指定答案」的阅读确认题、第 8 节不再重复贴任务信息、思考时长 20 秒。
+// 组别3 / 组别4 的题目。组间差异（除「任务要求」文本外）由 variant 给出：
+//   variant.taskInfo        欢迎语（组别4 的文档没有「你目前就职于…」那段）
+//   variant.feedbackWaitSec 「强制阅读负面反馈」的秒数（组别3 = 30、组别4 = 40，见两份 v4 文档）
+// 其余题目逐字段相同——sync-group-content.js 的组间自检盯着这条。
 const FEEDBACK_THINK_MS = 20000;                        // AI 思考时长（默认 20 秒）
-function experimentItems(requirementsText) {
+function experimentItems(requirementsText, variant = {}) {
+  // 第 8 节的任务要求：与第 2 节同一份，只把「四、提交与评审」里「并给出对应反馈」去掉
+  // （第二次创作之后没有反馈环节；见 seed-content.js 的 requirementsForSecondRound）
+  const requirementsText2 = requirementsForSecondRound(requirementsText);
+  const taskInfo = variant.taskInfo || TASK_INFO;
+  const feedbackWaitSec = Number(variant.feedbackWaitSec) > 0 ? Number(variant.feedbackWaitSec) : 30;
   return [
-    { id: 'task_info', type: 'message', level: 4, title: TASK_INFO.split('\n')[0], text: TASK_INFO, html: materialHtml(TASK_INFO) },
+    { id: 'task_info', type: 'message', level: 4, title: taskInfo.split('\n')[0], text: taskInfo, html: materialHtml(taskInfo) },
     { id: 'task_req', type: 'message', level: 4, title: '2 · 任务要求', text: requirementsText, html: materialHtml(requirementsText) },
     // 读完任务材料后先确认已读（输入「已完成阅读」才能继续），再进量表
     textMatchItem('read_confirm', '阅读材料确认', READ_CONFIRM_PROMPT),
@@ -664,8 +677,8 @@ function experimentItems(requirementsText) {
     }),
     // 负面反馈：先以「深度思考面板」逐字呈现思考稿（20 秒），再输出反馈正文
     { id: 'feedback', type: 'message', title: '5 · 负面反馈输出', text: FEEDBACK_TEXT, html: body16(FEEDBACK_TEXT), thinking: FEEDBACK_THINKING, limits: { thinkMs: FEEDBACK_THINK_MS } },
-    // 反馈之后确认已读（强制停留 30 秒），再做注意力检测
-    textMatchItem('feedback_confirm', '用户阅读确认反馈', READ_CONFIRM_PROMPT, { wait: 30 }),
+    // 反馈之后确认已读（强制停留 N 秒），再做注意力检测
+    textMatchItem('feedback_confirm', '用户阅读确认反馈', READ_CONFIRM_PROMPT, { wait: feedbackWaitSec }),
     { id: 'attention', type: 'single', level: 4, title: '6 · 注意力检测', limits: { refresh: 1 }, ...choiceBody('请回忆刚刚的反馈内容，下面哪一个选项没有在上述反馈中出现'), options: ['表达不够精炼', '可延展性不足', '格式不符合要求', '与品牌主张的关联停留在表层'], correct: 3 },
     { id: 'source', type: 'single', level: 4, title: '7 · 反馈来源识别', ...choiceBody('请回想刚才为你提供反馈的是谁？'), options: ['品牌创意组组长小艾', '品牌创意人工智能助手小A'], correct: 2 },
     ...scaleItems('fairness', FAIRNESS, { bold: true }),
@@ -674,16 +687,22 @@ function experimentItems(requirementsText) {
     ...scaleItems('meta_process', META_PROCESS, { bold: true, limits: { refresh: 1 } }),
     ...scaleItems('task_process', TASK_PROCESS, { bold: true }),
     // 第 8 节：再次完成一模一样的任务（指导语 + 任务信息 + 任务要求 + 创作）
-    { id: 'create2_intro', type: 'message', level: 4, title: '8 · 再次完成一模一样的任务（指导语）', text: CREATE2_INTRO, html: body16(CREATE2_INTRO), limits: { refresh: 1 } },
+    //   指导语与任务信息合成**一条**消息（线上就是这么呈现的）：单独再发一条指导语，
+    //   被试会把「请根据刚刚收到的反馈……」读两遍；清屏点（refresh）挂在这条消息上。
+    //   「四、提交与评审」收尾句去掉「并给出对应反馈」——第二次创作之后没有反馈环节。
     {
       id: 'task_req2',
       type: 'message',
+      level: 4,
       title: '8 · 任务要求（与开头一致）',
-      text: `${CREATE2_INTRO}\n任务信息：\n${requirementsText}`,
-      html: RT.sanitizeHtml(`${body16(CREATE2_INTRO)}<p><span style="font-size: ${PX_HEAD}px">任务信息：</span></p>${materialHtml(requirementsText)}`)
+      limits: { refresh: 1 },
+      text: `${CREATE2_INTRO}\n任务信息：\n${requirementsText2}`,
+      html: RT.sanitizeHtml(`${body16(CREATE2_INTRO)}<p><span style="font-size: ${PX_HEAD}px">任务信息：</span></p>${materialHtml(requirementsText2)}`)
     },
     ...creationItems('create2', CREATE2_GUIDE, '8', {
-      title: '广告语和创作说明', limits: { maxAnswer: 300 }, rows: 1, maxLen: 0, placeholder: '再次输入广告语和创作说明'
+      // 时限与第一次创作一致：开始后 2 分钟方可提交（wait=120），8 分钟内完成（maxAnswer=480）
+      title: '广告语和创作说明', colLabel: '再次广告语和创作',
+      limits: { wait: 120, maxAnswer: 480 }, rows: 1, maxLen: 0, placeholder: '再次输入广告语和创作说明'
     })
   ];
 }
@@ -1244,7 +1263,9 @@ function listResponseRows(questionnaireId, { includeAbandoned = true } = {}) {
   ).all(questionnaireId);
 }
 
-// 汇总（一被试一行）：按题目类型聚合
+// 汇总（一被试一行）：一被试一份「作答单元」字典（units）+ 量表均分累加
+//   units 键 = `${item_id}#${sub_index}`（与 server 端 answerAtoms 的键同一口径），
+//   值收下该作答单元的全部内容；按题型取列的活留给 server 端，这里不做白名单过滤。
 function listQuestionnaireSummaryRows(questionnaireId, { includeAbandoned = true } = {}) {
   const sessions = db.prepare(
     `SELECT id, seq, status, started_at, ended_at, duration_sec FROM sessions WHERE questionnaire_id = ?${abandonFilter(includeAbandoned, '')} ORDER BY seq ASC`
@@ -1261,8 +1282,7 @@ function listQuestionnaireSummaryRows(questionnaireId, { includeAbandoned = true
       endedAt: s.ended_at,
       durationSec: s.duration_sec == null ? null : Number(s.duration_sec),
       scales: new Map(),      // 量表前缀 -> { sum, n }
-      texts: new Map(),       // item_id -> { text, answeredAt, elapsedMs }
-      choices: new Map(),     // item_id -> { value, label, itemType, answeredAt, elapsedMs }
+      units: new Map(),       // `${item_id}#${sub_index}` -> { itemType, value, text, label, answeredAt, elapsedMs }
       enteredCode: ''         // 知情同意页「含编号」形态里被试自己填的编号
     });
   }
@@ -1281,21 +1301,26 @@ function listQuestionnaireSummaryRows(questionnaireId, { includeAbandoned = true
       cur.sum += Number(r.value);
       cur.n += 1;
       acc.scales.set(prefix, cur);
-    } else if (r.item_type === 'text') {
-      let text = '';
+    }
+    // 文本题的正文是 JSON（{text} 形态），其余题型 value_text 按原样保留
+    let text = '';
+    if (r.item_type === 'text') {
       try {
         const obj = JSON.parse(r.value_text || 'null');
         text = obj && typeof obj === 'object' ? String(obj.text ?? '') : String(r.value_text || '');
       } catch {
         text = String(r.value_text || '');
       }
-      acc.texts.set(`${r.item_id}#${r.sub_index}`, { text, answeredAt: r.answered_at, elapsedMs: r.elapsed_ms });
-    } else if (r.item_type === 'single' || r.item_type === 'multi') {
-      acc.choices.set(`${r.item_id}#${r.sub_index}`, {
-        value: r.value, label: r.option_label, itemType: r.item_type,
-        answeredAt: r.answered_at, elapsedMs: r.elapsed_ms
-      });
-    } else if (r.item_type === 'gate') {
+    }
+    acc.units.set(`${r.item_id}#${r.sub_index || 0}`, {
+      itemType: r.item_type,
+      value: r.value,
+      text,
+      label: r.option_label,
+      answeredAt: r.answered_at,
+      elapsedMs: r.elapsed_ms
+    });
+    if (r.item_type === 'gate') {
       // 「含编号」形态的编号落在 value_text（普通形态为空）
       acc.enteredCode = String(r.value_text || '').trim();
     }
@@ -1312,8 +1337,8 @@ function initSeed() {
   const t = NO_TIMING;
   db.exec('BEGIN');
   try {
-    insert.run('group3-high-clarity', '组别3 · AI反馈 + 目标清晰度高', t, JSON.stringify(normalizeItems(experimentItems(REQUIRE_HIGH))), now, now);
-    insert.run('group4-low-clarity', '组别4 · AI反馈 + 目标清晰度低', t, JSON.stringify(normalizeItems(experimentItems(REQUIRE_LOW))), now, now);
+    insert.run('group3-high-clarity', '组别3 · AI反馈 + 目标清晰度高', t, JSON.stringify(normalizeItems(experimentItems(REQUIRE_HIGH, GROUP_VARIANTS.high))), now, now);
+    insert.run('group4-low-clarity', '组别4 · AI反馈 + 目标清晰度低', t, JSON.stringify(normalizeItems(experimentItems(REQUIRE_LOW, GROUP_VARIANTS.low))), now, now);
     db.exec('COMMIT');
   } catch (err) {
     db.exec('ROLLBACK');
@@ -1343,6 +1368,11 @@ ensureAdminUser();
 // 实跑的两份问卷里也没有这两题。seed-presets.js 用同一个函数，保证首次运行与手动重建结果一致。
 // 线上手工插入的题目 id（与种子里的规范 id 对应）：线上已有会话的作答按 id 落库，
 // 重建预设问卷时沿用这些 id，既有数据的导出列才对得上号（sync-group-content.js 用同一张表）。
+// 线上手工插入的题目 id（与种子里的规范 id 对应）：线上已有会话的作答按 id 落库，
+// 重建预设问卷时沿用这些 id，既有数据的导出列才对得上号（sync-group-content.js 用同一张表）。
+// 注：第 8 节的创作指引线上曾叫 `..._create2_intro_x`——那是早先种子里「指导语」与「创作指引」
+//   两道题撞了同一个 id，normalizeItems 自动补的 _x（见其去重逻辑）。种子已去掉那道重复的指导语，
+//   这里不再保留 _x，两道问卷与模板统一回到规范的 `create2_intro`（该题是消息题，不落作答，改名不影响数据）。
 const LIVE_ITEM_ID_ALIASES = {
   consent: 'newmuyw7oxr',
   read_confirm: 'newmv114v4d',

@@ -55,9 +55,10 @@ function fixture(taskText) {
     { id: 'consent', type: 'gate', title: '知情同意说明', text: '【夹具】请阅读并勾选同意。', check: '我已阅读并同意', button: '开始实验', variant: 'id', idLabel: '被试编号', idPlaceholder: '请填写编号' },
     { id: 'task', type: 'message', title: '任务要求', text: taskText },
     { id: 'scale_intro', type: 'message', title: '量表指导语', text: '请根据实际感受作答。' },
-    { id: 'r1', type: 'rating', title: '我清楚任务目标。', min: 1, max: 5, anchor: '1 = 完全不同意　·　5 = 完全同意' },
-    { id: 'r2', type: 'rating', title: '我知道评价标准。', min: 1, max: 5, anchor: '1 = 完全不同意　·　5 = 完全同意' },
-    { id: 'r3', type: 'rating', title: '我清楚努力方向。', min: 1, max: 5, anchor: '1 = 完全不同意　·　5 = 完全同意' },
+    // 三题共享 id 前缀 sc = 一个 3 题量表（导出：一列均分 + 逐题三列原始分）
+    { id: 'sc_1', type: 'rating', title: '我清楚任务目标。', min: 1, max: 5, anchor: '1 = 完全不同意　·　5 = 完全同意' },
+    { id: 'sc_2', type: 'rating', title: '我知道评价标准。', min: 1, max: 5, anchor: '1 = 完全不同意　·　5 = 完全同意' },
+    { id: 'sc_3', type: 'rating', title: '我清楚努力方向。', min: 1, max: 5, anchor: '1 = 完全不同意　·　5 = 完全同意' },
     {
       id: 'work', type: 'group', title: '内容创作', text: '', layout: 'column',
       limits: { minSubmit: 180, maxAnswer: 300 },            // 最短提交 / 最长作答窗口
@@ -266,11 +267,41 @@ async function main() {
   const buf = Buffer.from(await xlsxRes.arrayBuffer());
   check('xlsx 导出可用（PK 头）', xlsxRes.ok && buf.slice(0, 2).toString() === 'PK', `${buf.length} 字节`);
   const sheets = unzipSheetNames(buf);
-  check('含「汇总（一被试一行）」与「作答明细」两个 sheet',
-    sheets.includes('汇总（一被试一行）') && sheets.includes('作答明细'), sheets.join(' / '));
+  check('三个 sheet：汇总 / 逐题作答 / 作答明细（顺序固定）',
+    sheets.join('/') === '汇总（一被试一行）/逐题作答（一被试一行）/作答明细', sheets.join(' / '));
   const s1 = unzipEntry(buf, 'xl/worksheets/sheet1.xml');
   check('汇总表含被试自填编号列', /被试自填编号/.test(s1));
   check('汇总表带上了被试在知情同意页填的编号', /AUTO-01/.test(s1));
+  // 打分题：逐题各一列原始分，列名 = 短量表名 + 序号（夹具是「量表指导语」下的 3 题 sc_1..sc_3）
+  check('汇总表含打分题逐题原始分列（短量表名 + 序号）',
+    /量表指导语 1/.test(s1) && /量表指导语 2/.test(s1) && /量表指导语 3/.test(s1));
+  const row1 = (s1.match(/<row r="1"[^>]*>([\s\S]*?)<\/row>/) || [])[1] || '';
+  const headers1 = [...row1.matchAll(/<t[^>]*>([^<]*)<\/t>/g)].map((m) => m[1]);
+  const scaleAt = headers1.indexOf('量表指导语 1');
+  check('量表逐题列按题序连续排列（顺序与问卷一致）',
+    scaleAt >= 0 && headers1[scaleAt + 1] === '量表指导语 2' && headers1[scaleAt + 2] === '量表指导语 3',
+    headers1.slice(Math.max(0, scaleAt), scaleAt + 4).join(' | '));
+  check(`汇总表表头无重名（${headers1.length} 列）`, new Set(headers1).size === headers1.length,
+    headers1.filter((h, i) => headers1.indexOf(h) !== i).join(' | '));
+  check('汇总表不再单列「（均分）」（均分交给统计软件现算）',
+    !headers1.some((h) => /（均分）/.test(h)), headers1.filter((h) => /（均分）/.test(h)).join(' | '));
+  // 统计用精简表：状态 / 开始结束时间 / 时长 / 各题作答时间与耗时都不进这张表（要看去「作答明细」）
+  check('汇总表是统计用精简列（不带状态 / 时间 / 耗时）',
+    !headers1.some((h) => /状态|时间|时长|耗时/.test(h)), headers1.join(' | '));
+  const stylesXml = String(unzipEntry(buf, 'xl/styles.xml'));
+  check('汇总表套了 Times New Roman 11 号 + 表头居中换行 + 加高的表头行',
+    /<name val="Times New Roman"\/>/.test(stylesXml) && /<sz val="11"\/>/.test(stylesXml)
+      && /wrapText="1"/.test(stylesXml) && /horizontal="center"/.test(stylesXml)
+      && /ht="28.8" customHeight="1"/.test(s1));
+  const s2 = unzipEntry(buf, 'xl/worksheets/sheet2.xml');
+  check('逐题作答表：编号 + 完成状态 + 每题一列（单选 / 多选 / 排序 / 题组子题都在内）',
+    /被试编号/.test(s2) && /被试自填编号/.test(s2) && /完成状态/.test(s2)
+      && /注意力检测/.test(s2) && /请排序/.test(s2) && /广告语/.test(s2) && /多选题/.test(s2));
+  check('逐题作答表是纯答案（无呈现/作答时间、无耗时、无对错列）',
+    !/呈现时间|作答时间|耗时（秒）|·是否正确/.test(s2));
+  const s3 = unzipEntry(buf, 'xl/worksheets/sheet3.xml');
+  check('作答明细表移到 sheet3，列不变',
+    /呈现时间/.test(s3) && /作答时间/.test(s3) && /耗时（秒）/.test(s3) && /重试次数/.test(s3) && /曾超时未交/.test(s3));
 
   section('[7] 中途退出与恢复窗口三态');
   const settings = (await admin('/api/admin/settings')).settings;

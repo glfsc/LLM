@@ -121,23 +121,18 @@ input, textarea, [contenteditable="true"] {
 .typing span:nth-child(3) { animation-delay: .36s; }
 
 /* ---------------------------------------------------------------- 深度思考面板
-   与正文同一行内：头部（徽标 + 用时 + 箭头）→ 可折叠思考内容 → 分割线 → 正文。
+   与正文同一行内：头部（徽标 + 用时）→ 思考内容（只在输出期间存在）→ 分割线 → 正文。
+   头部不可点击；思考内容播完即从 DOM 移除，样式只服务于「弹出」那一段。
    思考内容比正文字号更小、颜色更灰、缩进更多。 */
 .think { display: flex; flex-direction: column; }
 .think-head {
   display: inline-flex; align-items: center; gap: 7px; text-align: left;
   font: inherit; font-size: 13px; line-height: 1.6; color: var(--muted);
-  background: none; border: 0; padding: 1px 0; cursor: pointer; user-select: none;
-  transition: color .16s ease;
+  background: none; border: 0; padding: 1px 0;
 }
-.think-head:hover { color: var(--fg-soft); }
 .think-label { font-variant-numeric: tabular-nums; }
-/* 折叠时箭头向右 ›，展开时向下 ∨ */
-.think-head .chev { width: 13px; height: 13px; flex: 0 0 auto; transform: rotate(-90deg); transition: transform .22s var(--ease-out); }
-.think.open .think-head .chev { transform: rotate(0deg); }
 .think-spark { width: 14px; height: 14px; flex: 0 0 auto; }
-.think-body { display: none; }
-.think.open .think-body { display: block; }
+.think-body { display: block; }
 .think-inner {
   margin: 9px 0 0 10px;                      /* 比正文多一层左缩进 */
   padding: 13px 16px 13px 18px;
@@ -402,6 +397,13 @@ input, textarea, [contenteditable="true"] {
   max-width: 860px; margin: 0 auto; padding: 7px 20px 11px;
   font-size: 11.5px; line-height: 1.6; color: var(--muted); min-height: 30px;
 }
+/* 备案号：工信部要求网站底部悬挂 ICP 备案号，并链接至工信部备案管理系统 */
+.composer-foot {
+  max-width: 860px; margin: 0 auto; padding: 0 20px 9px;
+  font-size: 11px; line-height: 1.6; color: var(--faint); text-align: center;
+}
+.composer-foot a { color: var(--faint); text-decoration: none; }
+.composer-foot a:hover { color: var(--muted); text-decoration: underline; }
 
 /* ---------------------------------------------------------------- 切屏提醒浮层 */
 

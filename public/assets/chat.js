@@ -251,7 +251,7 @@ function appendAiMessageStatic(content, thinkingText, thinkMs) {
   row.appendChild(aiAvatar());
   const body = el('div', 'ai-body');
   if (thinkingText) {
-    body.appendChild(appendThinkPanelStatic(thinkingText, thinkMs));
+    body.appendChild(appendThinkStatusLine(thinkMs));
     body.appendChild(el('div', 'think-divider'));
     body.appendChild(el('div', 'think-done', '思考已完成'));       // 与流式渲染一致：回放 / 刷新也看得到
   }
@@ -297,8 +297,8 @@ function deepThinkBadge() {
 }
 
 /* ---------------------------------------------------------------- 深度思考面板
-   与正文同一行内呈现：头部（徽标 + 「已思考（用时 N 秒）」+ 箭头）→ 可折叠的思考内容 → 分割线 → 正文。
-   折叠时箭头向右 ›，展开时向下 ∨；思考内容输出完自动折叠，点击头部可重新展开回看。 */
+   与正文同一行内呈现：头部（徽标 + 「已思考（用时 N 秒）」）→ 思考内容（只在输出期间存在）→ 分割线 → 正文。
+   思考稿输出完，正文容器连同文本一起从 DOM 移除：头部不是按钮，没有「再看一遍」的入口。 */
 
 // 已完成态的静止徽标（四角星）
 function sparkBadge() {
@@ -315,21 +315,6 @@ function sparkBadge() {
   return svg;
 }
 
-function chevronIcon() {
-  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  svg.setAttribute('class', 'chev');
-  svg.setAttribute('viewBox', '0 0 24 24');
-  svg.setAttribute('fill', 'none');
-  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-  path.setAttribute('d', 'M6 9l6 6 6-6');
-  path.setAttribute('stroke', 'currentColor');
-  path.setAttribute('stroke-width', '2');
-  path.setAttribute('stroke-linecap', 'round');
-  path.setAttribute('stroke-linejoin', 'round');
-  svg.appendChild(path);
-  return svg;
-}
-
 // 秒数文案：8 秒显示「8」，8.5 秒显示「8.5」
 function thinkSecondsText(ms) {
   const s = Math.round(Number(ms) / 100) / 10;
@@ -337,36 +322,36 @@ function thinkSecondsText(ms) {
 }
 
 // 思考面板骨架（供静态渲染与流式渲染共用）
-function buildThinkPanel(thinkingText, opts) {
-  const think = el('div', 'think' + (opts && opts.open ? ' open' : ''));
-  const head = el('button', 'think-head');
-  head.type = 'button';
+// 头部是普通元素而不是按钮：没有折叠 / 展开，思考内容播完就从 DOM 里删掉。
+function buildThinkPanel() {
+  const think = el('div', 'think');
+  const head = el('div', 'think-head');
   const label = el('span', 'think-label', '');
   const body = el('div', 'think-body');
   const inner = el('div', 'think-inner');
   body.appendChild(inner);
   think.append(head, body);
-  head.addEventListener('click', () => think.classList.toggle('open'));
   return { think, head, label, inner, body };
 }
 
-// 静态：已完成、默认折叠（用于恢复会话 / 非动画渲染）
-function appendThinkPanelStatic(thinkingText, thinkMs) {
-  const panel = buildThinkPanel(thinkingText);
-  panel.head.append(sparkBadge(), panel.label, chevronIcon());
+// 静态：只剩一行「已思考（用时 N 秒）」（用于恢复会话 / 非动画渲染）——
+// 思考文本不写进 DOM，所以刷新页面、重进会话也都回看不到。
+function appendThinkStatusLine(thinkMs) {
+  const panel = buildThinkPanel();
+  panel.head.append(sparkBadge(), panel.label);
   panel.label.textContent = `已思考（用时 ${thinkSecondsText(thinkMs)} 秒）`;
-  panel.inner.textContent = thinkingText;
+  panel.body.remove();
   return panel.think;
 }
 
-// 流式：思考内容逐字输出 → 秒数计时 → 到点自动折叠；返回正文容器供调用方接着输出
+// 流式：思考内容逐字输出 → 秒数计时 → 到点把整段思考内容从 DOM 移除；返回正文容器供调用方接着输出
 async function appendThinkingPanelAnimated(thinkingText, totalMs) {
   const row = el('div', 'msg ai');
   row.appendChild(aiAvatar());
   const body = el('div', 'ai-body');
-  const panel = buildThinkPanel(thinkingText, { open: true });
+  const panel = buildThinkPanel();
   const badge = deepThinkBadge();
-  panel.head.append(badge, panel.label, chevronIcon());
+  panel.head.append(badge, panel.label);
   panel.label.textContent = '正在思考（0 秒）';
   const divider = el('div', 'think-divider');
   const answer = el('div', 'ai-text');
@@ -399,7 +384,9 @@ async function appendThinkingPanelAnimated(thinkingText, totalMs) {
 
   badge.replaceWith(sparkBadge());
   panel.label.textContent = `已思考（用时 ${thinkSecondsText(Number(totalMs))} 秒）`;
-  panel.think.classList.remove('open');           // 输出完自动折叠
+  // 输出完就把思考正文连同文本一起从 DOM 删掉：没有折叠态、没有按钮，被试无法再看一遍
+  panel.inner.textContent = '';
+  panel.body.remove();
   // 思考结束 → 正文开始之间给一行明示（被试不用去猜「怎么还不出字」）
   body.insertBefore(el('div', 'think-done', '思考已完成'), answer);
   await sleep(240);
@@ -579,7 +566,7 @@ async function appendAiMessageAnimated(content, rhythm, thinkingText) {
   const typeMs0 = rhythm && Number.isFinite(Number(rhythm.typeMs)) ? Number(rhythm.typeMs) : TYPE_MS_DEFAULT;
   const thinking = String(thinkingText || '').trim();
 
-  // 配了思考内容：走「深度思考面板」（流式 → 计时 → 自动折叠），正文接在同一行内
+  // 配了思考内容：走「深度思考面板」（流式 → 计时 → 播完即移除），正文接在同一行内
   if (thinking && thinkMs0 > 0) {
     const answer = await appendThinkingPanelAnimated(thinking, thinkMs0);
     await typewrite(answer, content, typeMs0);

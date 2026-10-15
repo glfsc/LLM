@@ -1,7 +1,14 @@
-// 零依赖 XLSX 生成器：多工作表、表头加粗、列宽、文本/数字单元格
+// 零依赖 XLSX 生成器：多工作表、表头加粗、列宽、文本/数字单元格、字体与对齐
 // 实现方式：手工组装 OOXML（SpreadsheetML）+ ZIP（zlib deflate 压缩存储）。
 // 用法：const { buildXlsx } = require('./xlsx');
 //   const buf = buildXlsx([{ name: 'Sheet1', columns: [{ title: '编号', width: 8 }], rows: [[1], ['文本']] }]);
+//
+// 样式（可选，不写就是原样：表头加粗、正文默认字体）：
+//   sheet.header / column.style = { bold, font, size, align, valign, wrap }
+//     font = 字体名（如 'Times New Roman'）；size = 字号（如 11）
+//     align = 'left' | 'center'；valign 同理；wrap = true 时自动换行
+//   sheet.headerRowHeight / sheet.rowHeight = 行高（磅）；表头常配 wrap 用高一点的表头行
+//   同一份样式描述子在整本工作簿里去重后共用一个 cellXfs 序号。
 'use strict';
 
 const zlib = require('node:zlib');
@@ -111,13 +118,15 @@ function cellXml(ref, value, styleId) {
   return `<c r="${ref}"${s} t="inlineStr"><is><t xml:space="preserve">${text}</t></is></c>`;
 }
 
-function rowXml(rowNumber, cells, styleId) {
+function rowXml(rowNumber, cells, styleIds, height) {
   const parts = [];
   (cells || []).forEach((value, i) => {
+    const styleId = Array.isArray(styleIds) ? styleIds[i] : styleIds;
     const cell = cellXml(`${colName(i + 1)}${rowNumber}`, value, styleId);
     if (cell) parts.push(cell);
   });
-  return `<row r="${rowNumber}">${parts.join('')}</row>`;
+  const ht = height ? ` ht="${height}" customHeight="1"` : '';
+  return `<row r="${rowNumber}"${ht}>${parts.join('')}</row>`;
 }
 
 // 工作表名：去非法字符、限 31 字符、去重
@@ -134,26 +143,70 @@ function safeSheetName(name, used) {
   return final;
 }
 
-function sheetXml(sheet) {
+function sheetXml(sheet, layout) {
   const cols = sheet.columns && sheet.columns.length
     ? `<cols>${sheet.columns
         .map((c, i) => `<col min="${i + 1}" max="${i + 1}" width="${c.width || 14}" customWidth="1"/>`)
         .join('')}</cols>`
     : '';
-  const rows = [rowXml(1, sheet.columns.map((c) => c.title), 1)];
-  (sheet.rows || []).forEach((cells, i) => rows.push(rowXml(i + 2, cells, 0)));
+  const rows = [rowXml(1, sheet.columns.map((c) => c.title), layout.headerId, sheet.headerRowHeight)];
+  (sheet.rows || []).forEach((cells, i) =>
+    rows.push(rowXml(i + 2, cells, layout.colIds, sheet.rowHeight)));
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">${cols}<sheetData>${rows.join('')}</sheetData></worksheet>`;
 }
 
-const STYLES_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+/* ---------------------------------------------------------------- 样式表 */
+// 样式描述子 → 去重后的 cellXfs 序号（0 = 默认样式，其余从 1 开始）。
+// 字体也一并去重：{ bold, font, size } 相同的共用一个 <font>。
+const DEFAULT_HEADER_STYLE = { bold: true };
+
+function styleKeyOf(s) {
+  const d = s || {};
+  return [d.bold ? 1 : 0, d.font || '', Number(d.size) || 0, d.align || '', d.valign || '', d.wrap ? 1 : 0].join('|');
+}
+
+function stylesXml(styles) {
+  const fonts = [{ bold: false, name: '', size: 0 }];            // 0 = 默认字体
+  const fontIdByKey = new Map([['', 0]]);
+  const fontIdOf = (s) => {
+    const key = `${s.bold ? 1 : 0}|${s.font || ''}|${Number(s.size) || 0}`;
+    if (!fontIdByKey.has(key)) {
+      fontIdByKey.set(key, fonts.length);
+      fonts.push({ bold: !!s.bold, name: s.font || '', size: Number(s.size) || 0 });
+    }
+    return fontIdByKey.get(key);
+  };
+
+  const xfs = styles.map((s) => {
+    const attrs = [];
+    if (s.align) attrs.push(`horizontal="${s.align}"`);
+    if (s.valign) attrs.push(`vertical="${s.valign}"`);
+    if (s.wrap) attrs.push('wrapText="1"');
+    const align = attrs.length ? `<alignment ${attrs.join(' ')}/>` : '';
+    return { fontId: fontIdOf(s), align };
+  });
+  // 下标 0 = 默认样式（无样式描述子的单元格用它）
+  xfs.unshift({ fontId: 0, align: '' });
+
+  const fontsXml = fonts
+    .map((f) => `<font>${[f.bold ? '<b/>' : '', f.size ? `<sz val="${f.size}"/>` : '',
+      f.name ? `<name val="${escapeXml(f.name)}"/>` : ''].join('')}</font>`)
+    .join('');
+  const xfsXml = xfs
+    .map((x) => `<xf fontId="${x.fontId}"${x.fontId ? ' applyFont="1"' : ''}`
+      + `${x.align ? ' applyAlignment="1"' : ''}>${x.align}</xf>`)
+    .join('');
+
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-<fonts count="2"><font/><font><b/></font></fonts>
+<fonts count="${fonts.length}">${fontsXml}</fonts>
 <fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>
 <borders count="1"><border/></borders>
 <cellStyleXfs count="1"><xf/></cellStyleXfs>
-<cellXfs count="2"><xf/><xf fontId="1" applyFont="1"/></cellXfs>
+<cellXfs count="${xfs.length}">${xfsXml}</cellXfs>
 </styleSheet>`;
+}
 
 const ROOT_RELS = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
@@ -202,21 +255,39 @@ ${overrides}
 
 /* ---------------------------------------------------------------- 对外接口 */
 
-// sheets: [{ name, columns: [{ title, width? }], rows: [[cell, ...], ...] }] → Buffer
+// sheets: [{ name, columns: [{ title, width?, style? }], rows: [[cell, ...], ...],
+//            header?, headerRowHeight?, rowHeight? }] → Buffer
 function buildXlsx(sheets) {
   if (!Array.isArray(sheets) || sheets.length === 0) throw new Error('至少需要一个工作表');
   const used = new Set();
   const safeSheets = sheets.map((s) => ({ ...s, name: safeSheetName(s.name, used) }));
+
+  // 样式表：把各 sheet 用到的样式描述子去重成 cellXfs 序号（表头默认加粗，正文默认样式）
+  const styles = [];
+  const styleIdByKey = new Map();
+  const styleIdOf = (s) => {
+    if (!s) return 0;
+    const key = styleKeyOf(s);
+    if (!styleIdByKey.has(key)) {
+      styleIdByKey.set(key, styles.length + 1);
+      styles.push(s);
+    }
+    return styleIdByKey.get(key);
+  };
+  const layout = safeSheets.map((sheet) => ({
+    headerId: styleIdOf(sheet.header === undefined ? DEFAULT_HEADER_STYLE : sheet.header),
+    colIds: (sheet.columns || []).map((c) => styleIdOf(c.style))
+  }));
 
   const files = [
     { name: '[Content_Types].xml', data: Buffer.from(contentTypesXml(safeSheets), 'utf8') },
     { name: '_rels/.rels', data: Buffer.from(ROOT_RELS, 'utf8') },
     { name: 'xl/workbook.xml', data: Buffer.from(workbookXml(safeSheets), 'utf8') },
     { name: 'xl/_rels/workbook.xml.rels', data: Buffer.from(workbookRelsXml(safeSheets.length), 'utf8') },
-    { name: 'xl/styles.xml', data: Buffer.from(STYLES_XML, 'utf8') }
+    { name: 'xl/styles.xml', data: Buffer.from(stylesXml(styles), 'utf8') }
   ];
   safeSheets.forEach((sheet, i) => {
-    files.push({ name: `xl/worksheets/sheet${i + 1}.xml`, data: Buffer.from(sheetXml(sheet), 'utf8') });
+    files.push({ name: `xl/worksheets/sheet${i + 1}.xml`, data: Buffer.from(sheetXml(sheet, layout[i]), 'utf8') });
   });
   return zipSync(files);
 }

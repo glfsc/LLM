@@ -61,8 +61,8 @@ function main() {
   const [liveQ3, liveQ4, liveE3, liveE4] = [fullQ(q3.id), fullQ(q4.id), fullE(e3.id), fullE(e4.id)];
 
   // 期望内容：完全由种子构造（模板 → 问卷 = 模板 + 知情同意页 + 结束说明页）
-  const template3 = store.normalizeItems(store.experimentItems(SEED.REQUIRE_HIGH));
-  const template4 = store.normalizeItems(store.experimentItems(SEED.REQUIRE_LOW));
+  const template3 = store.normalizeItems(store.experimentItems(SEED.REQUIRE_HIGH, SEED.GROUP_VARIANTS.high));
+  const template4 = store.normalizeItems(store.experimentItems(SEED.REQUIRE_LOW, SEED.GROUP_VARIANTS.low));
   const wantQ3 = store.normalizeItems(store.presetQuestionnaireItems({ id: e3.id, name: e3.name, items: template3 }));
   const wantQ4 = store.normalizeItems(store.presetQuestionnaireItems({ id: e4.id, name: e4.name, items: template4 }));
   const wantE3 = store.normalizeItems(template3);
@@ -83,22 +83,44 @@ function main() {
   show('组别3 模板', liveE3.items, wantE3);
   show('组别4 模板', liveE4.items, wantE4);
 
-  // 自检：两组只差任务要求；两组问卷同构
-  const clone = (items) => items.map((it) => {
-    const o = JSON.parse(JSON.stringify(it));
-    delete o.html; delete o.text; delete o.id; delete o.fromTemplateId; delete o.fromTemplateName;
-    return o;
-  });
-  const sameExceptText = JSON.stringify(clone(wantQ3)) === JSON.stringify(clone(wantQ4));
-  const textDiffIds = wantQ3
+  // 自检：两组只差**两份 v4 文档里写明的组别操纵**，其余逐字段一致
+  //   允许的差异（逐条对照两份文档）：
+  //     · task_info       欢迎语：组别4 的文档没有「你目前就职于…」那段
+  //     · task_req/_req2  任务要求：详细版（组别3）vs 极简版（组别4）
+  //     · feedback_confirm 强制阅读负面反馈：30 秒（组别3）vs 40 秒（组别4）
+  const ALLOWED_DIFF = {
+    task_info: ['html', 'text'],
+    task_req: ['html', 'text'],
+    task_req2: ['html', 'text'],
+    feedback_confirm: ['limits']
+  };
+  // 逻辑名：线上手工插入的题走 LIVE_ITEM_ID_ALIASES 保留了别名 id（如 feedback_confirm → newmv10z3u5），
+  // 比对允许差异时要先把它换回逻辑名，否则查不到 ALLOWED_DIFF。
+  const aliasToName = new Map(Object.entries(store.LIVE_ITEM_ID_ALIASES).map(([name, live]) => [live, name]));
+  const logicalName = (id) => aliasToName.get(String(id)) || suffixOf(id);
+  const violations = [];
+  // id 与模板来源本来就按问卷各自生成，不参与组间比对
+  const IGNORE_KEYS = new Set(['id', 'fromTemplateId', 'fromTemplateName']);
+  for (let i = 0; i < Math.max(wantQ3.length, wantQ4.length); i += 1) {
+    const a = wantQ3[i];
+    const b = wantQ4[i];
+    if (!a || !b) { violations.push(`#${i + 1} 只有一边有`); continue; }
+    const allowed = ALLOWED_DIFF[logicalName(b.id)] || [];
+    const bad = [...new Set([...Object.keys(a), ...Object.keys(b)])]
+      .filter((k) => !IGNORE_KEYS.has(k) && JSON.stringify(a[k]) !== JSON.stringify(b[k]) && !allowed.includes(k));
+    if (bad.length) violations.push(`#${i + 1} ${logicalName(b.id)}: ${bad.join(', ')}`);
+  }
+  const sameExceptAllowed = violations.length === 0;
+  const bodyDiffIds = wantQ3
     .filter((it, i) => RT.htmlToText(it.html || '') !== RT.htmlToText((wantQ4[i] || {}).html || ''))
-    .map((it) => suffixOf(it.id));
-  const onlyTaskReq = textDiffIds.every((id) => /task_req/.test(id)) && textDiffIds.length === 2;
+    .map((it) => logicalName(it.id));
+  const onlyDocumented = JSON.stringify(bodyDiffIds.slice().sort()) === JSON.stringify(['task_info', 'task_req', 'task_req2']);
   const aliasesOk = Object.entries(store.LIVE_ITEM_ID_ALIASES).every(([, liveId]) =>
     wantQ3.some((it) => it.id === liveId) && wantQ4.some((it) => it.id === liveId));
-  console.log(`\n自检：除任务要求外两组逐字段一致 ${sameExceptText ? '✔' : '✘'}；文案不同的题目恰为 ${JSON.stringify(textDiffIds)}`
-    + `${onlyTaskReq ? ' ✔' : ' ✘'}；线上 id 别名已套用 ${aliasesOk ? '✔' : '✘'}`);
-  if (!sameExceptText || !onlyTaskReq || !aliasesOk) throw new Error('自检不通过，已中止');
+  console.log(`\n自检：除文档写明的组别差异外两组逐字段一致 ${sameExceptAllowed ? '✔' : '✘' + violations.slice(0, 4).join('；')}`
+    + `；正文不同的题目恰为 ${JSON.stringify(bodyDiffIds)}${onlyDocumented ? ' ✔' : ' ✘'}`
+    + `；线上 id 别名已套用 ${aliasesOk ? '✔' : '✘'}`);
+  if (!sameExceptAllowed || !onlyDocumented || !aliasesOk) throw new Error('自检不通过，已中止');
 
   if (!APPLY) {
     console.log('\n（dry-run：只预览。确认无误后执行：node scripts/sync-group-content.js --apply）');
