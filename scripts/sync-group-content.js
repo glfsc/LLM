@@ -20,7 +20,8 @@ const SEED = require('../seed-content');
 const RT = require('../public/assets/richtext.js');
 
 const APPLY = process.argv.includes('--apply');
-const DB_PATH = path.join(__dirname, '..', 'data.db');
+// 与 db.js 同口径：默认项目根目录的 data.db，可用 DB_PATH 覆盖
+const DB_PATH = process.env.DB_PATH ? path.resolve(process.env.DB_PATH) : path.join(__dirname, '..', 'data.db');
 
 const suffixOf = (id) => String(id).replace(/^group[34]-(?:high|low)-clarity__/, '');
 const brief = (it) => `${it.type}:${suffixOf(it.id)}`;

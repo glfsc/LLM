@@ -1685,6 +1685,7 @@ async function submit(action, payload) {
     if (err.code === 'session_closed') { state.completed = true; showFinalPage(action); return; }
     // 提交晚于服务端关闭的窗口：这一笔不会被记录，本题即停止作答（不再自动提交 / 不再开新窗口）
     if (err.code === 'window_closed') { appendAiMessageStatic(STOPPED_HINT); return; }
+    if (err.code === 'rate_limited') { appendAiMessageStatic('操作过于频繁，请稍等片刻再重试。'); return; }
     appendAiMessageStatic(err.code === 'too_early' ? '还没有到可以提交的时间，请稍候再试。' : '抱歉，连接似乎出现了问题，请稍后重试。');
   } finally {
     state.busy = false;
@@ -1721,15 +1722,29 @@ function applyPayload(payload) {
       button: action.button,
       idField: action.variant === 'id' ? { label: action.idLabel, placeholder: action.idPlaceholder } : null
     });
+    let gateBusy = false;
     pageHandler = async () => {
       if ($pageCheck.checked === false && !$pageCheckWrap.classList.contains('hidden')) return;
-      hidePage();
+      if (gateBusy) return;                          // 防连点重复提交
+      gateBusy = true;
       const gen = streamEpoch;
-      const res = await api(stepUrl(), {
-        method: 'POST',
-        body: stepBody({ sessionId: state.sessionId, consent: true, text: $pageIdInput.value.trim(), elapsedMs: 800 })
-      });
-      afterStep(action, '', res, gen);
+      try {
+        const res = await api(stepUrl(), {
+          method: 'POST',
+          body: stepBody({ sessionId: state.sessionId, consent: true, text: $pageIdInput.value.trim(), elapsedMs: 800 })
+        });
+        hidePage();
+        afterStep(action, '', res, gen);
+      } catch (err) {
+        if (gen !== streamEpoch) return;
+        // 以前这里没有 try/catch：请求一失败就是未捕获的 rejection，而这一页已经在请求前关掉了，
+        // 被试面前什么都没变、也点不动。现在失败就不关页，并在页内提示后可重试。
+        gateBusy = false;
+        $pageHint.textContent = err.code === 'rate_limited'
+          ? '操作过于频繁，请稍等片刻再点「继续」。'
+          : (err.code && err.message ? err.message : '提交失败，请检查网络后重试。');
+        $pageHint.classList.remove('hidden');
+      }
     };
     return;
   }
@@ -2038,6 +2053,11 @@ async function init() {
     await startSession();
   } catch (err) {
     console.error('[chat] init failed:', err && err.message);
+    // 被限流时给准确文案：默认那句「无法连接到服务」会让人以为服务器挂了，被试就去反复刷新了
+    if (err.code === 'rate_limited') {
+      showError('访问过于频繁，请稍等片刻后刷新页面重试。');
+      return;
+    }
     showError(err.code === 'questionnaire_not_found'
       ? '该链接不存在或已被删除，请检查链接是否正确。'
       : '无法连接到服务，请稍后刷新页面重试。');

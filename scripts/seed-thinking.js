@@ -87,7 +87,9 @@ function main() {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
   const backup = path.join(__dirname, '..', '.tmp', `backup-${stamp}.db`);
   fs.mkdirSync(path.dirname(backup), { recursive: true });
-  fs.copyFileSync(path.join(__dirname, '..', 'data.db'), backup);
+  // 与 db.js 同口径：默认项目根目录的 data.db，可用 DB_PATH 覆盖
+  const live = process.env.DB_PATH ? path.resolve(process.env.DB_PATH) : path.join(__dirname, '..', 'data.db');
+  fs.copyFileSync(live, backup);
   console.log(`\n已备份：${path.relative(process.cwd(), backup)}`);
   for (const run of todo) run();
   console.log(`\n完成：共同步 ${total} 处，思考时长 ${THINK_MS / 1000} 秒，思考稿 ${THINKING.length} 字，反馈正文 ${FEEDBACK_TEXT.length} 字。`);

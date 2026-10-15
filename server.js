@@ -46,25 +46,34 @@ function optionLetter(index) {
 
 // ---------------------------------------------------------------- 基础工具
 
-function sendJson(res, status, payload) {
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+function sendJson(res, status, payload, extraHeaders) {
+  res.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store',
+    ...(extraHeaders || {})
+  });
   res.end(JSON.stringify(payload));
 }
 
 function readJsonBody(req, maxBytes = 4 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
     let size = 0;
+    let settled = false;
     const chunks = [];
+    const settle = (fn, arg) => { if (!settled) { settled = true; fn(arg); } };
     req.on('data', (chunk) => {
+      if (settled) return;                       // 已判超限：剩余数据读掉即弃，不再累积
       size += chunk.length;
-      if (size > maxBytes) { reject(new Error('body_too_large')); req.destroy(); return; }
+      // 这里不 destroy(req)：destroy 会连 socket 一起销毁，客户端只看到连接重置、
+      // 收不到我们回的那条 413。读掉多余数据（内存不再增长）才能把响应送达。
+      if (size > maxBytes) { settle(reject, new Error('body_too_large')); return; }
       chunks.push(chunk);
     });
     req.on('end', () => {
-      if (!chunks.length) return resolve({});
-      try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch { resolve({}); }
+      if (!chunks.length) return settle(resolve, {});
+      try { settle(resolve, JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch { settle(resolve, {}); }
     });
-    req.on('error', reject);
+    req.on('error', (err) => settle(reject, err));
   });
 }
 
@@ -81,12 +90,21 @@ function serveFile(res, absPath) {
 
 function serveStatic(res, pathname) {
   let relPath = '';
-  if (pathname === '/' || pathname === '/index.html') relPath = 'index.html';
+  // 根路径就是管理端页面：未登录时它显示登录卡片，登录后直接进管理端
+  if (pathname === '/' || pathname === '/index.html') relPath = 'admin.html';
   else if (pathname === '/chat' || pathname === '/chat.html') relPath = 'chat.html';
   else if (pathname === '/admin' || pathname === '/admin.html') relPath = 'admin.html';
   else if (pathname.startsWith('/assets/')) relPath = pathname.slice(1);
   if (!relPath) { res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }); res.end('Not Found'); return; }
-  serveFile(res, path.join(PUBLIC_DIR, relPath));
+  // 只允许 public/ 里的文件：URL 只对字面量 .. 做归一化，%2e%2e%2f 这类编码斜杠能绕过去，
+  // 解码后必须再校验一次落点，否则 /assets/../../data.db 会读到数据库与源码
+  const absPath = path.resolve(PUBLIC_DIR, relPath);
+  if (absPath !== PUBLIC_DIR && !absPath.startsWith(PUBLIC_DIR + path.sep)) {
+    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('Not Found');
+    return;
+  }
+  serveFile(res, absPath);
 }
 
 function fmtLocal(iso) {
@@ -1292,6 +1310,7 @@ async function handlePreviewFinish(req, res) {
 const TOKEN_TTL = 24 * 60 * 60 * 1000;                       // 默认：1 天
 const TOKEN_TTL_REMEMBER = 30 * 24 * 60 * 60 * 1000;         // 勾了「记住密码」：30 天
 const revokedTokens = new Set();                             // 已登出的 token 摘要（内存，作即时兜底）
+const REVOKED_MAX = 2000;                                    // 上限：登出的权威机制是落库的世代号，这里只是即时兜底
 
 function tokenSecret() {
   let secret = store.getSetting('auth_secret');
@@ -1332,7 +1351,13 @@ function readToken(token) {
 function revokeToken(token) {
   const str = String(token || '').trim();
   const dot = str.lastIndexOf('.');
-  if (dot > 0) revokedTokens.add(str.slice(0, dot));
+  if (dot <= 0) return;
+  // Set 保持插入序：满了就先淘汰最早的一条，否则登出条目只增不减会一直吃内存
+  if (revokedTokens.size >= REVOKED_MAX) {
+    const oldest = revokedTokens.values().next().value;
+    if (oldest !== undefined) revokedTokens.delete(oldest);
+  }
+  revokedTokens.add(str.slice(0, dot));
 }
 
 // 返回当前登录用户；未登录 / 过期 / 被其他设备顶下线则已发送 401 并返回 null
@@ -1384,8 +1409,13 @@ async function handleRegister(req, res) {
 
 async function handleLogin(req, res) {
   const body = await readJsonBody(req);
-  const user = store.getUserByName(body.username);
-  if (!user || !store.verifyPassword(user, String(body.password || ''))) {
+  const name = String(body.username || '').trim();
+  // 按用户名再收一道：单 IP 限流挡不住换 IP 猜同一个账号
+  const nameLimitedAt = name ? rateHit('loginUser', name.toLowerCase()) : 0;
+  if (nameLimitedAt) return rejectRateLimited(res, nameLimitedAt);
+  const user = store.getUserByName(name);
+  // await 不能省：漏掉它 Promise 恒真，等于跳过密码校验（改密处同理）
+  if (!user || !(await store.verifyPasswordAsync(user, String(body.password || '')))) {
     return sendJson(res, 401, { error: 'bad_credentials', message: '账号或密码不正确' });
   }
   // 一账号单设备在线：登录即 +1 世代号，此前所有设备上的登录随之失效
@@ -1414,7 +1444,7 @@ async function handleChangePassword(req, res) {
   const user = requireUser(req, res);
   if (!user) return;
   const body = await readJsonBody(req);
-  if (!store.verifyPassword(user, String(body.oldPassword || ''))) {
+  if (!(await store.verifyPasswordAsync(user, String(body.oldPassword || '')))) {
     return sendJson(res, 400, { error: 'bad_password', message: '当前密码不正确' });
   }
   try {
@@ -2072,57 +2102,12 @@ function qrSvgFor(text, cellSize = 6, margin = 2) {
   return makeQr(text).createSvgTag({ cellSize, margin, scalable: true });
 }
 
-// 控制台二维码：用半块字符（▀▄█）把两个模块行压进一个字符行，宽度翻倍近似方比例
-function qrAsciiFor(text) {
-  const qr = makeQr(text);
-  const n = qr.getModuleCount();
-  const quiet = 2;
-  const total = n + quiet * 2;
-  const dark = (x, y) => x >= quiet && x < quiet + n && y >= quiet && y < quiet + n && qr.isDark(y - quiet, x - quiet);
-  const lines = [];
-  for (let y = 0; y < total; y += 2) {
-    let line = '';
-    for (let x = 0; x < total; x++) {
-      const top = dark(x, y);
-      const bottom = dark(x, y + 1);
-      line += top && bottom ? '██' : top ? '▀▀' : bottom ? '▄▄' : '  ';
-    }
-    lines.push(line);
-  }
-  return lines.join('\n');
-}
-
-// 连接页模板（public/connect.html，占位符替换）：版式单独放文件里，改样式不用动服务端代码
-const CONNECT_TEMPLATE = (() => {
-  try {
-    return fs.readFileSync(path.join(PUBLIC_DIR, 'connect.html'), 'utf8');
-  } catch {
-    return '<!DOCTYPE html><html lang="zh-CN"><meta charset="utf-8"><body style="font-family:sans-serif;padding:32px">'
-      + '<h1>连接页模板缺失</h1><p>请确认 public/connect.html 存在（便携包是否完整解压）。</p></body></html>';
-  }
-})();
-
-function buildConnectHtml() {
-  const urls = lanAddresses().map(entryUrl);
-  const primary = urls[0] || entryUrl('');
-  const altBlock = urls.length > 1
-    ? `<li>若上方地址无法访问，可尝试备选地址：<ul class="alt">${urls.slice(1).map((u) => `<li><code>${u}</code></li>`).join('')}</ul></li>`
-    : '';
-  return CONNECT_TEMPLATE
-    .replaceAll('{{QR_SVG}}', qrSvgFor(primary))
-    .replaceAll('{{PRIMARY_URL}}', primary)
-    .replaceAll('{{ALT_BLOCK}}', altBlock)
-    .replaceAll('{{PORT}}', String(PORT));
-}
-
-function handleConnect(res) {
-  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
-  res.end(buildConnectHtml());
-}
-
 // 管理端「被试链接 / 二维码」用：返回端口与本机所有可用局域网地址（无尾斜杠，前端自行拼路径）。
 // 前端在 localhost 打开时用这里的地址，避免把 localhost 链接/二维码发给手机；公网部署时前端直接用自身域名。
-function handleNetInfo(res) {
+// 需要登录：内网 IP 属于不该给匿名访问者的信息（唯一调用方 admin.js 走带 token 的 api()）。
+// 注意 /qr.svg 不能同样加鉴权——它由 <img src> 加载，带不了请求头；它只渲染传入的文本，不泄露信息。
+function handleNetInfo(req, res) {
+  if (!requireUser(req, res)) return;
   sendJson(res, 200, {
     port: PORT,
     local: `http://localhost:${PORT}`,
@@ -2141,17 +2126,152 @@ function handleQrSvg(res, url) {
   res.end(qrSvgFor(target, 8, 2));
 }
 
+// ---------------------------------------------------------------- 限流
+// 固定窗口计数：超限即拒绝，窗口到点整体重置。
+// 阈值可用环境变量覆盖；**显式设 0 = 关闭该条限流**（留这个口子是因为
+// 实验室 / 机房整班被试共用一个出口 IP 时，按 IP 限流与「几百人同时开始」天然冲突）。
+function envLimit(name, fallback) {
+  const raw = process.env[name];
+  if (raw == null || raw === '') return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  return Math.floor(n);
+}
+const RATE_RULES = {
+  loginIp:    { limit: envLimit('RATE_LOGIN_PER_MIN', 10),       windowMs: 60 * 1000 },          // 按 IP：挡批量猜密码
+  // 按用户名挡「换 IP 猜同一个账号」。取 10 而不是 5：主试自己手误重试、以及
+  // check → probe → shots 连着跑（一次全跑约消耗 5 次）都要留出余量，否则会把自己锁在门外
+  loginUser:  { limit: envLimit('RATE_LOGIN_USER_PER_MIN', 10), windowMs: 60 * 1000 },
+  register:   { limit: envLimit('RATE_REGISTER_PER_HOUR', 3),   windowMs: 60 * 60 * 1000 },      // 按 IP：挡刷账号
+  // 「开始作答」两条按「整班同学一起扫码」定档（实测 200 个共用 IP 的请求只花 205ms，
+  // 服务端扛得住，闸门才是瓶颈）：单 IP 覆盖一间机房整班，全局留一倍余量给重开 / 重做
+  sessionIp:  { limit: envLimit('RATE_SESSION_PER_MIN', 600),   windowMs: 60 * 1000 },
+  sessionAll: { limit: envLimit('RATE_SESSION_ALL_PER_MIN', 1200), windowMs: 60 * 1000 },
+  preview:    { limit: envLimit('RATE_PREVIEW_PER_MIN', 60),    windowMs: 60 * 1000 }           // 管理端预览，自用放宽
+};
+// 走限流的路径 → 规则名。不在这张表里的路径一律不限流：作答主链路（/api/step、/api/heartbeat、
+// /api/bootstrap）在共用出口 IP 时被限流等于丢数据，且它们的滥用面已被「sessionId 不可猜」约束住。
+const RATE_BY_PATH = new Map([
+  ['/api/auth/login', 'loginIp'],
+  ['/api/auth/register', 'register'],
+  ['/api/session', 'sessionIp']
+]);
+const RATE_MAX_BUCKETS = 20000;                    // 桶上限：限流器自己不能变成内存放大点
+const rateBuckets = new Map();                     // key -> { count, resetAt }
+
+// 客户端 IP：只有对端是本机回环（nginx 反代场景）时才认 X-Forwarded-For，
+// 否则直连 3000 的请求可以自带该头伪造身份，按 IP 限流会形同虚设
+function clientIp(req) {
+  const peer = (req.socket && req.socket.remoteAddress) || '';
+  const loopback = peer === '127.0.0.1' || peer === '::1' || peer === '::ffff:127.0.0.1';
+  if (loopback) {
+    const parts = String(req.headers['x-forwarded-for'] || '').split(',').map((s) => s.trim()).filter(Boolean);
+    if (parts.length) return parts[parts.length - 1];     // 最右侧 = 反代自己看到的对端
+  }
+  return peer || 'unknown';
+}
+
+// 记一次访问：超限返回窗口重置时间戳，未超限返回 0
+function rateHit(rule, subject) {
+  const r = RATE_RULES[rule];
+  if (r.limit <= 0) return 0;                      // 阈值设 0 = 这条不限流
+  const now = Date.now();
+  const key = `${rule}:${subject}`;
+  let bucket = rateBuckets.get(key);
+  if (!bucket || bucket.resetAt <= now) {
+    if (rateBuckets.size >= RATE_MAX_BUCKETS) {
+      pruneRateBuckets(now);
+      if (rateBuckets.size >= RATE_MAX_BUCKETS) rateBuckets.delete(rateBuckets.keys().next().value);
+    }
+    bucket = { count: 0, resetAt: now + r.windowMs };
+    rateBuckets.set(key, bucket);
+  }
+  bucket.count += 1;
+  return bucket.count > r.limit ? bucket.resetAt : 0;
+}
+function pruneRateBuckets(now = Date.now()) {
+  for (const [key, bucket] of rateBuckets) if (bucket.resetAt <= now) rateBuckets.delete(key);
+}
+const rateSweeper = setInterval(pruneRateBuckets, 60 * 1000);
+if (rateSweeper && typeof rateSweeper.unref === 'function') rateSweeper.unref();
+
+function rejectRateLimited(res, resetAt) {
+  const retryAfter = Math.max(1, Math.ceil((resetAt - Date.now()) / 1000));
+  sendJson(res, 429, { error: 'rate_limited', message: '操作过于频繁，请稍后再试' }, { 'Retry-After': String(retryAfter) });
+}
+
+// 按路径取本次请求适用的限流；被限住返回窗口重置时间戳，放行返回 0
+function limitPath(pathname, ip) {
+  if (pathname.startsWith('/api/preview/')) return rateHit('preview', ip);
+  const rule = RATE_BY_PATH.get(pathname);
+  if (!rule) return 0;
+  const at = rateHit(rule, ip);
+  if (at) return at;
+  // 全局兜底：换 IP 分布式刷会话时，单 IP 限流拦不住，这里按总量再收一道
+  return pathname === '/api/session' ? rateHit('sessionAll', 'all') : 0;
+}
+
+// ---------------------------------------------------------------- 安全响应头
+// 在 writeHead 上统一注入，一次覆盖全部响应（含 401 / 404 / 500 等错误路径）
+const SECURITY_HEADERS = {
+  'X-Content-Type-Options': 'nosniff',
+  // 不能用 DENY：管理端编辑页用同源 iframe 嵌 /chat?preview= 做手机预览，DENY 会把它拦掉
+  'X-Frame-Options': 'SAMEORIGIN',
+  'Referrer-Policy': 'no-referrer',
+  'X-Permitted-Cross-Domain-Policies': 'none',
+  // 三个 HTML 里都有内联 <script>、富文本产物带内联 style，故必须保留 'unsafe-inline'
+  //（拦不住内联注入，但外域脚本、object/base 注入与跨站框定仍被挡住）。
+  // 'unsafe-eval' 是给界面走查工具（scripts/capture-shots.js 用 window.eval 读预览 iframe 的内部状态）
+  // 留的：应用自身零处 eval / new Function，而 'unsafe-inline' 本就允许内联脚本执行，
+  // 所以这一项不给攻击者增加实际能力。若哪天走查改成按帧 CDP 求值，可以把这一项去掉。
+  'Content-Security-Policy': [
+    "default-src 'self'",
+    "img-src 'self' data:",                                  // 头像与二维码海报导出走 data:
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+    "style-src 'self' 'unsafe-inline'",
+    "connect-src 'self'",
+    "object-src 'none'",
+    "base-uri 'none'",
+    "form-action 'self'",
+    "frame-ancestors 'self'"
+  ].join('; ')
+};
+function applySecurityHeaders(req, res) {
+  const original = res.writeHead.bind(res);
+  res.writeHead = (status, arg1, arg2) => {
+    const headers = arg1 && typeof arg1 === 'object' ? arg1 : (arg2 || {});
+    for (const [name, value] of Object.entries(SECURITY_HEADERS)) headers[name] = value;
+    // HSTS 只在 HTTPS 下才有意义：局域网 HTTP 预实验下发它没有效果
+    if (String(req.headers['x-forwarded-proto'] || '').toLowerCase() === 'https') {
+      headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains';
+    }
+    return typeof arg1 === 'string' ? original(status, arg1, headers) : original(status, headers);
+  };
+}
+
 // ---------------------------------------------------------------- 路由
 const server = http.createServer(async (req, res) => {
+  applySecurityHeaders(req, res);
   try {
     const url = new URL(req.url, `http://localhost:${PORT}`);
-    const pathname = decodeURIComponent(url.pathname);
+    // 非法百分号编码（如 %ZZ）会让 decodeURIComponent 抛 URIError：
+    // 这是请求本身有问题，不该落到兜底 500 去
+    let pathname;
+    try {
+      pathname = decodeURIComponent(url.pathname);
+    } catch {
+      return sendJson(res, 400, { error: 'bad_request', message: '请求路径编码不合法' });
+    }
+
+    // 限流放在分发之前（body 都还没读）：洪水请求不会被解析
+    const ip = clientIp(req);
+    const limitedAt = limitPath(pathname, ip);
+    if (limitedAt) return rejectRateLimited(res, limitedAt);
 
     if (pathname === '/api/health' && req.method === 'GET') return sendJson(res, 200, { ok: true });
-    if (pathname === '/api/net-info' && req.method === 'GET') return handleNetInfo(res);
+    if (pathname === '/api/net-info' && req.method === 'GET') return handleNetInfo(req, res);
 
-    // 预实验 · 局域网连接页与二维码
-    if (pathname === '/connect' && req.method === 'GET') return handleConnect(res);
+    // 二维码：管理端的被试链接 / 手机预览里由 <img src> 加载
     if (pathname === '/qr.svg' && req.method === 'GET') return handleQrSvg(res, url);
 
     // 被试端
@@ -2209,21 +2329,24 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET') return serveStatic(res, pathname);
     sendJson(res, 405, { error: 'method_not_allowed' });
   } catch (err) {
-    sendJson(res, 500, { error: 'server_error', message: err.message });
+    // 内部错误只写服务端日志：err.message 可能带上路径 / SQL 等内部细节，不回显给客户端
+    console.error('[server] 未处理异常：', (err && err.stack) || err);
+    // 响应已经开始发送（如静态文件读到一半）时只能收尾，再写 head 会抛
+    if (res.headersSent) { try { res.end(); } catch { /* 连接已断，无需处理 */ } return; }
+    // 超大请求体是「客户端可重试」的已知错误：前端 postStep 靠这个 code 决定重试，保留语义
+    if (err && err.message === 'body_too_large') {
+      return sendJson(res, 413, { error: 'body_too_large', message: '提交内容过大，请精简后再试' });
+    }
+    sendJson(res, 500, { error: 'server_error', message: '服务器内部错误' });
   }
 });
 
 server.listen(PORT, () => {
   const urls = lanAddresses().map(entryUrl);
-  const primary = urls[0] || entryUrl('');
   console.log('实验平台已启动（局域网预实验模式）');
-  console.log(`  电脑端管理入口：http://localhost:${PORT}/admin`);
-  console.log(`  手机入口（同一 WiFi 扫码）：${primary}`);
-  if (urls.length > 1) console.log(`  备选地址：${urls.slice(1).join('   ')}`);
-  console.log('');
-  console.log(qrAsciiFor(primary));
-  console.log('');
-  console.log('  ↑ 手机扫码可进系统入口；各组直达二维码在管理端「问卷管理」生成（可保存图片）。');
+  console.log(`  管理端：http://localhost:${PORT}/（根路径就是管理端，未登录时先显示登录卡片）`);
+  if (urls.length) console.log(`  同局域网手机打开管理端：${urls.join('   ')}`);
+  console.log('  · 各组被试链接 / 二维码在管理端「问卷管理」生成（可保存成图片打印或发给被试）。');
   console.log('  停止服务：关闭本窗口（进行中的被试会话数据已实时落库，不会丢失）。');
   if (process.env.OPEN_PAGE === '1') {
     try {

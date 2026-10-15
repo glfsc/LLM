@@ -901,6 +901,93 @@ async function main() {
   const restored = (await admin('/api/admin/settings')).settings;
   check('全局设置已还原', restored.resumeWindowHours === settings.resumeWindowHours);
 
+  section('[12] 安全自检');
+  // ⚠️ 必须留在最后两节：这一节会故意打满限流桶，放到前面会把后面所有正常用例变成 429。
+  // 为了不污染真实配额（npm run check 后面还接着跑 consistency-check，它要登录），
+  // 打限流时统一用 X-Forwarded-For 伪造来源 IP —— 服务端只在对端是本机回环时才认这个头，
+  // 所以这条用例同时验证了「限流生效」和「直连时伪造该头无效」两件事。
+
+  // 正对照：先确认静态资源本身是通的，否则下面「穿越应当 404」可能因为路径写错而假通过
+  const assetOk = await request('/assets/chat.js');
+  check('正对照：静态资源可正常访问', assetOk.status === 200, `status=${assetOk.status}`);
+
+  // 路径穿越：URL 只对字面量 .. 做归一化，%2e%2e%2f 这类编码斜杠能绕过，必须在落点再校验
+  for (const target of ['package.json', 'server.js']) {
+    const res = await request(`/assets/%2e%2e%2f%2e%2e%2f${target}`);
+    check(`路径穿越被拒（${target}）`, res.status === 404, `status=${res.status}`);
+  }
+  const deepTraversal = await request('/assets/..%2f..%2f..%2f..%2fpackage.json');
+  check('多级路径穿越被拒', deepTraversal.status === 404, `status=${deepTraversal.status}`);
+
+  // 非法百分号编码应当 400：以前 decodeURIComponent 抛的 URIError 会走到兜底 500 并回显内部信息
+  const badEnc = await request('/assets/%ZZ');
+  check('非法编码返回 400 且不回显内部信息',
+    badEnc.status === 400 && !/URI|malformed|at /i.test(JSON.stringify(badEnc.data)),
+    `status=${badEnc.status} ${JSON.stringify(badEnc.data)}`);
+
+  // 安全响应头：页面与 API 两条路径都要带上
+  for (const route of ['/', '/api/health']) {
+    const h = (await fetch(BASE + route)).headers;
+    check(`安全响应头齐全（${route}）`,
+      h.get('x-content-type-options') === 'nosniff'
+      && h.get('x-frame-options') === 'SAMEORIGIN'
+      && /frame-ancestors 'self'/.test(h.get('content-security-policy') || '')
+      && h.get('referrer-policy') === 'no-referrer',
+      `nosniff=${h.get('x-content-type-options')} xfo=${h.get('x-frame-options')} csp=${!!h.get('content-security-policy')}`);
+  }
+  // 管理端编辑页用同源 iframe 嵌 /chat?preview= 做手机预览：这里钉住取值，防止有人改成 DENY 把预览拦掉
+  const chatFrame = (await fetch(BASE + '/chat')).headers.get('x-frame-options');
+  check('预览 iframe 不会被框定头拦住', chatFrame === 'SAMEORIGIN', `X-Frame-Options=${chatFrame}`);
+
+  // /api/net-info 会暴露服务器内网地址，必须登录才能取
+  const anonNet = await request('/api/net-info');
+  check('/api/net-info 匿名不可访问', anonNet.status === 401, `status=${anonNet.status}`);
+
+  // 作答入口不能被限流误伤：404 说明请求已放行到处理逻辑（用不存在的问卷码，只为确认没被 429 拦下）
+  const sessionProbe = await request('/api/session', { body: { q: 'sec-selfcheck-nonexistent' } });
+  check('作答入口未被限流拦截', sessionProbe.status !== 429, `status=${sessionProbe.status}`);
+
+  // 限流 · 按用户名：换 IP 猜同一个账号也要被挡住（阈值默认 10/分，故连打 14 次）
+  const fakeIpA = '203.0.113.7';
+  let userLimited = null;
+  for (let i = 0; i < 14 && !userLimited; i += 1) {
+    const res = await request('/api/auth/login', {
+      headers: { 'X-Forwarded-For': fakeIpA },
+      body: { username: 'sec-selfcheck-fake', password: `wrong-${i}` }
+    });
+    if (res.status === 429) userLimited = res;
+  }
+  check('登录限流·按用户名生效', !!userLimited && userLimited.data.error === 'rate_limited',
+    userLimited ? `status=429 error=${userLimited.data.error}` : '连打 14 次都没触发 429');
+
+  // 限流 · 按 IP：每次换用户名（用户名规则永不触发），只靠 IP 规则也应被挡住（阈值 10/分）
+  const fakeIpB = '203.0.113.8';
+  let ipLimited = null;
+  for (let i = 0; i < 14 && !ipLimited; i += 1) {
+    const res = await request('/api/auth/login', {
+      headers: { 'X-Forwarded-For': fakeIpB },
+      body: { username: `sec-selfcheck-u${i}`, password: 'wrong' }
+    });
+    if (res.status === 429) ipLimited = res;
+  }
+  check('登录限流·按 IP 生效', !!ipLimited && ipLimited.data.error === 'rate_limited',
+    ipLimited ? `status=429 error=${ipLimited.data.error}` : '连打 14 次都没触发 429');
+
+  // 限流响应要带 Retry-After，前端据此提示「稍后再试」
+  const retryAfter = ipLimited ? (await fetch(BASE + '/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': fakeIpB },
+    body: JSON.stringify({ username: 'sec-selfcheck-again', password: 'wrong' })
+  })).headers.get('retry-after') : null;
+  check('限流响应带 Retry-After', retryAfter !== null && Number(retryAfter) > 0, `Retry-After=${retryAfter}`);
+
+  // 正对照收尾：上面全用伪造 IP，真实来源的配额必须一点没被消耗——否则紧随其后的
+  // consistency-check.js 会连登录都失败
+  const realLogin = await request('/api/auth/login', { body: { username: 'admin', password: ADMIN_PASSWORD } });
+  check('正对照：真实来源配额未被限流测试消耗', realLogin.status === 200, `status=${realLogin.status}`);
+  const authNet = await request('/api/net-info', { token: realLogin.data.token });
+  check('正对照：/api/net-info 登录后可访问', authNet.status === 200 && Array.isArray(authNet.data.urls), `status=${authNet.status}`);
+
   console.log(`\n断言通过 ${passed} 项，失败 ${failures.length} 项`);
   console.log(`总耗时 ${((Date.now() - RUN_STARTED) / 1000).toFixed(1)}s（门控靠回拨快进，不真实等待）`);
   if (failures.length) {

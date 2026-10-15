@@ -11,7 +11,8 @@
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 
-const DB_FILE = path.join(__dirname, '..', '..', 'data.db');
+// 与 db.js 同口径：默认项目根目录的 data.db，可用 DB_PATH 覆盖（服务端换了库位置，走查要跟着走）
+const DB_FILE = process.env.DB_PATH ? path.resolve(process.env.DB_PATH) : path.join(__dirname, '..', '..', 'data.db');
 
 function withDb(fn) {
   const db = new DatabaseSync(DB_FILE);

@@ -5,7 +5,10 @@
 'use strict';
 
 const { DatabaseSync } = require('node:sqlite');
-const { randomUUID, randomBytes, scryptSync, timingSafeEqual } = require('node:crypto');
+const fs = require('node:fs');
+const { randomUUID, randomBytes, scryptSync, scrypt, timingSafeEqual } = require('node:crypto');
+const { promisify } = require('node:util');
+const scryptAsync = promisify(scrypt);
 const path = require('node:path');
 // 富文本清洗 / 互转（与浏览器共用同一份实现，见 public/assets/richtext.js）
 const RT = require('./public/assets/richtext.js');
@@ -21,7 +24,12 @@ const {
   DEBRIEF_TEXT, DEBRIEF_CLOSING
 } = require('./seed-content');
 
-const DB_PATH = path.join(__dirname, 'data.db');
+// 库文件默认在项目根目录；可用 DB_PATH 指到项目之外（如权限独立的数据目录），
+// 这样即使将来再出现文件读取类漏洞，也读不到库文件
+const DB_PATH = process.env.DB_PATH ? path.resolve(process.env.DB_PATH) : path.join(__dirname, 'data.db');
+// DB_PATH 指向的目录可能还不存在（首次部署），建出来——否则 SQLite 只会抛一句
+// 很难懂的「unable to open database file」。仍无权限时下面的打开错误会照常抛出。
+if (process.env.DB_PATH) fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 const db = new DatabaseSync(DB_PATH);
 
 // 并发与性能 pragma：WAL 提升提交吞吐，synchronous=NORMAL 避免每次提交 fsync
@@ -785,6 +793,16 @@ function verifyPassword(row, password) {
   return expected.length === actual.length && timingSafeEqual(expected, actual);
 }
 
+// 登录 / 改密的校验走异步 scrypt：scryptSync 是同步 CPU 占用，单进程里登录洪水能把事件循环堵死
+// （实测 150 并发登录时，正常请求要排队等 4.5 秒）。派生参数与 hashPassword 完全一致，只是不阻塞。
+async function verifyPasswordAsync(row, password) {
+  if (!row || !row.pass_hash || !row.salt) return false;
+  const expected = Buffer.from(row.pass_hash, 'hex');
+  const derived = await scryptAsync(String(password), String(row.salt), 64);
+  const actual = Buffer.from(derived);
+  return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+
 function createUser({ username, password, role, avatar }) {
   const name = String(username || '').trim();
   if (!name) throw new Error('用户名不能为空');
@@ -1457,6 +1475,7 @@ module.exports = {
   getUser,
   getUserByName,
   verifyPassword,
+  verifyPasswordAsync,
   createUser,
   updateUser,
   updateUserPassword,

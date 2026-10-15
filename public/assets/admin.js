@@ -21,7 +21,7 @@ const $segOutline = $('seg-outline');
 
 const TOKEN_KEY = 'expchat_admin_token';
 const TOKEN_REMEMBER_KEY = 'expchat_admin_token_remember';   // { token, username, expiresAt }：勾了「记住密码」才有
-const LOGIN_REMEMBER_KEY = 'expchat_login_remember';         // { username, password, expiresAt }：登录页的「记住账号密码」（index.html 维护）
+const LOGIN_REMEMBER_KEY = 'expchat_login_remember';         // { username, password, expiresAt }：登录卡片的「记住账号密码」
 
 // 「记住密码」= 登录页勾选后签发的 30 天 token（存 localStorage，重开浏览器仍免登录）
 function loadRememberedTokenRecord() {
@@ -40,8 +40,8 @@ function clearTokens() {
   sessionStorage.removeItem(TOKEN_KEY);
   try { localStorage.removeItem(TOKEN_REMEMBER_KEY); } catch { /* 忽略 */ }
 }
-// 记一次登录态（改密换发新 token 时复用）：remember 为真则同步刷新 30 天记录
-function storeToken(token, remember) {
+// 记一次登录态（登录 / 改密换发新 token 时复用）：remember 为真则同步刷新 30 天记录
+function storeToken(token, remember, ttlMs) {
   state.token = token;
   try { sessionStorage.setItem(TOKEN_KEY, token); } catch { /* 忽略 */ }
   if (!remember) return;
@@ -49,7 +49,7 @@ function storeToken(token, remember) {
     localStorage.setItem(TOKEN_REMEMBER_KEY, JSON.stringify({
       token,
       username: state.user ? state.user.username : '',
-      expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000
+      expiresAt: Date.now() + (Number(ttlMs) || 30 * 24 * 60 * 60 * 1000)
     }));
   } catch { /* 忽略 */ }
 }
@@ -745,7 +745,10 @@ $modalConfirm.addEventListener('click', async () => {
   try { await modalOnConfirm(); } catch (err) { showModalError(err.message || '操作失败，请重试'); } finally { $modalConfirm.disabled = false; }
 });
 
-/* ---------------------------------------------------------------- 登录 */
+/* ---------------------------------------------------------------- 登录（未登录视图） */
+
+const KICKED_MSG = '该账号已在其他设备登录或已修改密码，本设备登录已失效，请重新登录。';
+const LAST_USER_KEY = 'expchat_last_user';                   // 上次登录的账号：登录卡片用来预填
 
 async function loadMeta() {
   state.meta = await api('/api/admin/meta');
@@ -756,22 +759,39 @@ async function enterAdmin() {
   const me = await api('/api/auth/me');
   state.user = me.user;
   await Promise.all([loadMeta(), reloadExperiments(), reloadQuestionnaires()]);
+  $('login-view').classList.add('hidden');
   $('admin-view').classList.remove('hidden');
   handleRoute();
 }
 
-// 401：登录已失效（被其他设备顶下线 / 已改密 / 已过期）→ 清掉本机登录态回登录页；
-// 「被顶下线」带 ?kicked=1，登录页会给一句明确的提示
+// 切到未登录视图：管理端整页换成一屏「登录卡片 + 问卷入口 + 备案号」
+function showLogin(message) {
+  $('admin-view').classList.add('hidden');
+  $('login-view').classList.remove('hidden');
+  showBlock('login');
+  hideLoginError();
+  if (message) showLoginError(message);
+  prefillLogin();
+}
+
+// 401：登录已失效（被其他设备顶下线 / 已改密 / 已过期）→ 清掉本机登录态，原地切回登录卡片
 function backToLogin(err) {
   state.token = '';
+  state.user = null;
   clearTokens();
-  location.replace(err && err.code === 'kicked' ? '/?kicked=1' : '/');
+  showLogin(err && err.code === 'kicked' ? KICKED_MSG : '登录已失效，请重新登录。');
 }
 
 async function boot() {
-  if (!state.token) { location.replace('/'); return; }
-  try { await enterAdmin(); } catch (err) {
+  // 老链接 / 旧书签可能带 ?kicked=1（被顶下线的提示参数）：清掉参数，并在登录卡片上说明原因
+  const kicked = new URLSearchParams(location.search).get('kicked') === '1';
+  if (kicked) { try { history.replaceState(null, '', location.pathname + location.hash); } catch { /* 忽略 */ } }
+  if (!state.token) { showLogin(kicked ? KICKED_MSG : ''); return; }
+  try {
+    await enterAdmin();
+  } catch (err) {
     if (err.status === 401) backToLogin(err);
+    else showLogin('无法加载管理端数据，请刷新页面重试。');
   }
 }
 
@@ -780,6 +800,130 @@ function maybeSessionExpired(err) {
   backToLogin(err);
   return true;
 }
+
+/* ---- 登录卡片 -------------------------------------------------------- */
+
+// 登录 / 注册 / 重置说明三块互斥显示
+function showBlock(name) {
+  ['login-block', 'register-block', 'reset-block'].forEach((id) => {
+    $(id).classList.toggle('hidden', id !== name + '-block');
+  });
+}
+
+function showLoginError(msg) { const p = $('login-error'); p.textContent = msg; p.classList.remove('hidden'); }
+function hideLoginError() { $('login-error').classList.add('hidden'); }
+function showRegError(msg) { const p = $('reg-error'); p.textContent = msg; p.classList.remove('hidden'); }
+function hideRegError() { $('reg-error').classList.add('hidden'); }
+
+// 「记住账号密码」：勾选后把账号密码与 30 天 token 存在本机（localStorage），重开浏览器免登录
+function readRememberRecord() {
+  try {
+    const rec = JSON.parse(localStorage.getItem(LOGIN_REMEMBER_KEY) || 'null');
+    if (!rec || !rec.username) return null;
+    if (Number(rec.expiresAt) && Number(rec.expiresAt) < Date.now()) { localStorage.removeItem(LOGIN_REMEMBER_KEY); return null; }
+    return rec;
+  } catch { return null; }
+}
+function saveRememberRecord(username, password) {
+  try {
+    localStorage.setItem(LOGIN_REMEMBER_KEY, JSON.stringify({
+      username, password, expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000
+    }));
+  } catch { /* 忽略 */ }
+}
+function clearRememberRecord() {
+  try { localStorage.removeItem(LOGIN_REMEMBER_KEY); } catch { /* 忽略 */ }
+}
+// 预填：优先「记住的账号密码」→ 其次「上次登录的账号」；并清掉浏览器可能自动填进来的别的账号
+function prefillLogin() {
+  const rec = readRememberRecord();
+  let last = '';
+  try { last = localStorage.getItem(LAST_USER_KEY) || ''; } catch { /* 忽略 */ }
+  const userEl = $('login-username');
+  const pwdEl = $('login-password');
+  const want = rec ? rec.username : last;
+  if (want && userEl.value !== want) userEl.value = want;
+  if (rec && rec.password && pwdEl.value !== rec.password) pwdEl.value = rec.password;
+  $('login-remember').checked = !!rec;
+}
+
+async function submitLogin(e) {
+  e.preventDefault();
+  const username = $('login-username').value.trim();
+  const password = $('login-password').value;
+  const remember = $('login-remember').checked;
+  if (!username || !password) { showLoginError('请输入账号和密码'); return; }
+  hideLoginError();
+  const btn = $('login-btn');
+  btn.disabled = true;
+  try {
+    const res = await api('/api/auth/login', { body: { username, password, remember } });
+    state.user = res.user || null;                 // storeToken 记 30 天记录时要写账号名
+    storeToken(res.token, remember, res.ttlMs);
+    try { localStorage.setItem(LAST_USER_KEY, username); } catch { /* 忽略 */ }
+    if (remember) saveRememberRecord(username, password);
+    else clearRememberRecord();
+    await enterAdmin();
+  } catch (err) {
+    showLoginError(err.message || '登录失败，请重试');
+    btn.disabled = false;
+  }
+}
+
+async function submitRegister(e) {
+  e.preventDefault();
+  const username = $('reg-username').value.trim();
+  const password = $('reg-password').value;
+  if (!username) { showRegError('请输入账号'); return; }
+  if (password.length < 6) { showRegError('密码至少 6 位'); return; }
+  if (password !== $('reg-password2').value) { showRegError('两次输入的密码不一致'); return; }
+  hideRegError();
+  const btn = $('reg-btn');
+  btn.disabled = true;
+  try {
+    const res = await api('/api/auth/register', { body: { username, password } });
+    state.user = res.user || null;
+    storeToken(res.token, false);
+    await enterAdmin();
+  } catch (err) {
+    showRegError(err.message || '注册失败，请重试');
+    btn.disabled = false;
+  }
+}
+
+// 问卷入口：支持粘贴完整链接（提取 q= 参数）或直接输入短码
+function submitSurveyEntry(e) {
+  e.preventDefault();
+  const raw = $('survey-code').value.trim();
+  if (!raw) return;
+  let code = raw;
+  try {
+    const url = new URL(raw);
+    const q = url.searchParams.get('q') || url.searchParams.get('c');
+    if (q) code = q.trim();
+  } catch { /* 不是 URL：当作短码 */ }
+  if (!code) return;
+  location.href = '/chat?q=' + encodeURIComponent(code);
+}
+
+$('login-form').addEventListener('submit', submitLogin);
+$('register-form').addEventListener('submit', submitRegister);
+$('survey-form').addEventListener('submit', submitSurveyEntry);
+// 这一行没有提交按钮，回车就是唯一的提交方式：显式绑一次，不依赖浏览器的隐式提交
+$('survey-code').addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  e.preventDefault();
+  submitSurveyEntry(e);
+});
+$('show-register').addEventListener('click', () => showBlock('register'));
+$('show-reset').addEventListener('click', () => showBlock('reset'));
+$('back-login').addEventListener('click', () => showBlock('login'));
+$('back-login2').addEventListener('click', () => showBlock('login'));
+
+// 浏览器自带的账号填充可能晚一拍落地：登录卡片可见时再覆盖一次
+window.addEventListener('load', () => {
+  if (!$('login-view').classList.contains('hidden')) setTimeout(prefillLogin, 300);
+});
 
 /* ---------------------------------------------------------------- 路由 */
 // #/exp、#/exp/:id
@@ -915,7 +1059,11 @@ function startDrag(ev, which) {
   window.addEventListener('mouseup', up);
   document.body.classList.add('col-dragging');
 }
+let layoutInited = false;
 function initLayout() {
+  // 退出登录后再登录会二次进入管理端：这些监听只能绑一次，否则会出现双份提示
+  if (layoutInited) return;
+  layoutInited = true;
   applyLayout(loadLayout());
   const side = $('split-sidebar');
   if (side) {
@@ -3011,19 +3159,9 @@ function renderQList() {
     el('p', 'panel-sub', '每份问卷 = 一条链接 + 一列题目 + 计时默认值。可逐题插入、批量插入打分题，或整组插入实验模板后逐条修改；数据按问卷隔离，被试编号按进入顺序自动分配。')
   );
   const headActions = el('div', 'head-actions');
-  const entryQr = el('button', 'ghost-btn qr-btn', '手机入口二维码');
-  entryQr.type = 'button';
-  entryQr.title = '手机扫码进入系统入口页（被试可在入口页输入问卷短码）';
-  entryQr.prepend(qrIconSvg(14));
-  entryQr.onclick = () => openQrModal({
-    title: '手机扫码 · 系统入口',
-    posterTitle: '系统入口',
-    path: '/',
-    note: '被试扫码后进入系统入口页（可在入口页输入问卷短码）。要让被试直达某一组别的问卷，请用问卷行内的二维码。'
-  });
   const btn = el('button', 'primary-btn', '+ 新建问卷');
   btn.onclick = () => createQuestionnaireDirect({ copyFrom: null });
-  headActions.append(entryQr, btn);
+  headActions.append(btn);
   head.append(box, headActions);
   $main.appendChild(head);
 
@@ -3873,8 +4011,9 @@ function renderSettings() {
   outBtn.addEventListener('click', async () => {
     try { await api('/api/auth/logout', { body: {} }); } catch { /* 忽略 */ }
     state.token = '';
+    state.user = null;
     clearTokens();
-    location.replace('/');
+    showLogin('');
   });
   secOut.appendChild(outBtn);
   panel.appendChild(secOut);

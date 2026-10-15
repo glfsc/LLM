@@ -1,16 +1,44 @@
-// 并发基线测量：一位被试的请求数 + 单请求服务端耗时 + 并发提交压测（用于评估 2C2G 承载能力）
+// 并发基线测量：一位被试的请求数 + 单请求服务端耗时 + 并发突发的压测（用于评估 VPS 承载能力）
 // 用法：先启动服务，再执行 npm run probe（可用 CONCURRENCY=300 调整并发规模）
 'use strict';
 
 const BASE = process.env.BASE || 'http://localhost:3000';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
-const PROBE_EXP = '压测探针模板';
 const PROBE_Q = '压测探针问卷';
+
+// 自带夹具：不复制任何实验内容，所以改文案、改题量、删预设问卷都不会让压测失效。
+// 重量贴近真实问卷——长反馈正文（360+ 字）、题组双空、量表多题，测出来的开销才有参考意义。
+const LONG_TEXT = '【压测夹具·反馈正文】请对照任务要求检查你的创作，以下逐条说明改进方向。'.repeat(6);
+function fixtureItems() {
+  return [
+    { id: 'welcome', type: 'message', title: '欢迎语', text: '【压测夹具】欢迎参加。' },
+    {
+      id: 'consent', type: 'gate', title: '知情同意说明', text: '【压测夹具】请阅读并勾选同意。',
+      check: '我已阅读并同意', button: '开始实验', variant: 'id', idLabel: '被试编号', idPlaceholder: '请填写编号'
+    },
+    { id: 'task', type: 'message', title: '任务要求', text: '【压测夹具·任务要求】请为新品写一句广告语，并说明创作思路。' },
+    { id: 'sc_1', type: 'rating', title: '我清楚任务目标。', min: 1, max: 5, anchor: '1 = 完全不同意　·　5 = 完全同意' },
+    { id: 'sc_2', type: 'rating', title: '我知道评价标准。', min: 1, max: 5, anchor: '1 = 完全不同意　·　5 = 完全同意' },
+    { id: 'sc_3', type: 'rating', title: '我清楚努力方向。', min: 1, max: 5, anchor: '1 = 完全不同意　·　5 = 完全同意' },
+    {
+      id: 'work', type: 'group', title: '内容创作', text: '', layout: 'column',
+      subs: [
+        { id: 'slogan', type: 'text', title: '广告语', required: true, rows: 1, maxLen: 20, placeholder: '请输入广告语' },
+        { id: 'note', type: 'text', title: '创作说明（选填）', required: false, rows: 2, maxLen: 50, placeholder: '可简要说明' }
+      ]
+    },
+    { id: 'feedback', type: 'message', title: '负面反馈输出', text: LONG_TEXT, thinking: '【压测夹具·思考过程】先读题，再对照标准推演改进方向。' },
+    { id: 'confirm', type: 'confirm', title: '阅读确认页', text: '【压测夹具】请确认你已阅读完上面的反馈。', button: '我已阅读完' },
+    { id: 'attention', type: 'single', title: '注意力检测', options: ['选项甲', '选项乙', '选项丙'] },
+    { id: 'debrief', type: 'debrief', title: '结束', text: '【压测夹具】已结束。' }
+  ];
+}
 
 async function req(route, options = {}) {
   const headers = {};
   if (options.body) headers['Content-Type'] = 'application/json';
   if (options.token) headers.Authorization = `Bearer ${options.token}`;
+  if (options.headers) Object.assign(headers, options.headers);
   const res = await fetch(BASE + route, {
     method: options.body ? 'POST' : 'GET',
     headers,
@@ -18,6 +46,10 @@ async function req(route, options = {}) {
   });
   return { status: res.status, ok: res.ok, data: await res.json().catch(() => ({})) };
 }
+
+// 每个模拟被试用自己的来源 IP：真实场景里被试各在各的网络，而「开始作答」是按 IP 限流的——
+// 全用同一个 IP 会把「一个班同时扫码」误判成单源洪水（前提是本机直连，服务端才会信任这个头）
+const xff = (i) => ({ 'X-Forwarded-For': `198.18.${Math.floor(i / 254)}.${(i % 254) + 1}` });
 
 let token = '';
 const admin = async (route, options = {}) => {
@@ -30,24 +62,22 @@ async function cleanup() {
   for (const q of (await admin('/api/admin/questionnaires')).questionnaires) {
     if (q.title === PROBE_Q) await admin('/api/admin/questionnaire/delete', { body: { id: q.id, force: true } });
   }
-  for (const e of (await admin('/api/admin/experiments')).experiments) {
-    if (e.name === PROBE_EXP) await admin('/api/admin/experiment/delete', { body: { id: e.id } });
-  }
 }
 
 async function main() {
-  token = (await req('/api/auth/login', { body: { username: 'admin', password: ADMIN_PASSWORD } })).data.token;
+  const loginRes = await req('/api/auth/login', { body: { username: 'admin', password: ADMIN_PASSWORD } });
+  if (!loginRes.ok) {
+    throw new Error(loginRes.status === 429
+      ? '管理端登录被限流（429）：同一账号/IP 每分钟登录次数超限，等 1 分钟再试；'
+        + '或把 RATE_LOGIN_PER_MIN / RATE_LOGIN_USER_PER_MIN 调大后重启服务'
+      : `管理端登录失败（${loginRes.status}）：请确认服务已启动、ADMIN_PASSWORD 正确`);
+  }
+  token = loginRes.data.token;
   await cleanup();
 
-  // 探针问卷：复制组别3 模板并把题目级参数清零（wait / minSubmit / maxAnswer 归零），便于快速走完
-  const exp = (await admin('/api/admin/experiment/create', { body: { name: PROBE_EXP, copyFrom: 'group3-high-clarity' } })).experiment;
-  const items = exp.items.map((it) => ({ ...it, limits: {} }));
-  await admin('/api/admin/experiment/update', { body: { id: exp.id, name: PROBE_EXP, items } });
-  const g3 = (await admin('/api/admin/questionnaires')).questionnaires.find((x) => /组别3/.test(x.title));
-  const q = (await admin('/api/admin/questionnaire/create', { body: { title: PROBE_Q, copyFrom: g3.id } })).questionnaire;
-  const qFull = (await admin(`/api/admin/questionnaire?id=${q.id}`)).questionnaire;
-  const cleanItems = qFull.items.map((it) => ({ ...it, limits: {} }));
-  await admin('/api/admin/questionnaire/update', { body: { id: q.id, title: PROBE_Q, items: cleanItems } });
+  // 探针问卷：直接用自带夹具建，不依赖任何实验内容；题目都没配计时参数，
+  // wait / minSubmit / maxAnswer 都取默认 0，所以能立刻走完，不用真实等待
+  const q = (await admin('/api/admin/questionnaire/create', { body: { title: PROBE_Q, items: fixtureItems() } })).questionnaire;
 
   // ---- 一位被试的请求数与单请求耗时
   const timings = [];
@@ -67,8 +97,9 @@ async function main() {
   let action = session.data.action;
 
   const body = (a) => {
-    if (a.type === 'gate') return { consent: true };
-    if (a.type === 'debrief') return { ack: true };
+    // 知情同意页的「含编号」形态要求填编号，不填会被服务端拒
+    if (a.type === 'gate') return { consent: true, text: '压测编号' };
+    if (a.type === 'confirm' || a.type === 'debrief') return { ack: true };
     if (a.type === 'rating') return { value: 3 };
     if (a.type === 'single') return { value: 1 };
     if (a.type === 'multi') return { values: [1] };
@@ -96,22 +127,40 @@ async function main() {
   console.log(`  单请求服务端耗时：平均 ${avg.toFixed(1)}ms · p95 ${p95.ms.toFixed(1)}ms · 最大 ${max.ms.toFixed(1)}ms（含网络往返）`);
   console.log(`  最慢的 3 次：${sorted.slice(-3).map((t) => `${t.label}=${t.ms.toFixed(0)}ms`).join(' | ')}`);
 
-  // ---- 并发提交压测
+  // ---- 并发「开始作答」压测：一个班同时扫码点开始的真实突发
   const concurrency = Number(process.env.CONCURRENCY) || 300;
-  const sessions = [];
-  for (let i = 0; i < concurrency; i += 1) {
-    const r = await req('/api/session', { body: { q: q.id } });
-    sessions.push({ id: r.data.session.id, action: r.data.action });
+  const startedAt = performance.now();
+  const createRes = await Promise.all(Array.from({ length: concurrency }, (_, i) =>
+    (async () => {
+      const t = performance.now();
+      const r = await req('/api/session', { headers: xff(i), body: { q: q.id } });
+      return { ...r, ms: performance.now() - t };
+    })()
+  ));
+  const createWall = performance.now() - startedAt;
+  const createOk = createRes.filter((r) => r.ok);
+  const failed = createRes.filter((r) => !r.ok);
+  const cSorted = createOk.map((r) => r.ms).sort((a, b) => a - b);
+  const cP95 = cSorted.length ? cSorted[Math.min(cSorted.length - 1, Math.floor(cSorted.length * 0.95))] : 0;
+  const failedByStatus = failed.reduce((m, r) => { m[r.status] = (m[r.status] || 0) + 1; return m; }, {});
+  console.log(`\n并发压测 A（${concurrency} 人同一时刻「开始作答」）：`);
+  console.log(`  成功 ${createOk.length}/${concurrency}${failed.length ? ` · 失败 ${JSON.stringify(failedByStatus)}` : ''}`);
+  console.log(`  总耗时 ${createWall.toFixed(0)}ms · 等效 ${(createOk.length / (createWall / 1000)).toFixed(0)} QPS · 单请求 p95 ${cP95.toFixed(0)}ms`);
+  if (failed.length) {
+    const sample = failed.slice(0, 3).map((r) => `${r.status} ${r.data.error || ''}`).join(' | ');
+    console.log(`  失败样例：${sample}`);
   }
+  const sessions = createOk.map((r) => ({ id: r.data.session.id, action: r.data.action }));
+
+  // ---- 并发提交压测：同一时刻提交同一步作答
   const t0 = performance.now();
   const results = await Promise.all(sessions.map((s) => req('/api/step', { body: { sessionId: s.id, elapsedMs: 400, ...body(s.action) } })));
   const wall = performance.now() - t0;
   const ok = results.filter((r) => r.ok).length;
-  console.log(`\n并发压测（${concurrency} 个会话同一时刻提交同一步作答）：`);
-  console.log(`  成功 ${ok}/${concurrency} · 总耗时 ${wall.toFixed(0)}ms · 等效 ${(concurrency / (wall / 1000)).toFixed(0)} QPS`);
+  console.log(`\n并发压测 B（${sessions.length} 个会话同一时刻提交同一步作答）：`);
+  console.log(`  成功 ${ok}/${sessions.length} · 总耗时 ${wall.toFixed(0)}ms · 等效 ${(sessions.length / (wall / 1000)).toFixed(0)} QPS`);
 
   await admin('/api/admin/questionnaire/delete', { body: { id: q.id, force: true } });
-  await admin('/api/admin/experiment/delete', { body: { id: exp.id } });
   console.log('\n探针数据已清理');
 }
 

@@ -15,8 +15,8 @@
 | 启动命令 | `node server.js`（等价 `npm start`） |
 | 监听端口 | 默认 `3000`，可用环境变量 `PORT` 覆盖 |
 | 静态资源 | `public/` 目录 |
-| 入口地址 | 首页 `/`（账号密码登录 · 注册 · 问卷链接入口）；被试端 `/chat?q=<问卷ID>`；管理端 `/admin`（需登录）；健康检查 `/api/health` |
-| 账号 | 首次启动自动创建管理员 `admin`（初始密码 `admin123`，登录后请立即在「设置 → 修改密码」中修改）；普通账号可在登录页自助注册。同一账号同时只允许一台设备在线：在别处登录或修改密码后，先前设备上的登录会立即失效 |
+| 入口地址 | 根路径 `/` = 管理端（未登录时显示登录卡片；卡片下方可凭链接或短码进被试端，无需登录），`/admin` 等价；被试端 `/chat?q=<问卷ID>`；健康检查 `/api/health` |
+| 账号 | 首次启动自动创建管理员 `admin`（初始密码 `admin123`，登录后请立即在「设置 → 修改密码」中修改）；普通账号可在登录卡片上自助注册。同一账号同时只允许一台设备在线：在别处登录或修改密码后，先前设备上的登录会立即失效 |
 
 首次启动会自动建表，并灌入种子数据：两个实验模板（组别3 / 组别4）+ 两份预设问卷。
 
@@ -34,7 +34,7 @@ server.js        # 服务端入口
 db.js            # 数据层（建表 / 访问函数）
 xlsx.js          # 数据导出 Excel
 package.json     # 项目信息（无依赖，仅为 npm start / engines 声明）
-public/          # 前端页面（admin / chat / index 及静态资源）
+public/          # 前端页面（admin / chat / connect 及静态资源）
 scripts/         # 可选：reset-db、consistency-check 等自检工具
 ```
 
@@ -83,7 +83,8 @@ node server.js
 看到类似输出即成功：
 
 ```
-登录入口：  http://localhost:3000/
+实验平台已启动（局域网预实验模式）
+  管理端：http://localhost:3000/（根路径就是管理端，未登录时先显示登录卡片）
 ```
 
 另开一个终端验证：`curl http://127.0.0.1:3000/api/health` 应返回 `{"ok":true}`。
@@ -160,7 +161,7 @@ sudo apt install -y certbot python3-certbot-nginx
 sudo certbot --nginx -d glfsc.ltd
 ```
 
-完成后访问 `https://glfsc.ltd` 应看到登录页，登录后进入管理端。
+完成后访问 `https://glfsc.ltd` 应看到管理端（未登录时先显示登录卡片，底部有 ICP 备案号），登录后直接进入管理端。
 
 ---
 
@@ -170,6 +171,17 @@ sudo certbot --nginx -d glfsc.ltd
 - **备份**：最稳妥是先停服务再拷贝（PM2：`pm2 stop experiment-chat`，拷完 `pm2 start`）；不停服时建议拷贝前执行 `sqlite3 data.db ".backup backup.db"`（需装 sqlite3），或连同 `-wal` / `-shm` 三个文件一起拷
 - **换机迁移**：停服 → 拷贝 `data.db`（三个文件）→ 新机启动，无需其他操作
 - **重置数据库**（⚠️ 清空全部问卷与作答数据，仅测试用）：停服后运行 `npm run reset-db`
+- **把库放到项目之外（可选，推荐）**：默认库在项目根目录。用 `DB_PATH` 可以指到别处，让数据库不落在程序目录里——将来即使再出现文件读取类漏洞，也读不到库：
+
+  ```bash
+  sudo mkdir -p /var/lib/experiment-chat && sudo chown -R $USER /var/lib/experiment-chat
+  # PM2：DB_PATH=/var/lib/experiment-chat/data.db pm2 start server.js --name experiment-chat
+  # systemd：在 [Service] 里加 Environment=DB_PATH=/var/lib/experiment-chat/data.db
+  ```
+
+  目录不存在时会自动创建（但需要写权限，所以上面先 mkdir + chown 更稳）。
+  同一环境变量对 `npm run reset-db`、`npm run check`、`npm run portable` 等脚本同样生效，改动后记得重启服务。
+  迁移现有数据：停服后把 `data.db`（含 `-wal`/`-shm`）搬到新位置，再用 `DB_PATH` 启动。
 
 ---
 
@@ -178,10 +190,53 @@ sudo certbot --nginx -d glfsc.ltd
 - [ ] **修改管理员密码**（必须！初始密码为 `admin123`）：登录后进入左下角「设置 → 修改密码」直接修改，无需命令行
 
 - [ ] 服务器防火墙 / 安全组只放行 `22`、`80`、`443`，**不要对公网开放 3000**
+- [ ] Nginx 反代必须带上 `X-Forwarded-For` / `X-Real-IP`（第四节的配置已包含）：按 IP 的访问限流靠它识别真实来源，
+      少了这两个头，所有请求会被当成来自 127.0.0.1 而共用一个配额桶
 - [ ] 在管理端建好各分组问卷，记录每组被试链接 `https://glfsc.ltd/chat?q=<问卷ID>`
 - [ ] 手机端走一遍完整流程（知情同意 → 创作 → 反馈 → 问卷 → 结束页）
 - [ ] 管理端数据页导出 Excel 验证正常
 - [ ] 做一次 `data.db` 备份
+
+### 访问限流（内置）
+
+服务端对少数入口做了固定窗口限流，超限返回 `429` 并带 `Retry-After`：
+
+| 入口 | 默认限额 | 环境变量 |
+|---|---|---|
+| 登录（按 IP） | 10 次 / 分钟 | `RATE_LOGIN_PER_MIN` |
+| 登录（按用户名） | 10 次 / 分钟 | `RATE_LOGIN_USER_PER_MIN` |
+| 注册（按 IP） | 3 次 / 小时 | `RATE_REGISTER_PER_HOUR` |
+| 开始作答（按 IP） | 600 次 / 分钟 | `RATE_SESSION_PER_MIN` |
+| 开始作答（全局） | 1200 次 / 分钟 | `RATE_SESSION_ALL_PER_MIN` |
+| 预览接口（按 IP） | 60 次 / 分钟 | `RATE_PREVIEW_PER_MIN` |
+
+**任意一条设成 `0` 就是关闭该条限流**（例：`RATE_SESSION_PER_MIN=0`），改完需重启服务。
+
+**作答主链路（`/api/step`、`/api/heartbeat`、`/api/bootstrap`）完全不限流**——被试在实验中途被限流等于直接丢数据。
+只有「开始作答」这一步有限流，它才是刷库入口。
+
+#### 几百人同时开始作答，扛得住吗
+
+实测（开发机，单进程 Node + 同步 SQLite）：
+
+| 场景 | 结果 |
+|---|---|
+| 200 人同时点「开始」（各自 IP） | 全部成功，总耗时 ~0.4 秒 |
+| 600 人同时点「开始」 | 全部成功，总耗时 ~1.2 秒（最后几位等约 1 秒） |
+| 200 人**共用同一出口 IP**（整班在机房） | 全部成功，总耗时 ~0.3 秒 |
+
+结论：**瓶颈不在服务端算力，而在限流的闸门高度**。早先的默认值（单 IP 30、全局 300）会把整班同学挡住，
+现已按「一间机房整班 + 一倍余量」重定档。若你的规模更大，按这两条调：
+
+- 整班共用出口 IP 且人数 > 600：调大 `RATE_SESSION_PER_MIN`，或直接设 `0` 关掉这条
+- 全场峰值可能超过 1200 次/分钟：调大 `RATE_SESSION_ALL_PER_MIN`
+
+被试在实验中途的作答提交不受任何限流影响，所以真正的并发压力只出现在「大家同时扫码开始」那一两分钟。
+先启动服务、再跑 `npm run probe`（可加 `CONCURRENCY=600`）就能在你的服务器上复现上表
+（脚本会临时建一份自己的问卷，跑完自动清理）。
+
+**只跑单个进程**：本程序把限流桶与预览会话放在进程内存里，起多实例会让它们各算各的；
+SQLite 单写者的特性也不适合多进程同时写。PM2 用默认的单实例模式即可，别加 `-i`。
 
 ---
 

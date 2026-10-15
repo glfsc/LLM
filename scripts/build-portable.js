@@ -50,8 +50,6 @@ const MUST_HAVE_IN_ZIP = [
   '启动预实验.bat',
   '实验人员须知.txt',
   'scripts/pilot-start.js',
-  'public/index.html',
-  'public/connect.html',
   'public/chat.html',
   'public/admin.html',
   'public/assets/chat.js',
@@ -83,7 +81,8 @@ function fail(message) {
 // 想发「从代码种子重建的库」时：先在开发机跑 npm run reset-db，再执行打包即可。
 function buildSanitizedDb() {
   const { DatabaseSync } = require('node:sqlite');
-  const liveDb = path.join(ROOT, 'data.db');
+  // 源库位置与 db.js 同口径（可用 DB_PATH 覆盖）；包内文件名固定为 data.db，不跟着环境变量走
+  const liveDb = process.env.DB_PATH ? path.resolve(process.env.DB_PATH) : path.join(ROOT, 'data.db');
   if (!fs.existsSync(liveDb)) {
     fail('找不到 data.db：打包要带上一份含实验模板与问卷的库；请先准备好内容，或 npm run reset-db 用代码种子重建。');
   }

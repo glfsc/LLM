@@ -8,7 +8,79 @@
   <link rel="stylesheet" href="/assets/admin.css">
 </head>
 <body>
-  <!-- 管理视图：左侧边栏（菜单 / 大纲两种模式复用）+ 右侧内容区（未登录时由脚本跳回首页登录） -->
+  <!-- 未登录视图：管理端登录（进管理端）+ 问卷链接入口 + 备案号。
+       根路径 / 就是管理端页面，未登录时显示这一屏，登录后由脚本切到 #admin-view -->
+  <div id="login-view" class="login-view hidden">
+    <div class="login-stack">
+      <div class="login-card">
+        <div class="brand">
+          <span class="brand-dot" aria-hidden="true"></span>
+          <span class="brand-name">实验对话系统 · 管理端</span>
+        </div>
+
+        <!-- 登录 / 注册 / 重置说明三块互斥显示（由脚本切换） -->
+        <div id="login-block">
+          <h1>管理端登录</h1>
+          <p class="login-sub">登录后进入实验与问卷管理。</p>
+          <form id="login-form" autocomplete="off">
+            <input id="login-username" type="text" autocomplete="off" placeholder="账号">
+            <input id="login-password" type="password" autocomplete="new-password" placeholder="密码">
+            <label class="remember-row">
+              <input id="login-remember" type="checkbox">
+              <span>记住账号密码（30 天内免登录）</span>
+            </label>
+            <p id="login-error" class="login-error hidden"></p>
+            <button id="login-btn" class="primary-btn login-go" type="submit">登录</button>
+          </form>
+          <div class="login-links">
+            <button id="show-register" class="link-btn" type="button">注册新账号</button>
+            <button id="show-reset" class="link-btn" type="button">重置密码</button>
+          </div>
+        </div>
+
+        <div id="register-block" class="hidden">
+          <h1>注册新账号</h1>
+          <p class="login-sub">注册后即可登录并创建自己的实验与问卷。</p>
+          <form id="register-form" autocomplete="off">
+            <input id="reg-username" type="text" maxlength="32" autocomplete="username" placeholder="账号">
+            <input id="reg-password" type="password" autocomplete="new-password" placeholder="密码（至少 6 位）">
+            <input id="reg-password2" type="password" autocomplete="new-password" placeholder="确认密码">
+            <p id="reg-error" class="login-error hidden"></p>
+            <button id="reg-btn" class="primary-btn login-go" type="submit">注册并登录</button>
+          </form>
+          <div class="login-links">
+            <button id="back-login" class="link-btn" type="button">返回登录</button>
+            <span></span>
+          </div>
+        </div>
+
+        <div id="reset-block" class="hidden">
+          <h1>重置密码</h1>
+          <p class="login-sub">
+            为保障数据安全，密码重置需要管理员协助处理。<br>
+            请联系实验管理员，提供您的账号，由管理员在「设置 → 用户管理」中为您重置密码。
+          </p>
+          <div class="login-links">
+            <button id="back-login2" class="link-btn" type="button">返回登录</button>
+            <span></span>
+          </div>
+        </div>
+
+        <!-- 问卷入口：一行就够，被试拿到链接或短码后直接进作答页（无需登录） -->
+        <form id="survey-form" class="survey-line" autocomplete="off">
+          <label class="survey-label" for="survey-code">填写问卷</label>
+          <input id="survey-code" type="text" autocomplete="off" placeholder="粘贴问卷链接或输入短码">
+        </form>
+      </div>
+
+      <!-- 备案号：工信部要求网站底部悬挂 ICP 备案号，并链接至工信部备案管理系统 -->
+      <p class="login-foot">
+        <a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener">粤ICP备2026155269号</a>
+      </p>
+    </div>
+  </div>
+
+  <!-- 管理视图：左侧边栏（菜单 / 大纲两种模式复用）+ 右侧内容区（未登录时由脚本切到上面的登录卡片） -->
   <div id="admin-view" class="admin-layout hidden">
     <aside class="sidebar">
       <div class="sidebar-brand">

@@ -7,7 +7,8 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-const file = path.join(__dirname, '..', 'data.db');
+// 与 db.js 同口径：默认项目根目录的 data.db，可用 DB_PATH 覆盖
+const file = process.env.DB_PATH ? path.resolve(process.env.DB_PATH) : path.join(__dirname, '..', 'data.db');
 
 for (const f of [file, `${file}-wal`, `${file}-shm`]) {
   if (fs.existsSync(f)) {
