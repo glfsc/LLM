@@ -116,24 +116,25 @@ async function main() {
     matchTexts.length === 2 && matchTexts.every((i) => String(i.answer || '').includes('已完成阅读')),
     JSON.stringify(matchTexts.map((i) => ({ title: i.title, answer: i.answer }))), { config: true });
   check('问卷不再携带问卷级计时默认值（参数只在题目上）', q1Full.timing === undefined, JSON.stringify(q1Full.timing));
-  const fbItem = q1Full.items.find((i) => i.type === 'message' && String(i.text || '').startsWith('很感谢你的认真创作'));
+  const fbItem = q1Full.items.find((i) => i.type === 'message' && String(i.text || '').startsWith('很感谢您的认真创作'));
   check('反馈题带思考稿与思考时长 20000ms（默认 20 秒）',
     !!fbItem && String(fbItem.thinking || '').length > 0 && fbItem.limits.thinkMs === 20000,
     JSON.stringify(fbItem && fbItem.limits), { config: true });
-  // 2026-10-10：反馈正文按组别3「评价标准」的四个维度改写（品牌契合度 / 原创性 / 可记忆性 / 可延展性），
+  // 2026-10-16：反馈正文按新文档收敛为三点（原创性不够 / 与品牌主张的关联停留在表层 / 文案的节奏感偏弱），
   //   按研究者口径**不写分值**；两组共用同一份（组间只差任务要求两处，由下面的 [3.5] 守着）。
-  //   同时守住注意力检测题：题干问「哪一个选项没有在反馈中出现」，正确答案是「格式不符合要求」（第 3 个），
-  //   所以正文里必须**保留**另外两个「出现过」的选项，并且**不得出现**正确答案（以及别让别的选项也变成没出现）。
+  //   同时守住注意力检测题：题干问「哪一个选项没有在反馈中出现」——
+  //   除正确答案外的每个选项都必须在正文里对得上，正确答案本身不得出现（否则这题就没有唯一解）。
   const fbText = String((fbItem && fbItem.text) || '');
   const attn = q1Full.items.find((i) => i.type === 'single' && /没有在上述反馈中出现/.test(String(i.text || '')));
   const attnOptions = (attn && attn.options) || [];
+  const attnCorrect = attn ? Number(attn.correct) - 1 : -1;
   const attnHit = attnOptions.filter((t) => fbText.includes(t));
-  console.log(`  · 注意力检测：${attnOptions.join(' / ')}（正确项 = 第 ${attn ? attn.correct : '?'} 个 = ${attnOptions[(attn && attn.correct ? attn.correct : 1) - 1] || '?'}）`);
-  check('反馈正文按评价标准的四个维度组织、且不写分值',
-    ['品牌契合度', '原创性', '可记忆性', '可延展性'].every((t) => fbText.includes(t)) && !/\d+\s*分/.test(fbText),
+  console.log(`  · 注意力检测：${attnOptions.join(' / ')}（正确项 = 第 ${attn ? attn.correct : '?'} 个 = ${attnOptions[attnCorrect] || '?'}）`);
+  check('反馈正文对齐三点、且不写分值',
+    ['原创性不够', '与品牌主张的关联停留在表层', '节奏感偏弱'].every((t) => fbText.includes(t)) && !/\d+\s*分/.test(fbText),
     `正文 ${fbText.length} 字`, { config: true });
-  check('注意力检测的选项与反馈正文对得上（恰好两个选项在正文里出现过，正确答案那个没出现）',
-    attnOptions.length === 4 && attnHit.length === 2 && !fbText.includes(attnOptions[Number(attn && attn.correct) - 1] || '\u0000'),
+  check('注意力检测的选项与反馈正文对得上（除正确答案外都要在正文里出现过，正确答案那个没出现）',
+    attnOptions.length === 4 && attnOptions.every((t, i) => fbText.includes(t) === (i !== attnCorrect)),
     `正文里出现的选项：${attnHit.join(' / ') || '（无）'}`, { config: true });
   check('思考稿已加长（≥ 700 字，供 20 秒按字数自动调速铺满）',
     String((fbItem && fbItem.thinking) || '').length >= 700,
@@ -200,7 +201,7 @@ async function main() {
     }
   }
   // 允许的组间差异（逐条对照两份 v4 文档的组别操纵）：
-  //   · task_info 正文：组别4 的欢迎语没有「你目前就职于…」那段
+  //   · task_info 正文：组别4 的欢迎语没有「您目前就职于…」那段
   //   · task_req / task_req2 正文：详细版（组别3）vs 极简版（组别4）
   //   · 反馈确认题的 limits：强制阅读 30 秒（组别3）vs 40 秒（组别4）
   //     （该题线上 id 是管理端手工插入的别名，见 db.js 的 LIVE_ITEM_ID_ALIASES）
@@ -219,8 +220,8 @@ async function main() {
   // 另外两处文档写明的组别差异，单独盯一下（避免哪天被"顺手对齐"抹掉）
   const taskInfoOf = (items) => items.find((i) => i.id === 'task_info');
   const feedbackConfirmOf = (items) => items.find((i) => FEEDBACK_CONFIRM_IDS.includes(i.id));
-  const hasRole = (items) => /你目前就职于/.test(RT.htmlToText(taskInfoOf(items).html || ''));
-  check('欢迎语组间不同（组别4 的文档没有「你目前就职于…」那段）',
+  const hasRole = (items) => /您目前就职于/.test(RT.htmlToText(taskInfoOf(items).html || ''));
+  check('欢迎语组间不同（组别4 的文档没有「您目前就职于…」那段）',
     hasRole(n3) && !hasRole(n4),
     `组别3 ${hasRole(n3) ? '有' : '无'} / 组别4 ${hasRole(n4) ? '有' : '无'}`, { config: true });
   check('反馈强制阅读秒数组间不同（组别3 = 30 秒、组别4 = 40 秒）',
@@ -256,7 +257,7 @@ async function main() {
     (detail.responses.find((r) => r.itemType === 'rating') || {}).itemLabel, { config: true });
   check('呈现/作答时间戳齐全且顺序合理',
     detail.responses.every((r) => r.presentedAt && r.answeredAt && Date.parse(r.presentedAt) <= Date.parse(r.answeredAt) + 1000));
-  check('对话流含反馈正文全文', detail.messages.some((m) => RT.htmlToText(m.content).includes('很感谢你的认真创作')),
+  check('对话流含反馈正文全文', detail.messages.some((m) => RT.htmlToText(m.content).includes('很感谢您的认真创作')),
     undefined, { config: true });
 
   section('[6] 数据页与导出（含配置快照）');

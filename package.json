@@ -14,6 +14,7 @@
     "thinking": "node scripts/seed-thinking.js",
     "reset-db": "node scripts/reset-db.js",
     "portable": "node scripts/build-portable.js",
+    "deploy": "node scripts/build-deploy.js",
     "sync-groups": "node scripts/sync-group-content.js"
   },
   "engines": {

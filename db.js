@@ -544,7 +544,7 @@ function itemDefaults() {
     gate: { ...DEFAULT_GATE },
     gateId: { ...DEFAULT_GATE, variant: 'id', title: '知情同意说明（含编号）', idLabel: '被试编号', idPlaceholder: '请填写实验者提供的编号' },
     // 阅读确认页：先停留 N 秒（在「参数」里加「作答前强制等待」）才能点继续
-    confirm: { type: 'confirm', title: '阅读确认页', text: '请确认你已阅读完上面的内容。', button: '我已阅读完' },
+    confirm: { type: 'confirm', title: '阅读确认页', text: '请确认您已阅读完上面的内容。', button: '我已阅读完' },
     debrief: { ...DEFAULT_DEBRIEF },
     rating: { type: 'rating', title: '新打分题', min: 1, max: 5, anchor: '1 = 完全不同意　·　5 = 完全同意' },
     single: { type: 'single', title: '单选题', options: ['选项 A', '选项 B'], correct: 0 },
@@ -661,10 +661,10 @@ function textMatchItem(id, title, prompt, limits) {
     html: body16(prompt)
   };
 }
-const READ_CONFIRM_PROMPT = '请确认你已阅读上面的内容，并在下方输入框中输入「已完成阅读」后发送。回复后进入后续实验环节。';
+const READ_CONFIRM_PROMPT = '请确认您已阅读上面的内容，并在下方输入框中输入「已完成阅读」后发送。回复后进入后续实验环节。';
 
 // 组别3 / 组别4 的题目。组间差异（除「任务要求」文本外）由 variant 给出：
-//   variant.taskInfo        欢迎语（组别4 的文档没有「你目前就职于…」那段）
+//   variant.taskInfo        欢迎语（组别4 的文档没有「您目前就职于…」那段）
 //   variant.feedbackWaitSec 「强制阅读负面反馈」的秒数（组别3 = 30、组别4 = 40，见两份 v4 文档）
 // 其余题目逐字段相同——sync-group-content.js 的组间自检盯着这条。
 const FEEDBACK_THINK_MS = 20000;                        // AI 思考时长（默认 20 秒）
@@ -687,8 +687,8 @@ function experimentItems(requirementsText, variant = {}) {
     { id: 'feedback', type: 'message', title: '5 · 负面反馈输出', text: FEEDBACK_TEXT, html: body16(FEEDBACK_TEXT), thinking: FEEDBACK_THINKING, limits: { thinkMs: FEEDBACK_THINK_MS } },
     // 反馈之后确认已读（强制停留 N 秒），再做注意力检测
     textMatchItem('feedback_confirm', '用户阅读确认反馈', READ_CONFIRM_PROMPT, { wait: feedbackWaitSec }),
-    { id: 'attention', type: 'single', level: 4, title: '6 · 注意力检测', limits: { refresh: 1 }, ...choiceBody('请回忆刚刚的反馈内容，下面哪一个选项没有在上述反馈中出现'), options: ['表达不够精炼', '可延展性不足', '格式不符合要求', '与品牌主张的关联停留在表层'], correct: 3 },
-    { id: 'source', type: 'single', level: 4, title: '7 · 反馈来源识别', ...choiceBody('请回想刚才为你提供反馈的是谁？'), options: ['品牌创意组组长小艾', '品牌创意人工智能助手小A'], correct: 2 },
+    { id: 'attention', type: 'single', level: 4, title: '6 · 注意力检测', limits: { refresh: 1 }, ...choiceBody('请回忆刚刚的反馈内容，下面哪一个选项没有在上述反馈中出现'), options: ['节奏感偏弱', '原创性不够', '格式不符合要求', '与品牌主张的关联停留在表层'], correct: 3 },
+    { id: 'source', type: 'single', level: 4, title: '7 · 反馈来源识别', ...choiceBody('请回想刚才为您提供反馈的是谁？'), options: ['品牌创意组组长小艾', '品牌创意人工智能助手小A'], correct: 2 },
     ...scaleItems('fairness', FAIRNESS, { bold: true }),
     ...valenceItems(),
     // 元过程测量：指导语加粗 + 呈现前清屏（进入这一节先清空聊天流）
