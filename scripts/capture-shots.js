@@ -489,7 +489,7 @@ async function main() {
   const oneToOne = JSON.parse(await evaluate(`(() => { const d = document.querySelector('.phone-frame').contentDocument;
     const w = d.defaultView;
     return JSON.stringify({
-      sameTitle: d.title === '智能评估系统',
+      sameTitle: d.title === '人工智能助手——小A',
       hasTopbar: !!d.querySelector('.topbar'),
       hasComposer: !!(d.getElementById('composer') && d.getElementById('composer-input')),
       hasPageScreen: !!d.getElementById('page-screen'),

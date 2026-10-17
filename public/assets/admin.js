@@ -758,10 +758,12 @@ async function enterAdmin() {
   initLayout();
   const me = await api('/api/auth/me');
   state.user = me.user;
+  renderSidebarAvatar();
   await Promise.all([loadMeta(), reloadExperiments(), reloadQuestionnaires()]);
   $('login-view').classList.add('hidden');
   $('admin-view').classList.remove('hidden');
   handleRoute();
+  consumePendingImport();       // 分享链接（?import=CODE）进入时自动打开「新建」弹窗并预填编号
 }
 
 // 切到未登录视图：管理端整页换成一屏「登录卡片 + 问卷入口 + 备案号」
@@ -2952,7 +2954,7 @@ function renderExpList() {
     el('p', 'panel-sub', '实验是可复用的题目模板：一套题目 + 计时默认值。问卷「插入实验」时整组复制其题目，复制后即可逐条修改。')
   );
   const btn = el('button', 'primary-btn', '+ 新建实验');
-  btn.onclick = () => createExperimentDirect({ copyFrom: null });
+  btn.onclick = () => openNewItemModal({ kind: 'exp' });
   head.append(box, btn);
   $main.appendChild(head);
 
@@ -2979,11 +2981,13 @@ function renderExpList() {
     const actions = el('div', 'row-actions');
     const bCopy = el('button', 'ghost-btn', '复制');
     bCopy.onclick = (e) => { e.stopPropagation(); createExperimentDirect({ copyFrom: exp }); };
+    const bShare = el('button', 'ghost-btn', '分享');
+    bShare.onclick = (e) => { e.stopPropagation(); openShareModal({ kind: 'exp', id: exp.id, name: exp.name }); };
     const bDel = el('button', 'ghost-btn danger', '删除');
     bDel.onclick = (e) => { e.stopPropagation(); removeExperiment(exp); };
     const bEdit = el('button', 'ghost-btn', '进入编辑');
     bEdit.onclick = (e) => { e.stopPropagation(); location.hash = `#/exp/${exp.id}`; };
-    actions.append(bCopy, bDel, bEdit);
+    actions.append(bCopy, bShare, bDel, bEdit);
     td6.appendChild(actions);
     row.appendChild(td6);
     row.onclick = () => { location.hash = `#/exp/${exp.id}`; };
@@ -3105,13 +3109,110 @@ function numberedCopyTitle(base, existingTitles) {
   }
 }
 
+// 分享编号解析：接受纯编号，也接受整条链接（被试链接 ?q= / 分享链接 ?import=）；解析不出来返回空串
+function extractShareCode(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return '';
+  const hit = text.match(/[?&](?:q|import)=([A-Za-z0-9_-]+)/);
+  const candidate = hit ? hit[1] : text;
+  return /^[A-Za-z0-9_-]{4,64}$/.test(candidate) ? candidate.toLowerCase() : '';
+}
+
+// 分享弹窗：编号 = 问卷 / 实验自身 id（列表里已显示的那串），其他管理者在「新建」弹窗中粘贴即复制
+function openShareModal({ kind, id, name }) {
+  const isExp = kind === 'exp';
+  const body = el('div');
+  body.appendChild(el('p', 'modal-note',
+    `把「${name}」的编号发给其他管理者账号：在「${isExp ? '实验管理' : '问卷管理'} → 新建」弹窗里粘贴编号，即可复制一份完全相同的${isExp ? '实验模板' : '问卷'}（新编号、新链接，作答数据互不影响）。`));
+  const codeRow = el('div', 'link-row');
+  const codeInput = el('input');
+  codeInput.type = 'text';
+  codeInput.readOnly = true;
+  codeInput.value = id;
+  codeInput.addEventListener('click', () => codeInput.select());
+  const codeCopy = el('button', 'ghost-btn', '复制编号');
+  codeCopy.type = 'button';
+  codeCopy.onclick = () => copyText(id, '编号已复制');
+  codeRow.append(codeInput, codeCopy);
+  body.appendChild(codeRow);
+  const shareUrl = `${location.origin}/admin?import=${encodeURIComponent(id)}${isExp ? '&as=exp' : ''}`;
+  const linkRow = el('div', 'link-row');
+  const linkInput = el('input');
+  linkInput.type = 'text';
+  linkInput.readOnly = true;
+  linkInput.value = shareUrl;
+  linkInput.addEventListener('click', () => linkInput.select());
+  const linkCopy = el('button', 'ghost-btn', '复制链接');
+  linkCopy.type = 'button';
+  linkCopy.onclick = () => copyText(shareUrl, '分享链接已复制');
+  linkRow.append(linkInput, linkCopy);
+  body.appendChild(linkRow);
+  openModal({ title: isExp ? '分享实验模板' : '分享问卷', body, confirmLabel: '完成', hideCancel: true, onConfirm: closeModal });
+}
+
+// 「新建」弹窗：编号留空 = 新建空白（与原来「+ 新建」一键行为一致）；填了编号 = 按编号复制（可跨账号）
+function openNewItemModal({ kind, prefillCode = '' }) {
+  const isExp = kind === 'exp';
+  const body = el('div');
+  const nameField = makeField(isExp ? '实验名称（可选）' : '问卷名称（可选）', '');
+  nameField.input.placeholder = isExp ? UNNAMED_EXP : UNNAMED_Q;
+  const codeField = makeField('分享编号（可选）', prefillCode);
+  codeField.input.placeholder = '粘贴编号，或整条问卷 / 分享链接';
+  body.append(nameField.wrap, codeField.wrap);
+  body.appendChild(el('p', 'modal-note',
+    `填写分享编号会按编号复制一份${isExp ? '实验模板' : '问卷'}到你的账号（题目相同，链接与作答数据独立）；留空则新建空白${isExp ? '实验模板' : '问卷'}。`));
+  openModal({
+    title: isExp ? '新建实验模板' : '新建问卷',
+    body,
+    confirmLabel: '创建',
+    onConfirm: async () => {
+      const rawCode = codeField.input.value.trim();
+      const code = extractShareCode(rawCode);
+      if (rawCode && !code) throw new Error('编号格式不正确：请粘贴编号，或完整的问卷 / 分享链接');
+      const title = nameField.input.value.trim();
+      if (code) {
+        const res = await api(isExp ? '/api/admin/experiment/import' : '/api/admin/questionnaire/import',
+          { body: isExp ? { code, name: title } : { code, title } });
+        closeModal();
+        if (isExp) {
+          await reloadExperiments();
+          renderExpList();
+          toast(`已复制为「${res.experiment.name}」，点击「进入编辑」修改`);
+        } else {
+          await reloadQuestionnaires();
+          renderQList();
+          toast(`已复制为「${res.questionnaire.title}」，点击「编辑」修改`);
+        }
+        return;
+      }
+      // 空白新建：立即创建并进入编辑器，与原来的「+ 新建」按钮行为一致
+      closeModal();
+      if (isExp) await createExperimentDirect({ copyFrom: null, name: title });
+      else await createQuestionnaireDirect({ copyFrom: null, title });
+    }
+  });
+  nameField.input.focus();
+}
+
+// 分享链接 /admin?import=CODE[&as=exp]：登录进入后跳到对应列表并打开「新建」弹窗预填编号
+function consumePendingImport() {
+  const params = new URLSearchParams(location.search);
+  const raw = params.get('import') || '';
+  if (!raw) return;
+  const kind = params.get('as') === 'exp' ? 'exp' : 'q';
+  const code = extractShareCode(raw);
+  try { history.replaceState(null, '', location.pathname + location.hash); } catch { /* 忽略 */ }
+  location.hash = kind === 'exp' ? '#/exp' : '#/q';
+  if (code) openNewItemModal({ kind, prefillCode: code });
+}
+
 // 直接创建（免填名）：新建立即进入编辑器；复制停留在列表页（自动编号（1）（2）…）
-async function createExperimentDirect({ copyFrom }) {
+async function createExperimentDirect({ copyFrom, name: customName }) {
   let created;
   try {
     const name = copyFrom
       ? numberedCopyTitle(copyFrom.name, state.experiments.map((e) => e.name))
-      : UNNAMED_EXP;
+      : (String(customName || '').trim() || UNNAMED_EXP);
     created = (await api('/api/admin/experiment/create', { body: { name, copyFrom: copyFrom ? copyFrom.id : '' } })).experiment;
   } catch (err) {
     toast(err.message || '创建失败，请重试');
@@ -3160,7 +3261,7 @@ function renderQList() {
   );
   const headActions = el('div', 'head-actions');
   const btn = el('button', 'primary-btn', '+ 新建问卷');
-  btn.onclick = () => createQuestionnaireDirect({ copyFrom: null });
+  btn.onclick = () => openNewItemModal({ kind: 'q' });
   headActions.append(btn);
   head.append(box, headActions);
   $main.appendChild(head);
@@ -3220,9 +3321,11 @@ function renderQList() {
     bData.onclick = (e) => { e.stopPropagation(); location.hash = `#/q/${q.id}/data`; };
     const bCopy = el('button', 'ghost-btn', '复制');
     bCopy.onclick = (e) => { e.stopPropagation(); createQuestionnaireDirect({ copyFrom: q }); };
+    const bShare = el('button', 'ghost-btn', '分享');
+    bShare.onclick = (e) => { e.stopPropagation(); openShareModal({ kind: 'q', id: q.id, name: q.title }); };
     const bDel = el('button', 'ghost-btn danger', '删除');
     bDel.onclick = (e) => { e.stopPropagation(); removeQuestionnaire(q); };
-    actions.append(bQr, bEdit, bData, bCopy, bDel);
+    actions.append(bQr, bEdit, bData, bShare, bCopy, bDel);
     td6.appendChild(actions);
     row.appendChild(td6);
     row.addEventListener('dblclick', () => { location.hash = `#/q/${q.id}`; });
@@ -3234,12 +3337,12 @@ function renderQList() {
 }
 
 // 直接创建（免填名）：新建立即进入编辑器；复制停留在列表页（自动编号（1）（2）…）
-async function createQuestionnaireDirect({ copyFrom }) {
+async function createQuestionnaireDirect({ copyFrom, title: customTitle }) {
   let created;
   try {
     const title = copyFrom
       ? numberedCopyTitle(copyFrom.title, state.questionnaires.map((q) => q.title))
-      : UNNAMED_Q;
+      : (String(customTitle || '').trim() || UNNAMED_Q);
     created = (await api('/api/admin/questionnaire/create', { body: { title, copyFrom: copyFrom ? copyFrom.id : '' } })).questionnaire;
   } catch (err) {
     toast(err.message || '创建失败，请重试');
@@ -3763,6 +3866,36 @@ function avatarNode(user, size) {
 async function saveMyAvatar(dataUrl) {
   const res = await api('/api/auth/avatar', { body: { avatar: dataUrl } });
   state.user.avatar = res.avatar;
+  renderSidebarAvatar();          // 侧边栏「设置」行的头像同步更新
+}
+
+// 侧边栏「设置」行最右侧的当前账号头像（未上传时显示用户名首字母）
+function renderSidebarAvatar() {
+  const slot = $('sidebar-user-avatar');
+  if (!slot || !state.user) return;
+  slot.innerHTML = '';
+  slot.appendChild(avatarNode(state.user, 22));
+}
+
+// 智能助手预览圆：设置过头像显示图片，否则显示默认的黑圈 + 白芯（与被试端品牌标识同构）
+function assistantNode(size) {
+  const wrap = el('div', 'assistant-preview' + (state.user.assistantAvatar ? ' has-img' : ''));
+  wrap.style.width = `${size}px`;
+  wrap.style.height = `${size}px`;
+  if (state.user.assistantAvatar) {
+    const img = el('img');
+    img.src = state.user.assistantAvatar;
+    img.alt = '助手头像';
+    wrap.appendChild(img);
+  }
+  return wrap;
+}
+
+// 保存本账号的助手展示配置（头像 / 名称），成功后回填 state.user
+async function saveAssistantConfig(patch) {
+  const res = await api('/api/auth/assistant', { body: patch });
+  state.user.assistantAvatar = res.assistant.avatar;
+  state.user.assistantName = res.assistant.name;
 }
 
 // 头像裁剪弹窗：圆形视窗内拖动照片 / 滚轮缩放，确认后按可视区裁成 256×256
@@ -3831,7 +3964,13 @@ function openAvatarCropper(src, onDone) {
     onConfirm: async () => {
       const out = document.createElement('canvas');
       out.width = out.height = 256;
-      out.getContext('2d').drawImage(img, -x / scale, -y / scale, SIZE / scale, SIZE / scale, 0, 0, 256, 256);
+      // 源矩形 = 圆形视口在图片上的可视区：图片先按 (SIZE - w) / 2 居中摆放，拖动再叠加 x/y，
+      // 所以起点除了 -x / scale，还必须带上居中量 (natural*scale - SIZE) / 2 / scale。
+      // 漏掉居中量时，非正方形图片（宽或高超出视口）会裁到偏左上的一半——
+      // 表现就是「上传后头像只显示一半、有偏移」。
+      const sx = (img.naturalWidth * scale - SIZE) / (2 * scale) - x / scale;
+      const sy = (img.naturalHeight * scale - SIZE) / (2 * scale) - y / scale;
+      out.getContext('2d').drawImage(img, sx, sy, SIZE / scale, SIZE / scale, 0, 0, 256, 256);
       await onDone(out.toDataURL('image/jpeg', 0.88));
     }
   });
@@ -3943,6 +4082,78 @@ function renderSettings() {
     }
   });
   panel.appendChild(fileInput);
+
+  // 智能助手（头像 / 名称）：被试端聊天页顶栏与每条助手消息旁展示；跟随本账号，未设置回落默认
+  const secAssistant = sectionHead('智能助手', '被试端聊天页顶部与每条助手消息旁展示。头像支持 PNG / JPG / WebP，自动压缩后保存；名称留空则使用默认名称。');
+  const assistantRow = el('div', 'avatar-row');
+  const assistantBox = assistantNode(72);
+  assistantRow.appendChild(assistantBox);
+  const aFileBtn = el('button', 'ghost-btn', '上传助手头像');
+  aFileBtn.type = 'button';
+  const aFileInput = el('input');
+  aFileInput.type = 'file';
+  aFileInput.accept = 'image/*';
+  aFileInput.classList.add('hidden');
+  const aResetBtn = el('button', 'ghost-btn', '恢复默认圆形');
+  aResetBtn.type = 'button';
+  const aBtnRow = el('div', 'avatar-btns');
+  aBtnRow.append(aFileBtn, aResetBtn);
+  assistantRow.appendChild(aBtnRow);
+  secAssistant.appendChild(assistantRow);
+
+  const assistantNameField = makeField('助手名称（留空使用默认）', state.user.assistantName || '');
+  assistantNameField.input.placeholder = '人工智能助手——小A';
+  assistantNameField.input.maxLength = 40;
+  secAssistant.appendChild(assistantNameField.wrap);
+  const aNameRow = el('div', 'avatar-btns');
+  const aNameSaveBtn = el('button', 'primary-btn', '保存助手名称');
+  aNameSaveBtn.type = 'button';
+  aNameSaveBtn.onclick = async () => {
+    const name = assistantNameField.input.value.trim();
+    aNameSaveBtn.disabled = true;
+    try {
+      await saveAssistantConfig({ name });
+      toast(name ? '助手名称已更新' : '已恢复默认助手名称');
+    } catch (err) {
+      if (!maybeSessionExpired(err)) toast(err.message || '保存失败，请重试');
+    } finally {
+      aNameSaveBtn.disabled = false;
+    }
+  };
+  aNameRow.appendChild(aNameSaveBtn);
+  secAssistant.appendChild(aNameRow);
+  panel.appendChild(secAssistant);
+
+  aFileBtn.addEventListener('click', () => aFileInput.click());
+  aFileInput.addEventListener('change', () => {
+    const file = aFileInput.files && aFileInput.files[0];
+    aFileInput.value = '';
+    if (!file) return;
+    if (!/^image\//.test(file.type)) { toast('请选择图片文件'); return; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      openAvatarCropper(reader.result, async (dataUrl) => {
+        try {
+          await saveAssistantConfig({ avatar: dataUrl });
+          assistantBox.replaceWith(assistantNode(72));
+          toast('助手头像已更新');
+        } catch (err) {
+          if (!maybeSessionExpired(err)) toast(err.message || '助手头像保存失败');
+        }
+      });
+    };
+    reader.readAsDataURL(file);
+  });
+  aResetBtn.addEventListener('click', async () => {
+    try {
+      await saveAssistantConfig({ avatar: '' });
+      assistantBox.replaceWith(assistantNode(72));
+      toast('已恢复默认助手头像');
+    } catch (err) {
+      if (!maybeSessionExpired(err)) toast(err.message || '操作失败');
+    }
+  });
+  panel.appendChild(aFileInput);
 
   // 账号信息
   const secInfo = sectionHead('账号信息');

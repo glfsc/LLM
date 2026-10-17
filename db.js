@@ -163,6 +163,8 @@ ensureColumnInt('responses', 'timed_out');    // 是否曾经到点未交（0/1�
 ensureColumnInt('sessions', 'clear_seq');
 ensureColumnInt('users', 'token_epoch');       // 旧库补齐：登录世代号（一账号单设备 / 改密踢下线）
 db.exec('UPDATE users SET token_epoch = 1 WHERE token_epoch IS NULL');
+ensureColumn('users', 'assistant_avatar');     // 智能助手头像（data URL，各自账号一套，被试端按问卷归属展示）
+ensureColumn('users', 'assistant_name');       // 智能助手名称（留空回落页面内置默认）
 
 // 旧库升级：早期版本遗留的表一并清理（本轮为重建式升级，不做数据迁移）
 for (const t of [
@@ -816,7 +818,7 @@ function createUser({ username, password, role, avatar }) {
   return userPayload(getUser(id));
 }
 
-function updateUser(id, { username, role, password, avatar } = {}) {
+function updateUser(id, { username, role, password, avatar, assistantAvatar, assistantName } = {}) {
   const row = getUser(id);
   if (!row) return null;
   const sets = ['updated_at = ?'];
@@ -836,6 +838,14 @@ function updateUser(id, { username, role, password, avatar } = {}) {
   if (avatar != null) {
     sets.push('avatar = ?');
     args.push(avatar || null);
+  }
+  if (assistantAvatar != null) {
+    sets.push('assistant_avatar = ?');
+    args.push(assistantAvatar || null);
+  }
+  if (assistantName != null) {
+    sets.push('assistant_name = ?');
+    args.push(assistantName || null);
   }
   if (password) {
     if (String(password).length < 6) throw new Error('密码至少 6 位');
@@ -860,6 +870,16 @@ function deleteUser(id) {
 
 function listUsers() {
   return db.prepare('SELECT * FROM users ORDER BY created_at ASC, rowid ASC').all().map(userPayload);
+}
+
+// 智能助手展示配置（头像 / 名称）：被试端按问卷归属账号取，管理端预览按当前登录账号取；
+// 未设置返回空串，前端回落到内置的默认圆形标识与默认名称
+function getAssistantConfig(ownerId) {
+  const row = db.prepare('SELECT assistant_avatar, assistant_name FROM users WHERE id = ?').get(String(ownerId || ''));
+  return {
+    avatar: (row && row.assistant_avatar) || '',
+    name: (row && row.assistant_name) || ''
+  };
 }
 
 // 登录世代号（一账号单设备 / 改密踢下线）：签发的 token 带上当时的值，
@@ -1481,6 +1501,7 @@ module.exports = {
   updateUserPassword,
   deleteUser,
   listUsers,
+  getAssistantConfig,
   getTokenEpoch,
   bumpTokenEpoch,
   getExperiment,

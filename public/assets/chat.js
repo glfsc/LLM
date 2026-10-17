@@ -230,6 +230,30 @@ function clearDraft(itemId) {
 
 /* ---------------------------------------------------------------- 消息渲染 */
 
+// 智能助手展示配置（顶栏品牌 + 每条助手消息头像）：由服务端随 bootstrap 下发（跟随问卷归属账号），
+// 未设置时保持页面内置的默认圆形标识与默认名称
+const assistantConfig = { avatar: '', name: '' };
+
+function applyAssistantConfig(boot) {
+  if (!boot) return;
+  if (typeof boot.assistantAvatar === 'string') assistantConfig.avatar = boot.assistantAvatar;
+  if (typeof boot.assistantName === 'string') assistantConfig.name = boot.assistantName;
+  const dot = document.querySelector('.topbar .brand-dot');
+  if (dot && assistantConfig.avatar) {
+    const img = document.createElement('img');
+    img.src = assistantConfig.avatar;
+    img.alt = '助手头像';
+    dot.textContent = '';
+    dot.appendChild(img);
+    dot.classList.add('has-img');
+  }
+  if (assistantConfig.name) {
+    const nameEl = document.querySelector('.topbar .brand-name');
+    if (nameEl) nameEl.textContent = assistantConfig.name;
+    document.title = assistantConfig.name;
+  }
+}
+
 function appendUserMessage(text, itemId) {
   const row = el('div', 'msg user answered');
   if (itemId) row.dataset.itemId = itemId;
@@ -241,9 +265,16 @@ function appendUserMessage(text, itemId) {
   return row;
 }
 
-// AI 消息左侧的系统圈圈图标（全流程对话化）
+// AI 消息左侧头像：设置过助手头像时显示图片，否则保持默认的系统圈圈（全流程对话化）
 function aiAvatar() {
-  return el('span', 'ai-avatar');
+  const node = el('span', 'ai-avatar' + (assistantConfig.avatar ? ' has-img' : ''));
+  if (assistantConfig.avatar) {
+    const img = el('img');
+    img.src = assistantConfig.avatar;
+    img.alt = '助手头像';
+    node.appendChild(img);
+  }
+  return node;
 }
 
 function appendAiMessageStatic(content, thinkingText, thinkMs) {
@@ -2024,10 +2055,13 @@ async function init() {
     const done = forceFresh || IS_PREVIEW ? null : loadCompletedFinal();
     if (!sid && done) {
       renderFinalPage(done.title, done.text);
+      // 终态页纯本地呈现（不请求 bootstrap），助手形象顺带补取一次：取不到就保持默认
+      api(bootstrapUrl('')).then(applyAssistantConfig).catch(() => {});
       return;
     }
     const boot = await api(bootstrapUrl(sid));
     if (gen !== streamEpoch) return;
+    applyAssistantConfig(boot);
     if (boot.session) {
       state.sessionId = boot.session.id;
       storeSession(boot.session.id);

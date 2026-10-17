@@ -103,7 +103,7 @@ node server.js     # 等价 npm start；默认端口 3000，可用环境变量 P
 - 首次启动自动建库并灌入种子数据：2 个实验模板（组别3 / 组别4）+ 2 份预设问卷，管理员 `admin` / `admin123`。
 - **账号登录规则（一账号单设备）**：同一账号同时只允许一台设备在线 —— 在别处登录、本人改密、或管理员重置该账号密码，先前设备上的登录会立即失效（切回登录卡片并提示原因）；登出是持久化生效的，重启服务不会复活旧登录态。
 - 入口：`/` = 管理端（未登录时显示登录卡片，卡片底部一行可凭链接或短码进被试端，无需登录；`/admin` 等价）· `/chat?q=<8位短码>` 被试端。被试二维码在管理端「问卷管理」按组生成。
-- 部署到服务器见 [DEPLOY.md](DEPLOY.md)（本站在用 Windows Server + 宝塔；打包上线：`npm run deploy` → `dist/上线包.zip`，解压到站点根目录即原地覆盖）。
+- 部署到服务器见 [DEPLOY.md](DEPLOY.md)：本站在用 **Windows Server + 计划任务 `LLM_in_dm`**（应用目录 `C:\apps\experiment-chat\LLM_in_dm`）；更新流程 = 本地 `npm run deploy` → 把 `dist/上线包.zip` 传到 `C:\apps\experiment-chat\update\` → 执行 `C:\apps\experiment-chat\update.cmd nopause`（自动备份库、覆盖代码、重启、自检）。改了问卷文案/参数还要再跑一次 `node scripts\sync-group-content.js --apply`。
 
 ---
 

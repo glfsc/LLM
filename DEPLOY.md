@@ -63,37 +63,108 @@ README.md / DEPLOY.md   # 文档，不影响运行
 
 ---
 
-## 四、Windows Server + 宝塔面板（本站在用的方式）
+## 四、Windows Server 的更新流程（本站在用的方式）
 
-> 本站环境：Windows Server 2022 + 宝塔 Windows 面板，nginx 反向代理 + HTTPS 已配好。
-> 反代与证书不用动，**每次更新只需要做「覆盖代码 + 重启进程」两步**。
+> **本站真实环境（2026-10-17 现场核实；与"宝塔站点目录"那套无关，务必先看这张表）**
+>
+> | 项 | 实际值 |
+> |---|---|
+> | 应用目录 | `C:\apps\experiment-chat\LLM_in_dm` ← **不是** `C:\wwwroot\glfsc.ltd`（那里只有宝塔占位页） |
+> | 启动脚本 | `C:\apps\experiment-chat\start-server.cmd`（两行：`cd /d …\LLM_in_dm` + `C:\nodejs\node.exe server.js`，日志 `server.out.log`；**没有 `DB_PATH`**） |
+| Node 运行时 | `C:\nodejs\node.exe`（脚本里写死的绝对路径；`≥ 22.13` 是硬性下限） |
+> | 常驻方式 | Windows 计划任务 **`LLM_in_dm`**（不是宝塔的「Node 项目」） |
+> | 更新包目录 | `C:\apps\experiment-chat\update\`（把 zip 丢进去即可） |
+> | 一键更新脚本 | `C:\apps\experiment-chat\update.cmd`：备份库 → 7-Zip 解压 → robocopy 覆盖（跳过 `data.db`、`uploads`）→ `schtasks /end`+结束 node → `schtasks /run` → 自检 HTTP 200 |
+> | 备份目录 | `C:\apps\experiment-chat\backup\<时间戳>\`（库）、`backup\code-<时间戳>\`（代码）、`backup\old-db-<时间戳>\`（整库迁移） |
+> | 反向代理 / 证书 | 宝塔里已配好（nginx → `127.0.0.1:3000`，证书覆盖 `glfsc.ltd` + `www.glfsc.ltd`），更新时不用动 |
+>
+> 操作入口：腾讯云控制台的**自动化助手**（执行命令、看结果）+ **文件管理**（上传/删除文件）。
+>
+> **服务是怎么跑起来的（`start-server.cmd` 与计划任务 `LLM_in_dm` 的实况，排查从这里开始）**
+> - 启动脚本全文就两行：`cd /d C:\apps\experiment-chat\LLM_in_dm` + `"C:\nodejs\node.exe" server.js >> server.out.log 2>&1`
+>   —— **没有设 `DB_PATH`**，所以库就是 `LLM_in_dm\data.db`（连同 `-wal`/`-shm` 三个文件）。
+> - 计划任务以 **SYSTEM** 身份、最高权限运行；触发器**只有「开机时」**，`MultipleInstancesPolicy=IgnoreNew`（已有实例在跑时，再「运行」会被忽略），**没有失败自动重启**。
+> - 手工重启：`schtasks /end /tn LLM_in_dm` → `taskkill /IM node.exe /F` → `schtasks /run /tn LLM_in_dm`
+> - 看日志：`type C:\apps\experiment-chat\LLM_in_dm\server.out.log`（日志是追加写的，看最新几行即可）
+> - **腾讯云自动化助手是用 PowerShell 执行的**（不是 cmd.exe）：`dir /a` 这类 CMD 参数会直接报错。查文件用
+>   `Get-ChildItem C:\apps\experiment-chat\LLM_in_dm\data.db* | Select-Object Name,Length,LastWriteTime`；
+>   `schtasks` / `taskkill` / `curl.exe` 是外部程序照常可用（注意 PowerShell 里 `curl` 是 `Invoke-WebRequest` 的别名，要写 `curl.exe`）。
+> - （可选加固）任务属性里勾上「如果任务失败，按以下频率重新启动」，或在宝塔/计划任务里加一条定时 `curl http://127.0.0.1:3000/api/health` 的健康检查——现在的配置一旦 node 崩了，站点会一直 502 到人工重启。
 
-### 1. 覆盖代码
+### 1. 只改代码（最常见）
 
-1. 本地执行 `npm run deploy` → 得到 `dist/上线包.zip`。
-2. 宝塔面板 →「文件」→ 进站点目录（如 `C:\wwwroot\glfsc.ltd`）→ 上传这个 zip → 右键**解压到当前目录**（覆盖同名文件）。
-   - zip 里是站点目录的直接一层（`server.js`、`public\`、`vendor\`…），解压后不会多出一层文件夹。
-   - **包里不含 `data.db`**，解压不会碰到数据库。
-3. 重启 Node 进程（下一小节），然后打开 https://glfsc.ltd 验证：应看到管理端登录卡片，底部有备案号。
+1. 本地改完 → `npm run deploy` → `dist/上线包.zip`（不带 `node.exe`、**不带 `data.db`**）。
+2. 「文件管理」把 zip 上传到 `C:\apps\experiment-chat\update\`。
+3. 「自动化助手」执行：
 
-### 2. 让 Node 常驻（★ 别在远程桌面窗口里直接运行）
+   ```cmd
+   C:\apps\experiment-chat\update.cmd nopause
+   ```
 
-在远程桌面的 cmd 窗口里敲 `node server.js`，**退出远程桌面 / 注销后进程就会消失**（本站之前那次 502 就是这个原因）。
-用系统自带的「任务计划程序」把它做成开机自启的常驻进程：
+   （`nopause` 必须带：脚本结尾有个 `pause`，不带参数会一直卡住等按键。）
+4. 看到 `RESULT: OK - new version is running.` 即成功，浏览器打开 https://glfsc.ltd 抽查。
 
-1. Win+R → `taskschd.msc` → 右侧「创建任务」
-2. **常规**：名称随便（如 `实验对话系统`）；勾选「**不管用户是否登录都要运行**」和「使用最高权限运行」
-3. **触发器**：新建 →「启动时」（可再加一个「登录时」）
-4. **操作**：新建 → 程序或脚本填 `node.exe` 的完整路径（cmd 里 `where node` 可查）；
-   添加参数填 `server.js`；**起始于**填站点目录（如 `C:\wwwroot\glfsc.ltd`）
-5. **设置**：勾选「如果任务失败，按以下频率重新启动」
-6. 保存 → 右键该任务「运行」→ 浏览器打开 https://glfsc.ltd 验证
+> **`update.cmd` 自带的库备份只拷 `data.db` 这一个文件**。库在 WAL 模式下正常运行时，真实数据往往还在 `data.db-wal` 里（本站实测过 2.35 MB），所以那份备份可能是**不完整**的。做"要动数据"的操作前，请按第四节第 3 小节把**三个文件一起**另备一份。
 
-> 更新代码后重启进程：任务计划程序里右键该任务「结束」再「运行」；
-> 或在任务管理器里结束 `node.exe`，再右键任务「运行」。
-> 排查启动失败：把「操作」里的参数临时改成 `server.js > C:\wwwroot\glfsc.ltd\start.log 2>&1`（或改用 bat 包一层）看日志。
+> **覆盖 ≠ 镜像**：包里已删除的旧文件（如早期的 `public\index.html`、`public\connect.html`）会继续留在服务器上。它们不再被任何路由指向（`/connect` 返回 404；`/index.html` 由新代码映射到管理端），不影响运行；想干净可以手工删。
 
-### 3. 端口与防火墙
+### 2. 改了问卷文案 / 参数（`seed-content.js`、`db.js` 的题目）—— 代码之外还要同步一次库
+
+库里的题目是**创建时的快照**，光更新代码不会改它。改过文案或参数（反馈正文、选项、等待秒数、指导语、欢迎语…）后，除代码更新外还要执行一次内容同步：
+
+```cmd
+cd /d C:\apps\experiment-chat\LLM_in_dm
+node scripts\sync-group-content.js              :: 先预览（不写库），会打印与种子的逐字段差异
+node scripts\sync-group-content.js --apply      :: 应用：自动备份 data.db 到 .tmp\ 后写入
+```
+
+- 只影响两份预设问卷 + 两个实验模板；**问卷短码不变**，二维码与被试链接继续有效。
+- 顺序：先 `update.cmd`（代码就位）→ 再同步（写库）→ 需要时再重启任务。
+
+### 3. 想彻底换一个干净库（清空数据 / 换种子内容）
+
+两个必须先搞清的点：
+
+**① WAL：`data.db` 三个文件是一体的。** 主库可能只有 4 KB，真实数据在 `data.db-wal` 里（本站迁库前实测：`data.db` 4096 字节 + `data.db-wal` 2.35 MB）。**备份、移走、还原都必须三个一起做**，只动 `data.db` 会丢数据。
+
+**①-补：动库之前必须先真正停掉服务。** 服务还在跑时移动/改名 `data.db*`，Windows 上要么直接失败（文件占用），要么"移动看起来成功了、但进程仍握着那个文件继续读写"——**本站 2026-10-16 就踩到了这个**：三个库文件被移到了备份目录，服务却还在往那份文件里写，站点一切正常，但"换库"根本没发生（旧短码还在、会话编号继续往下排）。验收要点两条：
+- `dir /a /o-d <备份目录>\data.db*` —— 里面 `data.db-wal` 的时间戳若是**现在还在变新**，说明服务正写在备份目录那份文件上；
+- 停服务要用**管理员权限**：`schtasks /end /tn LLM_in_dm` 之后必须 `taskkill /IM node.exe /F`，再用 `tasklist | findstr node.exe` 确认**没有残留进程**（任务是 SYSTEM 身份运行的，非管理员会话里 taskkill 会失败）。
+
+**② 库的位置（已核实）**：`C:\apps\experiment-chat\LLM_in_dm\data.db`——`start-server.cmd` 没设 `DB_PATH`，脚本里的 `cd /d` 就是运行目录。动手前再确认一眼：
+
+```cmd
+dir /a /o-d C:\apps\experiment-chat\LLM_in_dm\data.db*    :: 三个文件的大小与时间
+```
+
+（若哪天真给启动脚本加了 `set DB_PATH=…`，就以那个路径为准——`type C:\apps\experiment-chat\start-server.cmd` 可以看出来。）
+
+> **判断"库有没有真的换掉"，要看短码，不要用 `node -e "require('./db')"`** —— 那条命令会在**当前目录**新建一个空库再灌种子，看起来"新库已就绪"，其实跟正在跑的实例毫无关系（本站 10-16 就踩过这个假验证）。正确判据：管理端「问卷管理」里两组问卷的 8 位短码**变了** → 库真的换了；**没变** → 还是老库（短码是随机生成的，绝不复用）。
+
+确认库的位置、并确认"可以清空"之后：
+
+```cmd
+schtasks /end /tn LLM_in_dm
+taskkill /IM node.exe /F
+cd /d C:\apps\experiment-chat\LLM_in_dm
+md C:\apps\experiment-chat\backup\old-db-20261017
+move data.db     C:\apps\experiment-chat\backup\old-db-20261017\
+move data.db-wal C:\apps\experiment-chat\backup\old-db-20261017\
+move data.db-shm C:\apps\experiment-chat\backup\old-db-20261017\
+schtasks /run /tn LLM_in_dm
+curl http://127.0.0.1:3000/api/health
+```
+
+新代码启动时会自动建库并灌入种子（两份问卷 + 两个模板 + 管理员 `admin` / `admin123`）。
+
+> **换库后的两件必做**：① 问卷短码变了 → 各组二维码 / 被试链接**要重新导出**；② 管理员密码回到初始值 `admin123`，登录后立刻改。
+
+### 4. 回退
+
+- **回代码**：把 `backup\code-<时间戳>\` 覆盖回 `LLM_in_dm`，或把上一版 `上线包.zip` 再走一次 `update.cmd`。
+- **回数据库**：停服 → 把 `backup\old-db-<时间戳>\` 的三个文件放回库所在目录 → 启服。
+
+### 5. 端口与防火墙（已配好，一般不动）
 
 - 只放行 `80`、`443`；**不要对公网开放 3000**（应用只监听本机，由 nginx 反代过去）。
 - 确认 nginx 配置里 `proxy_pass http://127.0.0.1:3000;`，且 `server_name` 同时含 `glfsc.ltd www.glfsc.ltd`。
@@ -224,17 +295,18 @@ sudo certbot --nginx -d glfsc.ltd
   参数键（如 `delay`）在新模型里不生效导致的。**跑一次内容同步即可修好**（问卷 ID 不变，二维码/被试链接不受影响；
   只动两份预设问卷 + 两个实验模板，你自己新建的问卷不受影响）：
 
-  ```bash
-  cd 站点目录
-  node scripts/sync-group-content.js            # 先预览（不写库），核对差异
+  ```cmd
+  cd /d C:\apps\experiment-chat\LLM_in_dm
+  node scripts\sync-group-content.js            :: 先预览（不写库），核对差异
   node scripts/sync-group-content.js --apply    # 自动备份 data.db 到 .tmp/ 后写入
   # 完事重启 Node 进程
   ```
 
   脚本在上线包里（`scripts/sync-group-content.js`）。同步的备份落在站点目录的 `.tmp/` 下。
   老库里你自己试答留下的测试会话，同步后题号可能对不上，正式收数据前清掉即可（管理端数据页删会话）。
-- **想彻底重来**（库里还没有真实数据时最省事）：停服务 → 把 `data.db`、`data.db-wal`、`data.db-shm` **改名**成 `data.db.bak-日期`（别直接删，留个后悔药）→ 启动 → 自动建新库并灌入预设模板与问卷，管理员 `admin` / `admin123`（**登录后立刻改密码**）。
-- **备份**：最稳妥是先停服务再拷贝（PM2：`pm2 stop experiment-chat`，拷完 `pm2 start`）；不停服时建议拷贝前执行 `sqlite3 data.db ".backup backup.db"`（需装 sqlite3），或连同 `-wal` / `-shm` 三个文件一起拷
+- **想彻底重来**（库里还没有真实数据时最省事）：停服 → 把 `data.db`、`data.db-wal`、`data.db-shm` **三个文件一起改名/移走**（别直接删，留个后悔药）→ 启动 → 自动建新库并灌入预设模板与问卷，管理员 `admin` / `admin123`（**登录后立刻改密码**）。
+  Windows 上的完整命令见第四节第 3 小节；判断"确实换了库"看问卷短码是否变化。
+- **备份**：最稳妥是先停服务再拷贝（**三个文件一起拷**：`data.db`、`data.db-wal`、`data.db-shm`）；不停服时建议先执行 `sqlite3 data.db ".backup backup.db"`（需装 sqlite3）再拷
 - **换机迁移**：停服 → 拷贝 `data.db`（三个文件）→ 新机启动，无需其他操作
 - **重置数据库**（⚠️ 清空全部问卷与作答数据，仅测试用）：停服后运行 `npm run reset-db`
 - **把库放到项目之外（可选，推荐）**：默认库在项目根目录。用 `DB_PATH` 可以指到别处，让数据库不落在程序目录里——将来即使再出现文件读取类漏洞，也读不到库：
@@ -258,7 +330,7 @@ sudo certbot --nginx -d glfsc.ltd
 - [ ] **修改管理员密码**（必须！账号 `admin` / 初始密码 `admin123`）：登录后进入左下角「设置 → 修改密码」直接修改，无需命令行
       （老版本只有密码没有账号，升级到本版后账号固定填 `admin`）
 - [ ] 打开 `https://glfsc.ltd` 确认根路径就是管理端（未登录时是登录卡片，底部有 ICP 备案号），`https://www.glfsc.ltd` 同样能打开
-- [ ] Node 进程已做成开机自启的常驻服务（Windows 见第四节第 2 小节；**不要在远程桌面窗口里直接跑**）
+- [ ] Node 进程由计划任务 **`LLM_in_dm`** 常驻（Windows 见第四节；**不要在远程桌面窗口里直接跑**，退出登录就没了）
 
 - [ ] 服务器防火墙 / 安全组只放行 `22`、`80`、`443`，**不要对公网开放 3000**
 - [ ] Nginx 反代必须带上 `X-Forwarded-For` / `X-Real-IP`（第四节的配置已包含）：按 IP 的访问限流靠它识别真实来源，
@@ -319,4 +391,4 @@ SQLite 单写者的特性也不适合多进程同时写。PM2 用默认的单实
 | 访问 502 Bad Gateway | Node 进程没起来：`pm2 status` / `pm2 logs` 检查，或端口与 `proxy_pass` 不一致 |
 | 端口被占用 | 换端口启动：`PORT=8080 node server.js`（同步改 Nginx `proxy_pass`） |
 | 导出的 xlsx 打不开 | 确认 `xlsx.js` 已上传到服务器 |
-| 宝塔面板部署 | 用「网站 → Node 项目」添加，启动文件选 `server.js`，端口 3000，Node 版本切到 22+，再对该站点设置反向代理到 `127.0.0.1:3000` |
+| 宝塔面板部署 | 本站**不走宝塔托管**（应用在 `C:\apps\experiment-chat\LLM_in_dm`，由计划任务 `LLM_in_dm` 拉起，宝塔只负责 nginx 反代与证书）——见第四节。若换到别的机器要用宝塔托管：用「网站 → Node 项目」添加，启动文件选 `server.js`，端口 3000，Node 版本 22+，再对该站点设置反向代理到 `127.0.0.1:3000` |

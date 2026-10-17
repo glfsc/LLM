@@ -44,6 +44,9 @@ input, textarea, [contenteditable="true"] {
 .brand { display: flex; align-items: center; gap: 9px; min-width: 0; flex: 1 1 auto; }
 .brand-dot { width: 18px; height: 18px; border-radius: 50%; background: var(--accent); position: relative; flex: 0 0 auto; }
 .brand-dot::after { content: ""; position: absolute; inset: 5.5px; border-radius: 50%; background: #fff; }
+/* 管理者设置了助手头像：品牌圆换成图片（隐藏默认白芯伪元素） */
+.brand-dot.has-img::after { content: none; }
+.brand-dot img { width: 100%; height: 100%; border-radius: 50%; object-fit: cover; display: block; }
 .brand-name { font-size: 13.5px; font-weight: 600; white-space: nowrap; }
 .brand-sub {
   font-size: 11.5px; color: var(--muted); border-left: 1px solid var(--border); padding-left: 9px;
@@ -81,6 +84,9 @@ input, textarea, [contenteditable="true"] {
   background: var(--accent); position: relative; margin-top: 2px;
 }
 .ai-avatar::after { content: ""; position: absolute; inset: 7px; border-radius: 50%; background: #fff; }
+/* 同顶栏：设置过助手头像时显示图片头像 */
+.ai-avatar.has-img::after { content: none; }
+.ai-avatar img { width: 100%; height: 100%; border-radius: 50%; object-fit: cover; display: block; }
 .msg.ai .ai-text { font-size: 16px; font-weight: 500; line-height: 1.9; color: var(--fg-soft); word-break: break-word; }   /* 小四 */
 /* ---------------------------------------------------------------- 富文本正文（.rich）
    管理端「类 Word」编辑器能用的格式，在这里一一落地：六级标题、加粗 / 斜体 / 下划线 / 删除线、

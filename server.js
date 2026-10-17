@@ -476,6 +476,9 @@ function handleBootstrap(req, res, url) {
   if (!questionnaire) {
     return sendJson(res, 404, { error: 'questionnaire_not_found', message: '问卷不存在或链接已失效' });
   }
+  // 助手展示配置跟随问卷归属账号：每个管理者各有一套，未设置时前端回落内置默认圆形与名称
+  const ownerRow = store.getQuestionnaire(code);
+  const assistant = store.getAssistantConfig(ownerRow ? ownerRow.owner_id : '');
   let session = sid ? store.getSession(sid) : null;
   if (session && session.questionnaire_id !== code) session = null;                 // 防止跨问卷串数据
   if (session && session.status === 'in_progress') {
@@ -498,10 +501,17 @@ function handleBootstrap(req, res, url) {
   if (!session) {
     return sendJson(res, 200, {
       questionnaireTitle: questionnaire.title,
+      assistantAvatar: assistant.avatar,
+      assistantName: assistant.name,
       session: null, messages: [], action: null, nowMs: Date.now()
     });
   }
-  sendJson(res, 200, { questionnaireTitle: questionnaire.title, ...sessionPayload(session) });
+  sendJson(res, 200, {
+    questionnaireTitle: questionnaire.title,
+    assistantAvatar: assistant.avatar,
+    assistantName: assistant.name,
+    ...sessionPayload(session)
+  });
 }
 
 // POST /api/session { q }
@@ -1046,13 +1056,19 @@ function prunePreview() {
 // 定期清理：以前只在「新建预览」时顺带扫一遍，管理端一直开着不新建就永远不过期
 const previewSweeper = setInterval(prunePreview, 60 * 1000);
 if (previewSweeper && typeof previewSweeper.unref === 'function') previewSweeper.unref();
-function previewOf(id) {
-  const rec = previewStores.get(id);
+// 取预览记录（含创建时捕获的助手展示配置）；LRU：访问过就挪到末尾，淘汰时不会先淘汰「正在用」的那个
+function previewRecord(id) {
+  const key = String(id || '').trim();
+  const rec = previewStores.get(key);
   if (!rec) return null;
   rec.at = Date.now();
-  previewStores.delete(id);                     // LRU：访问过就挪到末尾，淘汰时不会先淘汰「正在用」的那个
-  previewStores.set(id, rec);
-  return rec.st;
+  previewStores.delete(key);
+  previewStores.set(key, rec);
+  return rec;
+}
+function previewOf(id) {
+  const rec = previewRecord(id);
+  return rec ? rec.st : null;
 }
 function destroyPreview(id) {
   const key = String(id || '').trim();
@@ -1069,7 +1085,8 @@ function seedPreviewSession(st, session) {
 
 // POST /api/admin/preview { items } —— 用编辑器里（可能还没保存）的题目建一个预览会话
 async function handleAdminPreviewCreate(req, res) {
-  if (!requireUser(req, res)) return;
+  const user = requireUser(req, res);
+  if (!user) return;
   const body = await readJsonBody(req);
   const items = store.normalizeItems(Array.isArray(body.items) ? body.items : []);
   if (!items.length) return sendJson(res, 400, { error: 'empty_items', message: '还没有题目，无法预览' });
@@ -1079,19 +1096,34 @@ async function handleAdminPreviewCreate(req, res) {
   if (Number.isFinite(speed0) && speed0 > 0) st.timeScale = Math.min(60, speed0);
   const session = st.createSession({ questionnaireId: 'preview', seq: 1, items, userAgent: 'preview' });
   seedPreviewSession(st, session);
-  previewStores.set(session.id, { st, at: Date.now() });
+  // 预览里的助手形象 = 当前登录账号的设置（预览会话本身不带登录态，这里捕获一份随记录下发）
+  previewStores.set(session.id, { st, at: Date.now(), assistant: store.getAssistantConfig(user.id) });
   sendJson(res, 200, { previewId: session.id, url: `/chat?preview=${session.id}` });
 }
 
 // 预览端点不校验管理端登录：previewId 本身是不可猜的能力凭证（10 位随机、内存态、1 小时过期），
 // 与真实被试端的 session id 同构——iframe 里的被试端页面本来就没有管理端 token。
 async function handlePreviewBootstrap(req, res, url) {
-  const st = previewOf((url.searchParams.get('preview') || '').trim());
-  if (!st) return sendJson(res, 404, { error: 'preview_expired', message: '预览已过期，请刷新预览' });
+  const rec = previewRecord((url.searchParams.get('preview') || '').trim());
+  if (!rec) return sendJson(res, 404, { error: 'preview_expired', message: '预览已过期，请刷新预览' });
+  const st = rec.st;
+  const assistant = rec.assistant || { avatar: '', name: '' };
   const sid = (url.searchParams.get('session') || '').trim();
   const session = sid ? st.getSession(sid) : null;
-  if (!session) return sendJson(res, 200, { questionnaireTitle: '预览', session: null, messages: [], replay: [], action: null, nowMs: Date.now() });
-  sendJson(res, 200, { questionnaireTitle: '预览', ...sessionPayload(session, st) });
+  if (!session) {
+    return sendJson(res, 200, {
+      questionnaireTitle: '预览',
+      assistantAvatar: assistant.avatar,
+      assistantName: assistant.name,
+      session: null, messages: [], replay: [], action: null, nowMs: Date.now()
+    });
+  }
+  sendJson(res, 200, {
+    questionnaireTitle: '预览',
+    assistantAvatar: assistant.avatar,
+    assistantName: assistant.name,
+    ...sessionPayload(session, st)
+  });
 }
 
 async function handlePreviewStep(req, res) {
@@ -1109,8 +1141,10 @@ async function handlePreviewStep(req, res) {
 
 async function handlePreviewSession(req, res) {
   const body = await readJsonBody(req);
-  const st = previewOf(String(body.previewId || '').trim());
-  if (!st) return sendJson(res, 404, { error: 'preview_expired', message: '预览已过期，请刷新预览' });
+  const rec = previewRecord(String(body.previewId || '').trim());
+  if (!rec) return sendJson(res, 404, { error: 'preview_expired', message: '预览已过期，请刷新预览' });
+  const st = rec.st;
+  const assistant = rec.assistant || { avatar: '', name: '' };
   const created = st.createSession({ questionnaireId: 'preview', seq: 1, items: [], userAgent: 'preview' });
   // 题目来自预览会话创建时写入的 items（这里只重置进度：清空消息与作答）
   const source = [...st.sessions.values()][0];
@@ -1129,7 +1163,12 @@ async function handlePreviewSession(req, res) {
     return sendJson(res, 400, { error: 'empty_items', message: '预览题目为空，请刷新预览' });
   }
   seedPreviewSession(st, created);
-  sendJson(res, 200, { questionnaireTitle: '预览', ...sessionPayload(created, st) });
+  sendJson(res, 200, {
+    questionnaireTitle: '预览',
+    assistantAvatar: assistant.avatar,
+    assistantName: assistant.name,
+    ...sessionPayload(created, st)
+  });
 }
 
 // 预览进度跳转：把目标题之前的作答单元合成「预览已作答」，直接停在那一题。
@@ -1397,11 +1436,24 @@ function canAccess(user, row) {
   return !!row && row.owner_id === user.id;
 }
 
+// 登录态用户体：账号信息 + 智能助手展示配置（管理端「个人设置」回显用）
+function authUserPayload(user) {
+  const assistant = store.getAssistantConfig(user.id);
+  return {
+    id: user.id,
+    username: user.username,
+    role: user.role,
+    avatar: user.avatar || '',
+    assistantAvatar: assistant.avatar,
+    assistantName: assistant.name
+  };
+}
+
 async function handleRegister(req, res) {
   const body = await readJsonBody(req);
   try {
     const user = store.createUser({ username: body.username, password: body.password, role: 'user' });
-    sendJson(res, 200, { token: issueToken(user), user: { id: user.id, username: user.username, role: user.role, avatar: user.avatar } });
+    sendJson(res, 200, { token: issueToken(user), user: authUserPayload(user) });
   } catch (err) {
     sendJson(res, 400, { error: 'register_failed', message: err.message || '注册失败' });
   }
@@ -1422,7 +1474,7 @@ async function handleLogin(req, res) {
   store.bumpTokenEpoch(user.id);
   // 记住密码：勾选后签发 30 天的 token（前端存 localStorage，重开浏览器仍免登录）
   const ttl = body.remember ? TOKEN_TTL_REMEMBER : TOKEN_TTL;
-  sendJson(res, 200, { token: issueToken(user, ttl), ttlMs: ttl, user: { id: user.id, username: user.username, role: user.role, avatar: user.avatar } });
+  sendJson(res, 200, { token: issueToken(user, ttl), ttlMs: ttl, user: authUserPayload(user) });
 }
 
 async function handleLogout(req, res) {
@@ -1437,7 +1489,7 @@ async function handleLogout(req, res) {
 function handleMe(req, res) {
   const user = requireUser(req, res);
   if (!user) return;
-  sendJson(res, 200, { user: { id: user.id, username: user.username, role: user.role, avatar: user.avatar } });
+  sendJson(res, 200, { user: authUserPayload(user) });
 }
 
 async function handleChangePassword(req, res) {
@@ -1472,6 +1524,32 @@ async function handleAvatar(req, res) {
   }
   store.updateUser(user.id, { avatar });
   sendJson(res, 200, { avatar });
+}
+
+// POST /api/auth/assistant —— 保存本账号的智能助手展示配置（头像 / 名称，被试端聊天页展示）
+// 头像与个人头像同一口径（data URL、≤600KB）；名称留空 = 回落页面内置默认名称
+async function handleAssistantConfig(req, res) {
+  const user = requireUser(req, res);
+  if (!user) return;
+  const body = await readJsonBody(req);
+  const patch = {};
+  if (body.avatar != null) {
+    const avatar = String(body.avatar || '');
+    if (avatar && !/^data:image\/(png|jpe?g|webp|gif);base64,/.test(avatar)) {
+      return sendJson(res, 400, { error: 'bad_avatar', message: '仅支持图片文件' });
+    }
+    if (avatar.length > 600 * 1024) {
+      return sendJson(res, 400, { error: 'avatar_too_large', message: '图片过大，请换一张较小的图片' });
+    }
+    patch.assistantAvatar = avatar;
+  }
+  if (body.name != null) {
+    const name = String(body.name || '').trim();
+    if (name.length > 40) return sendJson(res, 400, { error: 'bad_name', message: '助手名称请控制在 40 个字以内' });
+    patch.assistantName = name;
+  }
+  if (Object.keys(patch).length) store.updateUser(user.id, patch);
+  sendJson(res, 200, { assistant: store.getAssistantConfig(user.id) });
 }
 
 // ---------------------------------------------------------------- 用户管理（管理员）
@@ -1591,6 +1669,30 @@ async function handleAdminExperimentCreate(req, res) {
   sendJson(res, 200, { experiment: store.createExperiment({ name, copyFrom: copyFrom || null, ownerId: user.id }) });
 }
 
+// 分享编号解析：接受纯编号（列表里显示的那串），也接受整条链接（被试链接 ?q= / 分享链接 ?import=）；
+// 解析不出来返回空串，由调用方回错误
+function normalizeShareCode(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return '';
+  const hit = text.match(/[?&](?:q|import)=([A-Za-z0-9_-]+)/);
+  const candidate = hit ? hit[1] : text;
+  return /^[A-Za-z0-9_-]{4,64}$/.test(candidate) ? candidate.toLowerCase() : '';
+}
+
+// POST /api/admin/experiment/import { code, name } —— 按分享编号把一份实验模板复制到当前账号
+// 编号 = 实验自身 id（不校验归属）：只复制题目，新编号、新归属，互不影响
+async function handleAdminExperimentImport(req, res) {
+  const user = requireUser(req, res);
+  if (!user) return;
+  const body = await readJsonBody(req);
+  const code = normalizeShareCode(body.code);
+  if (!code) return sendJson(res, 400, { error: 'bad_code', message: '请填写分享编号，或粘贴完整的分享链接' });
+  const source = store.getExperiment(code);
+  if (!source) return sendJson(res, 404, { error: 'import_source_not_found', message: '编号不存在或已删除，请核对后重试' });
+  const name = String(body.name || '').trim() || `${source.name}（副本）`;
+  sendJson(res, 200, { experiment: store.createExperiment({ name, copyFrom: code, ownerId: user.id }) });
+}
+
 async function handleAdminExperimentUpdate(req, res) {
   const user = requireUser(req, res);
   if (!user) return;
@@ -1650,6 +1752,20 @@ async function handleAdminQuestionnaireCreate(req, res) {
     return sendJson(res, 200, { questionnaire: copied });
   }
   sendJson(res, 200, { questionnaire: store.createQuestionnaire({ title, items: body.items, ownerId: user.id }) });
+}
+
+// POST /api/admin/questionnaire/import { code, title } —— 按分享编号把一份问卷复制到当前账号
+// 编号 = 问卷自身 id（也是被试链接里的 q=，不校验归属）：题目照抄，新编号、新链接、新归属；
+// 作答数据不随行（数据始终留在原问卷下）
+async function handleAdminQuestionnaireImport(req, res) {
+  const user = requireUser(req, res);
+  if (!user) return;
+  const body = await readJsonBody(req);
+  const code = normalizeShareCode(body.code);
+  if (!code) return sendJson(res, 400, { error: 'bad_code', message: '请填写分享编号，或粘贴完整的分享链接' });
+  const copied = store.copyQuestionnaire(code, String(body.title || '').trim(), user.id);
+  if (!copied) return sendJson(res, 404, { error: 'import_source_not_found', message: '编号不存在或已删除，请核对后重试' });
+  sendJson(res, 200, { questionnaire: copied });
 }
 
 async function handleAdminQuestionnaireUpdate(req, res) {
@@ -2298,6 +2414,7 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/auth/me' && req.method === 'GET') return handleMe(req, res);
     if (pathname === '/api/auth/password' && req.method === 'POST') return await handleChangePassword(req, res);
     if (pathname === '/api/auth/avatar' && req.method === 'POST') return await handleAvatar(req, res);
+    if (pathname === '/api/auth/assistant' && req.method === 'POST') return await handleAssistantConfig(req, res);
     if (pathname === '/api/admin/meta' && req.method === 'GET') return handleAdminMeta(req, res);
     if (pathname === '/api/admin/settings' && req.method === 'GET') return handleAdminGetSettings(req, res);
     if (pathname === '/api/admin/settings' && req.method === 'POST') return await handleAdminSaveSettings(req, res);
@@ -2312,6 +2429,7 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/admin/experiments' && req.method === 'GET') return handleAdminExperiments(req, res);
     if (pathname === '/api/admin/experiment' && req.method === 'GET') return handleAdminExperiment(req, res, url);
     if (pathname === '/api/admin/experiment/create' && req.method === 'POST') return await handleAdminExperimentCreate(req, res);
+    if (pathname === '/api/admin/experiment/import' && req.method === 'POST') return await handleAdminExperimentImport(req, res);
     if (pathname === '/api/admin/experiment/update' && req.method === 'POST') return await handleAdminExperimentUpdate(req, res);
     if (pathname === '/api/admin/experiment/delete' && req.method === 'POST') return await handleAdminExperimentDelete(req, res);
 
@@ -2319,6 +2437,7 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/admin/questionnaires' && req.method === 'GET') return handleAdminQuestionnaires(req, res);
     if (pathname === '/api/admin/questionnaire' && req.method === 'GET') return handleAdminQuestionnaire(req, res, url);
     if (pathname === '/api/admin/questionnaire/create' && req.method === 'POST') return await handleAdminQuestionnaireCreate(req, res);
+    if (pathname === '/api/admin/questionnaire/import' && req.method === 'POST') return await handleAdminQuestionnaireImport(req, res);
     if (pathname === '/api/admin/questionnaire/update' && req.method === 'POST') return await handleAdminQuestionnaireUpdate(req, res);
     if (pathname === '/api/admin/questionnaire/delete' && req.method === 'POST') return await handleAdminQuestionnaireDelete(req, res);
     if (pathname === '/api/admin/questionnaire/sessions' && req.method === 'GET') return handleAdminQuestionnaireSessions(req, res, url);
